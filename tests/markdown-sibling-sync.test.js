@@ -10,6 +10,7 @@ function loadMarkdownSyncFunctions() {
   const mainPath = path.resolve(__dirname, "..", "main.js");
   const source = `${fs.readFileSync(mainPath, "utf8")}
 module.exports.__test = {
+  LayoutEngine,
   markdownMindMapToCanvas,
   patchMarkdownFromCanvasPreservingSource
 };`;
@@ -39,6 +40,7 @@ module.exports.__test = {
 }
 
 const {
+  LayoutEngine,
   markdownMindMapToCanvas,
   patchMarkdownFromCanvasPreservingSource
 } = loadMarkdownSyncFunctions();
@@ -151,4 +153,36 @@ test("inserts a list sibling between its adjacent sibling subtrees", () => {
   assert.ok(patched);
   assertSiblingOrder(patched, ["  - Alpha", "    - Detail", "  - Bravo", "  - Charlie"]);
   assertSiblingStillBelongsToParent(patched, "Bravo");
+});
+
+test("measures very deep subtree heights iteratively", () => {
+  const engine = new LayoutEngine({ nodeHeight: 60, verticalGap: 20 });
+  const root = {
+    canvasNode: { height: 60 },
+    children: []
+  };
+  let cursor = root;
+  for (let index = 0; index < 12000; index++) {
+    const child = { canvasNode: { height: 60 }, children: [] };
+    cursor.children.push(child);
+    cursor = child;
+  }
+
+  assert.equal(engine.measureSubtreeHeight(root), 60);
+});
+
+test("balances wide roots in linear prefix-sum passes", () => {
+  const engine = new LayoutEngine({ nodeHeight: 60, verticalGap: 20 });
+  const root = {
+    canvasNode: { id: "root", x: 0, y: 0, width: 200, height: 60 },
+    children: Array.from({ length: 4000 }, (_, index) => ({
+      canvasNode: { id: `child-${index}`, x: 300, y: index * 80, width: 200, height: 60 },
+      children: [],
+      direction: "right"
+    }))
+  };
+  const { leftChildren, rightChildren } = engine.balanceRootChildren(root);
+
+  assert.equal(leftChildren.length + rightChildren.length, 4000);
+  assert.equal(Math.abs(leftChildren.length - rightChildren.length), 0);
 });

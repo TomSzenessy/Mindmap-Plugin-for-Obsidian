@@ -46,6 +46,16 @@
 	pointer-events: none;
 }
 
+/*
+ * Canvas gives the preview sizer flex-grow, which stores spare height below
+ * the final Markdown block. Let Canvas's matching ::before/::after spacers
+ * divide that height evenly in mind-map cards and in their hidden clones.
+ */
+.mindvas-mindmap-mode .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer,
+.mindvas-measurement-host .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer {
+	flex: 0 0 auto;
+}
+
 /* Card dimensions are derived from rendered content in Mindmap mode. */
 .mindvas-mindmap-mode .canvas-node-resizer {
 	display: none !important;

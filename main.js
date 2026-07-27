@@ -351,7 +351,7 @@ var { LiveSizingController } = (() => {
           data.mindmapPendingResize = Array.from(stored);
         else
           delete data.mindmapPendingResize;
-        data.mindmapLayoutVersion = 15;
+        data.mindmapLayoutVersion = 16;
         canvas.setData(data);
         canvas.requestSave();
       };
@@ -6912,7 +6912,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     const canvasData = canvas.getData();
     const pendingResizeIds = new Set(Array.isArray(canvasData.mindmapPendingResize) ? canvasData.mindmapPendingResize : []);
-    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 15;
+    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 16;
     if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust")) {
       delete canvasData.mindmapAutoAdjust;
       canvas.setData(canvasData);
@@ -7639,6 +7639,41 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       await nextFrame();
       if (!isCurrent())
         return /* @__PURE__ */ new Map();
+      // Tables deliberately clip/wrap their cells at the current card width,
+      // which hides their intrinsic width from ordinary scroll measurements.
+      // Probe rigid content at max-content in the hidden clone, then restore
+      // normal Canvas wrapping before the final height pass.
+      const probedStyles = [];
+      const probeStyle = (element, declarations) => {
+        probedStyles.push([element, element.getAttribute("style")]);
+        for (const [property, value] of declarations)
+          element.style.setProperty(property, value, "important");
+      };
+      for (const { sizer } of entries) {
+        for (const element of Array.from(sizer.querySelectorAll("table"))) {
+          probeStyle(element, [
+            ["width", "max-content"],
+            ["max-width", "none"],
+            ["table-layout", "auto"]
+          ]);
+          for (const cell of Array.from(element.querySelectorAll("th, td"))) {
+            probeStyle(cell, [
+              ["max-width", "none"],
+              ["white-space", "nowrap"],
+              ["overflow", "visible"],
+              ["text-overflow", "clip"]
+            ]);
+          }
+        }
+        for (const element of Array.from(sizer.querySelectorAll("pre"))) {
+          probeStyle(element, [
+            ["width", "max-content"],
+            ["max-width", "none"]
+          ]);
+        }
+      }
+      if (probedStyles.length > 0)
+        await nextFrame();
       for (const entry of entries) {
         const { card, sizer, estimated, shell } = entry;
         let intrinsicWidth = 0;
@@ -7659,6 +7694,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         entry.targetWidth = width;
         shell.style.width = `${width}px`;
         shell.style.setProperty("--canvas-node-width", `${width}px`);
+      }
+      for (const [element, styleText] of probedStyles) {
+        if (styleText === null)
+          element.removeAttribute("style");
+        else
+          element.setAttribute("style", styleText);
+      }
+      // Resolve any remaining horizontal overflow after restoring the real
+      // wrapping rules. All cards advance together, so this remains batched.
+      for (let pass = 0; pass < 4; pass++) {
+        await nextFrame();
+        let grew = false;
+        for (const entry of entries) {
+          const overflow = Math.max(0, Number(entry.card.scrollWidth || 0) - Number(entry.card.clientWidth || 0));
+          if (overflow <= 0 || entry.targetWidth >= maxWidth)
+            continue;
+          const nextWidth = Math.min(maxWidth, entry.targetWidth + Math.ceil(overflow));
+          if (nextWidth <= entry.targetWidth)
+            continue;
+          entry.targetWidth = nextWidth;
+          entry.shell.style.width = `${nextWidth}px`;
+          entry.shell.style.setProperty("--canvas-node-width", `${nextWidth}px`);
+          grew = true;
+        }
+        if (!grew)
+          break;
       }
       // Solve Canvas's height-dependent flex spacers exactly. Starting at the
       // configured creation height also lets previously oversized cards shrink.

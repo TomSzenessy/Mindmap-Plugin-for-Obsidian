@@ -351,7 +351,7 @@ var { LiveSizingController } = (() => {
           data.mindmapPendingResize = Array.from(stored);
         else
           delete data.mindmapPendingResize;
-        data.mindmapLayoutVersion = 16;
+        data.mindmapLayoutVersion = 17;
         canvas.setData(data);
         canvas.requestSave();
       };
@@ -6912,7 +6912,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     const canvasData = canvas.getData();
     const pendingResizeIds = new Set(Array.isArray(canvasData.mindmapPendingResize) ? canvasData.mindmapPendingResize : []);
-    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 16;
+    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 17;
     if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust")) {
       delete canvasData.mindmapAutoAdjust;
       canvas.setData(canvasData);
@@ -7579,15 +7579,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         await Promise.all(batch.map(async (node) => {
           const estimated = this.getAutoNodeSize(node);
           const targetWidth = Math.max(minWidth, Math.min(maxWidth, estimated.width));
+          const initialHeight = String(node.text || "").trim() ? 1 : fallbackHeight;
           const shell = measurementDocument.createElement("div");
           shell.className = "canvas-node mindvas-measurement-node";
           Object.assign(shell.style, {
             position: "relative",
             display: "block",
             width: `${targetWidth}px`,
-            height: `${fallbackHeight}px`
+            height: `${initialHeight}px`
           });
-          shell.style.setProperty("--canvas-node-height", `${fallbackHeight}px`);
+          shell.style.setProperty("--canvas-node-height", `${initialHeight}px`);
           shell.style.setProperty("--canvas-node-width", `${targetWidth}px`);
           const content = calibrationContent.cloneNode(false);
           content.removeAttribute("id");
@@ -7625,7 +7626,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             sizer,
             estimated,
             targetWidth,
-            targetHeight: fallbackHeight
+            targetHeight: initialHeight
           });
         }));
         await nextFrame();
@@ -7721,8 +7722,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         if (!grew)
           break;
       }
-      // Solve Canvas's height-dependent flex spacers exactly. Starting at the
-      // configured creation height also lets previously oversized cards shrink.
+      // Solve Canvas's height-dependent flex spacers from the smallest valid
+      // height. The configured default remains creation/fallback geometry, not
+      // an automatic minimum for non-empty cards.
       for (let pass = 0; pass < 12; pass++) {
         await nextFrame();
         let grew = false;

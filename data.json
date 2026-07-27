@@ -3,14 +3,16 @@
   "horizontalGap": 80,
   "verticalGap": 20,
   "minNodeWidth": 180,
-  "maxNodeWidth": 1200,
+  "maxNodeWidth": 12000,
   "defaultNodeWidth": 300,
   "defaultNodeHeight": 60,
-  "maxNodeHeight": 2400,
+  "maxNodeHeight": 24000,
   "defaultMindmapMode": true,
   "wrapArrowNavigation": true,
-  "navigationConeAngle": 90,
   "navigationCrossAxisBuffer": 40,
   "navigationZoomPadding": 200,
-  "mouseNavigation": false
+  "mouseNavigation": false,
+  "exportMarkmapFrontmatter": true,
+  "markmapColorFreezeLevel": 2,
+  "navigationConeAngle": 90
 }

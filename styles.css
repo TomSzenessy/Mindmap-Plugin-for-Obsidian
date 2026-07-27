@@ -35,6 +35,32 @@
 	word-break: normal;
 }
 
+/* Real Markdown rendering for a one-time imported-card measurement pass. */
+.mindvas-measurement-host {
+	position: fixed;
+	z-index: -1;
+	inset-block-start: 0;
+	inset-inline-start: -100000px;
+	display: block;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+.mindvas-measurement-card {
+	box-sizing: border-box;
+	height: auto;
+	overflow: visible;
+	font: var(--font-text-size)/var(--line-height-normal) var(--font-text);
+}
+
+.mindvas-measurement-card .markdown-preview-sizer {
+	box-sizing: border-box;
+	min-height: 0;
+	overflow: visible;
+	overflow-wrap: break-word;
+	word-break: normal;
+}
+
 /* Card dimensions are derived from rendered content in Mindmap mode. */
 .mindvas-mindmap-mode .canvas-node-resizer {
 	display: none !important;
@@ -205,6 +231,22 @@
 	min-height: 260px;
 	resize: vertical;
 	font-family: var(--font-monospace);
+}
+
+.mindvas-export-form {
+	display: grid;
+	gap: 14px;
+	margin: 18px 0;
+}
+
+.mindvas-export-form label {
+	display: grid;
+	gap: 6px;
+	font-weight: var(--font-medium);
+}
+
+.mindvas-export-form select {
+	width: 100%;
 }
 
 .mindvas-print-frame {

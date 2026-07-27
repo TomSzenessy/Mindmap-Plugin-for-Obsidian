@@ -15,10 +15,10 @@ Create and navigate maps like a dedicated mind-mapping app, keep them automatica
 - **Keyboard-first authoring:** `Tab` creates a child, `Enter` creates a sibling, and typing edits the selected topic.
 - **Spatial arrow navigation:** move naturally to the nearest topic in any direction while the Canvas follows your selection.
 - **Automatic layout:** cards resize to their content and branches stay balanced and readable.
-- **Clean Markdown sync:** edit the map or its linked Markdown file with bidirectional updates and no generated HTML comments.
+- **Clean Markdown sync:** edit the map or its linked Markdown file with bidirectional updates.
 - **Rich content:** tasks, lists, links, LaTeX, code blocks, tables, images, PDFs, audio, video, and Obsidian embeds.
 - **Multiple maps per Canvas:** use several independent central topics in one workspace.
-- **Useful imports and exports:** Markdown, Markmap-style documents, Mermaid mindmaps, FreeMind `.mm`, and direct PDF export.
+- **Useful imports and exports:** Markdown, Markmap-style documents, Mermaid mindmaps, FreeMind `.mm`, PDF, PNG, and SVG.
 - **Nested outline:** browse, search, and jump through the complete map from the right sidebar.
 
 ToMindMap is inspired by the fluid workflows of [Xmind](https://xmind.com/) and the portable Markdown approach of [Markmap](https://markmap.js.org/), while remaining built around native [Obsidian Canvas](https://obsidian.md/canvas) files.
@@ -87,12 +87,13 @@ Mindmap shortcuts take priority over native Canvas shortcuts while Mindmap mode 
 | Reorder siblings | `Alt` + `↑` / `Alt` + `↓` |
 | Delete topic and branch | `Delete` or `Backspace` |
 | Delete topic but retain its children | `Mod` + `Delete` |
+| Undo / redo Canvas change | `Mod` + `Z` / `Mod` + `Shift` + `Z` |
 
 Central topics can be deleted. Most actions are also available from the Command Palette and can be assigned custom hotkeys in Obsidian.
 
 ## Automatic layout and navigation
 
-ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, manages card dimensions from their rendered content without routine scrollbars, and reflows only the part of the map affected by a change.
+ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, manages card dimensions from their rendered content without routine scrollbars, and reflows the affected mind map without disturbing other maps on the same Canvas.
 
 Arrow navigation is based on visible geometry rather than only parent/child relationships. It prefers well-aligned nearby topics, uses the viewport to resolve wider directional choices, wraps at map edges when enabled, and keeps the selected topic in view.
 
@@ -102,7 +103,7 @@ Choose **Sync to Markdown file** from the Canvas three-dot menu. A Canvas named 
 
 The files then sync in both directions:
 
-- Canvas content and hierarchy update the Markdown file.
+- Canvas content, hierarchy, and topic order update the Markdown file.
 - Markdown edits update and automatically lay out the Canvas.
 - Renaming either file keeps the link.
 - Deleting either file only detaches the other; it never deletes both.
@@ -121,7 +122,9 @@ Everything below the frontmatter remains character-for-character unchanged, incl
 - links, embeds, and media syntax;
 - the file's existing line-ending style.
 
-ToMindMap generates no node-ID comments and no `mindvas` wrapper comments. Stable topic IDs live only in frontmatter, leaving the document readable in Obsidian, Markmap, other Markdown tools, and version-control diffs.
+Stable topic IDs live only in frontmatter, leaving the document readable in Obsidian, Markmap, other Markdown tools, and version-control diffs.
+
+Canvas edits are applied as localized source changes. Existing notes are never regenerated into a canonical nested-list format: heading-based documents stay heading-based, and unrelated blocks remain untouched.
 
 Pixel coordinates are never stored in Markdown. The hierarchy is parsed into a fresh automatic layout, so the text file remains the portable source of structure.
 
@@ -146,17 +149,18 @@ ToMindMap understands heading/list-based Markdown used by Markmap, common Mermai
 
 ## Outline, import, and export
 
-The **Map outline** in the right sidebar shows the complete nested hierarchy and lets you search or jump to any topic.
+The **Map outline** in the right sidebar shows the complete nested hierarchy and lets you search or jump to any topic. Open it when needed with **Open mind map outline** from the Command Palette.
 
 The Canvas menu includes:
 
 - sync or detach Markdown;
 - copy the complete map as Markdown;
+- open the nested map outline;
+- export through one focused dialog;
 - import pasted Markdown or a Markdown file;
-- validate local media;
-- export the selection, viewport, or complete Canvas directly to PDF.
+- validate local media.
 
-PDF files are saved to the operating system's Downloads folder without opening a print dialog.
+The export dialog supports the selection, viewport, or complete map as PDF, PNG, or SVG, plus a complete Markdown file. Files are saved directly to the operating system's Downloads folder.
 
 ## Settings
 
@@ -174,6 +178,8 @@ Open **Settings → ToMindMap** to customize:
 ToMindMap works locally in your Obsidian vault. It has no account, telemetry, or hosted synchronization service. Remote media referenced by your own notes may still be loaded according to Obsidian's normal behavior.
 
 ## License
+
+MIT. See [LICENSE](LICENSE).
 
 ToMindMap is released under the [MIT License](LICENSE).
 

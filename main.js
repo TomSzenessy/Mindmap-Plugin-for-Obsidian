@@ -28,6 +28,831 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require("obsidian");
+// <tomindmap:module live-sizing>
+var { LiveSizingController } = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
+  function editorContent(node) {
+    const iframe = node.contentEl?.querySelector("iframe");
+    const document = iframe?.contentDocument;
+    return document?.querySelector(".cm-content") || null;
+  }
+
+  class LiveSizingController {
+    constructor(plugin, getGroupIds) {
+      this.plugin = plugin;
+      this.getGroupIds = getGroupIds;
+      this.queueCleanup = null;
+    }
+
+    getPreviewSizer(node) {
+      const iframe = node.contentEl?.querySelector("iframe");
+      try {
+        const inner = iframe?.contentDocument?.querySelector(".markdown-preview-sizer");
+        if (inner)
+          return inner;
+      } catch (_) {
+        // Canvas media can contain cross-origin frames; those are not previews.
+      }
+      return node.contentEl?.querySelector(".markdown-preview-sizer") || null;
+    }
+
+    waitForPreview(node, callback) {
+      if (this.getPreviewSizer(node) && !node.isEditing) {
+        callback();
+        return;
+      }
+      const contentEl = node.contentEl;
+      if (!contentEl || typeof MutationObserver === "undefined") {
+        this.plugin.trackedTimeout(() => {
+          if (!node.isEditing)
+            callback();
+        }, 100);
+        return;
+      }
+      let finished = false;
+      const finish = () => {
+        if (finished || node.isEditing || !this.getPreviewSizer(node))
+          return;
+        finished = true;
+        observer.disconnect();
+        this.plugin.pendingObservers.delete(observer);
+        callback();
+      };
+      const observer = new MutationObserver(() => this.plugin.trackedRaf(finish));
+      this.plugin.pendingObservers.add(observer);
+      observer.observe(contentEl, { childList: true, subtree: true });
+      for (const delay of [100, 250, 600, 1200])
+        this.plugin.trackedTimeout(finish, delay);
+    }
+
+    estimate(text) {
+      const settings = this.plugin.settings;
+      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
+      const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
+      const softMaxWidth = Math.min(maxWidth, Math.max(720, settings.defaultNodeWidth * 2.4));
+      const minHeight = settings.defaultNodeHeight;
+      const lines = String(text || "").split("\n").map((line) => line
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/^[\s>*#\-\d.)]+/, "")
+        .replace(/[*_`~[\]|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim());
+      const charWidth = 7.5;
+      const horizontalChrome = 44;
+      const lineHeight = 22;
+      const words = lines.flatMap((line) => line.split(/\s+/).filter(Boolean));
+      const longestWord = Math.max(0, ...words.map((word) => word.length * charWidth));
+      const firstWidth = Math.min(softMaxWidth, Math.max(minWidth, longestWord + horizontalChrome));
+      const lineCount = (width) => {
+        const available = Math.max(40, width - horizontalChrome);
+        let count = 0;
+        for (const line of lines) {
+          const lineWords = line.split(/\s+/).filter(Boolean);
+          if (lineWords.length === 0) {
+            count++;
+            continue;
+          }
+          let used = 0;
+          for (const word of lineWords) {
+            const wordWidth = word.length * charWidth;
+            if (used > 0 && used + charWidth + wordWidth > available) {
+              count++;
+              used = wordWidth;
+            } else {
+              used += (used > 0 ? charWidth : 0) + wordWidth;
+            }
+          }
+          count++;
+        }
+        return Math.max(1, count);
+      };
+      let best = null;
+      for (let width = Math.ceil(firstWidth / 10) * 10; width <= softMaxWidth; width += 20) {
+        const height = Math.max(minHeight, 28 + lineCount(width) * lineHeight);
+        const aspect = width / Math.max(1, height);
+        const score = width * height * (1 + Math.max(0, 1.1 - aspect) * 0.45 + Math.max(0, aspect - 5.5) * 0.08);
+        if (!best || score < best.score || score === best.score && height < best.height)
+          best = { width, height, score };
+      }
+      return best || { width: minWidth, height: minHeight };
+    }
+
+    measure(node) {
+      if (typeof node.text !== "string")
+        return { width: node.width, height: node.height };
+      const settings = this.plugin.settings;
+      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
+      const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
+      const minHeight = settings.defaultNodeHeight;
+      const maxHeight = settings.maxNodeHeight;
+      const rawText = node.isEditing ? editorContent(node)?.innerText || node.text : node.text;
+      const estimate = this.estimate(rawText);
+      const sizer = this.getPreviewSizer(node);
+      if (!sizer || node.isEditing) {
+        let intrinsicWidth = 0;
+        let overflowHeight = 0;
+        const elements = typeof node.contentEl?.querySelectorAll === "function"
+          ? Array.from(node.contentEl.querySelectorAll("*"))
+          : [];
+        for (const element of elements) {
+          const clientWidth = Number(element.clientWidth || 0);
+          const scrollWidth = Number(element.scrollWidth || 0);
+          if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+            intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 12);
+          const clientHeight = Number(element.clientHeight || 0);
+          const scrollHeight = Number(element.scrollHeight || 0);
+          if (clientHeight > 0 && scrollHeight > clientHeight + 1)
+            overflowHeight = Math.max(overflowHeight, node.height + scrollHeight - clientHeight + 12);
+        }
+        return {
+          width: Math.min(maxWidth, Math.max(estimate.width, intrinsicWidth)),
+          height: Math.min(maxHeight, Math.max(estimate.height, overflowHeight))
+        };
+      }
+
+      const iframe = node.contentEl?.querySelector("iframe");
+      const viewportWidth = Number(iframe?.clientWidth || sizer.clientWidth || 0);
+      const chromeWidth = Math.max(36, Number(node.width || 0) - viewportWidth);
+      let intrinsicWidth = 0;
+      const measurementElements = new Set([sizer]);
+      const addTree = (root) => {
+        if (!root)
+          return;
+        measurementElements.add(root);
+        if (typeof root.querySelectorAll === "function") {
+          for (const element of root.querySelectorAll("*"))
+            measurementElements.add(element);
+        }
+      };
+      addTree(sizer);
+      try {
+        addTree(iframe?.contentDocument?.documentElement);
+        addTree(iframe?.contentDocument?.body);
+      } catch (_) {
+        // Ignore cross-origin embedded media frames.
+      }
+      for (const element of measurementElements) {
+        const clientWidth = Number(element.clientWidth || 0);
+        const scrollWidth = Number(element.scrollWidth || 0);
+        if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+          intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 8);
+        const tag = String(element.tagName || "").toLowerCase();
+        if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tag))
+          intrinsicWidth = Math.max(intrinsicWidth, scrollWidth + chromeWidth, Number(element.offsetWidth || 0) + chromeWidth);
+      }
+      const width = Math.min(maxWidth, Math.max(minWidth, estimate.width, Math.ceil(intrinsicWidth / 10) * 10 || 0));
+      if (Math.abs(width - node.width) > 1)
+        return { width, height: Math.min(maxHeight, estimate.height) };
+
+      const children = Array.from(sizer.children);
+      const childrenHeight = children.reduce((sum, child) => sum + Number(child.offsetHeight || 0), 0);
+      const scrollHeight = Number(sizer.scrollHeight || 0);
+      const clientHeight = Number(sizer.clientHeight || 0);
+      let contentHeight = childrenHeight;
+      if (scrollHeight > clientHeight + 1)
+        contentHeight = Math.max(contentHeight, scrollHeight);
+      if (contentHeight <= 0)
+        contentHeight = Number(sizer.offsetHeight || 0);
+      const viewportHeight = Number(iframe?.clientHeight || clientHeight || 0);
+      const chromeHeight = Math.max(20, Number(node.height || 0) - viewportHeight);
+      const height = contentHeight > 0
+        ? Math.min(maxHeight, Math.max(minHeight, Math.ceil(contentHeight + chromeHeight + 10)))
+        : Math.min(maxHeight, estimate.height);
+      return { width, height };
+    }
+
+    apply(canvas, nodes, relayout = false) {
+      const changed = [];
+      for (const node of nodes) {
+        if (!node || node.isEditing)
+          continue;
+        const target = this.measure(node);
+        if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+          continue;
+        node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+        changed.push(node);
+      }
+      if (changed.length > 0) {
+        canvas.requestSave();
+        if (relayout)
+          this.plugin.relayoutAffectedBranches(canvas, changed);
+      }
+      return changed;
+    }
+
+    applyEstimates(canvas, nodes) {
+      let changed = false;
+      for (const node of nodes) {
+        if (!node || typeof node.text !== "string")
+          continue;
+        const target = this.estimate(node.text);
+        if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+          continue;
+        node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+        changed = true;
+      }
+      if (changed)
+        canvas.requestSave();
+    }
+
+    resizeNodes(canvas, nodes) {
+      const changed = this.apply(canvas, nodes, false);
+      if (changed.length === 0)
+        return;
+      for (const delay of [120, 280, 600])
+        this.plugin.trackedTimeout(() => this.resizeNodesRetry(canvas, nodes), delay);
+    }
+
+    resizeNodesRetry(canvas, nodes) {
+      if (!this.plugin.isAutoAdjustCanvas(canvas) || !this.plugin.isMindmapCanvas(canvas))
+        return;
+      this.apply(canvas, nodes, true);
+    }
+
+    resizeNodesWhenRendered(canvas, nodes) {
+      this.cancelQueue();
+      const groupIds = this.getGroupIds(canvas);
+      const pending = new Set(nodes.filter((node) => node && typeof node.text === "string" && !groupIds.has(node.id)).map((node) => node.id));
+      if (pending.size === 0) {
+        this.plugin.layoutEngine.layout(canvas);
+        this.plugin.updateGroupBounds(canvas);
+        return;
+      }
+      const requestedIds = new Set(pending);
+      const measuredIds = new Set();
+      const state = new Map();
+      let stopped = false;
+      let mutationObserver = null;
+      let resizeObserver = null;
+      let scanQueued = false;
+      let layoutTimer = null;
+
+      const cleanup = () => {
+        if (stopped)
+          return;
+        stopped = true;
+        mutationObserver?.disconnect();
+        resizeObserver?.disconnect();
+        if (mutationObserver)
+          this.plugin.pendingObservers.delete(mutationObserver);
+        if (resizeObserver)
+          this.plugin.pendingObservers.delete(resizeObserver);
+        if (layoutTimer !== null) {
+          clearTimeout(layoutTimer);
+          this.plugin.pendingTimers.delete(layoutTimer);
+        }
+        if (this.queueCleanup === cleanup)
+          this.queueCleanup = null;
+      };
+      this.queueCleanup = cleanup;
+
+      const recordCompletedSizing = () => {
+        const data = canvas.getData();
+        const stored = new Set(Array.isArray(data.mindmapPendingResize) ? data.mindmapPendingResize : []);
+        for (const id of measuredIds)
+          stored.delete(id);
+        if (stored.size > 0)
+          data.mindmapPendingResize = Array.from(stored);
+        else
+          delete data.mindmapPendingResize;
+        const allTopicsRequested = Array.from(canvas.nodes.values())
+          .filter((node) => !groupIds.has(node.id) && typeof node.text === "string")
+          .every((node) => requestedIds.has(node.id));
+        if (allTopicsRequested && pending.size === 0)
+          data.mindmapLayoutVersion = 10;
+        canvas.setData(data);
+        canvas.requestSave();
+      };
+
+      const scheduleLayout = () => {
+        if (layoutTimer !== null) {
+          clearTimeout(layoutTimer);
+          this.plugin.pendingTimers.delete(layoutTimer);
+        }
+        layoutTimer = setTimeout(() => {
+          this.plugin.pendingTimers.delete(layoutTimer);
+          layoutTimer = null;
+          if (stopped || !this.plugin.isMindmapCanvas(canvas))
+            return;
+          this.plugin.layoutEngine.layout(canvas);
+          this.plugin.updateGroupBounds(canvas);
+          if (pending.size === 0) {
+            recordCompletedSizing();
+            cleanup();
+          }
+        }, 220);
+        this.plugin.pendingTimers.add(layoutTimer);
+      };
+
+      const scan = () => {
+        scanQueued = false;
+        if (stopped || !this.plugin.isMindmapCanvas(canvas))
+          return;
+        const changed = [];
+        for (const id of [...pending]) {
+          const node = canvas.nodes.get(id);
+          if (!node) {
+            pending.delete(id);
+            continue;
+          }
+          const sizer = this.getPreviewSizer(node);
+          if (!sizer || node.isEditing)
+            continue;
+          try {
+            resizeObserver?.observe(sizer);
+          } catch (_) {
+            // Some Electron builds reject cross-document ResizeObserver targets.
+          }
+          const target = this.measure(node);
+          const signature = `${target.width}x${target.height}`;
+          const previous = state.get(id);
+          const isSame = Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1;
+          if (!isSame) {
+            node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+            changed.push(node);
+          }
+          const stable = isSame && previous?.signature === signature ? previous.stable + 1 : 0;
+          state.set(id, { signature, stable });
+          if (stable >= 2) {
+            pending.delete(id);
+            measuredIds.add(id);
+          }
+        }
+        if (changed.length > 0) {
+          canvas.requestSave();
+          this.plugin.relayoutAffectedBranches(canvas, changed);
+          scheduleLayout();
+        }
+        if (pending.size === 0)
+          scheduleLayout();
+      };
+      const queueScan = () => {
+        if (scanQueued || stopped)
+          return;
+        scanQueued = true;
+        this.plugin.trackedRaf(scan);
+      };
+
+      this.applyEstimates(canvas, nodes);
+      this.plugin.layoutEngine.layout(canvas);
+      this.plugin.updateGroupBounds(canvas);
+
+      // Canvas virtualizes distant cards. Measure every imported topic once in
+      // an invisible real Markdown renderer, then lay out the completed batch.
+      void this.plugin.measureMarkdownNodesOffscreen(
+        canvas,
+        nodes,
+        () => !stopped && !this.plugin.unloaded && this.plugin.isMindmapCanvas(canvas)
+      ).then((measurements) => {
+        if (stopped || measurements.size === 0)
+          return;
+        let changed = false;
+        for (const [id, target] of measurements) {
+          const node = canvas.nodes.get(id);
+          if (!node || node.isEditing)
+            continue;
+          pending.delete(id);
+          measuredIds.add(id);
+          if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+            continue;
+          node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+          changed = true;
+        }
+        if (changed)
+          canvas.requestSave();
+        scheduleLayout();
+      }).catch((error) => {
+        console.error("ToMindMap: initial card measurement failed", error);
+      });
+
+      if (canvas.wrapperEl && typeof MutationObserver !== "undefined") {
+        mutationObserver = new MutationObserver(queueScan);
+        mutationObserver.observe(canvas.wrapperEl, { childList: true, subtree: true });
+        this.plugin.pendingObservers.add(mutationObserver);
+      }
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(queueScan);
+        this.plugin.pendingObservers.add(resizeObserver);
+      }
+      for (const delay of [0, 80, 180, 350, 700, 1200, 2200, 4000, 7000])
+        this.plugin.trackedTimeout(scan, delay);
+    }
+
+    cancelQueue() {
+      if (this.queueCleanup)
+        this.queueCleanup();
+    }
+  }
+
+  module.exports = { LiveSizingController };
+  return module.exports;
+})();
+// </tomindmap:module live-sizing>
+// <tomindmap:module markdown-order>
+var MarkdownOrder = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
+  function topicNode(value) {
+    return value?.canvasNode || value;
+  }
+
+  function isStandaloneBlock(value) {
+    const text = String(topicNode(value)?.text || "").trim();
+    const lines = text.split("\n");
+    return /^(```|~~~|\$\$)/.test(text)
+      || /^(?:-{3,}|_{3,}|\*(?:\s*\*){2,})$/.test(text)
+      || /^>\s?/.test(text)
+      || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(text)
+      || /^!\[\[[^\]]+\]\]\s*$/.test(text)
+      || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(text)
+      || lines.length >= 2
+        && /^\s*\|.*\|\s*$/.test(lines[0])
+        && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
+  }
+
+  function compareTopToBottom(left, right) {
+    const a = topicNode(left);
+    const b = topicNode(right);
+    // A raw block must precede heading siblings at the same parent, otherwise
+    // Markdown would attach it to the last emitted heading and change the graph.
+    return Number(isStandaloneBlock(right)) - Number(isStandaloneBlock(left))
+      || (Number(a?.y) || 0) - (Number(b?.y) || 0)
+      || (Number(a?.x) || 0) - (Number(b?.x) || 0)
+      || String(a?.id || "").localeCompare(String(b?.id || ""));
+  }
+
+  /**
+   * Return siblings in the chronology readers expect from a radial mind map.
+   * Only a central topic splits its children into sides: right top-to-bottom,
+   * followed by left top-to-bottom. Inside either branch, reading order is
+   * simply top-to-bottom.
+   */
+  function orderChildren(parent, children, splitRootSides = false) {
+    const values = [...children];
+    if (!splitRootSides)
+      return values.sort(compareTopToBottom);
+    const parentNode = topicNode(parent);
+    const parentCenter = (Number(parentNode?.x) || 0) + (Number(parentNode?.width) || 0) / 2;
+    const sideRank = (value) => {
+      const node = topicNode(value);
+      const center = (Number(node?.x) || 0) + (Number(node?.width) || 0) / 2;
+      return center >= parentCenter ? 0 : 1;
+    };
+    return values.sort((left, right) => sideRank(left) - sideRank(right) || compareTopToBottom(left, right));
+  }
+
+  function canvasTopicPreorder(canvas, getGroupIds) {
+    const groupIds = getGroupIds(canvas);
+    const nodeById = new Map(
+      Array.from(canvas.nodes.values())
+        .filter((node) => !groupIds.has(node.id))
+        .map((node) => [node.id, node])
+    );
+    const childrenById = new Map(Array.from(nodeById.keys()).map((id) => [id, []]));
+    const childIds = new Set();
+    for (const edge of canvas.getData().edges || []) {
+      if (!nodeById.has(edge.fromNode) || !nodeById.has(edge.toNode))
+        continue;
+      childrenById.get(edge.fromNode).push(edge.toNode);
+      childIds.add(edge.toNode);
+    }
+    const position = (id) => nodeById.get(id);
+    const roots = Array.from(nodeById.keys())
+      .filter((id) => !childIds.has(id))
+      .sort((a, b) => position(a).y - position(b).y || position(a).x - position(b).x);
+    const result = [];
+    const visited = new Set();
+    const rootIds = new Set(roots);
+    const visit = (id) => {
+      if (visited.has(id))
+        return;
+      visited.add(id);
+      result.push(id);
+      const children = orderChildren(
+        position(id),
+        (childrenById.get(id) || []).map(position).filter(Boolean),
+        rootIds.has(id)
+      ).map((child) => child.id);
+      for (const child of children)
+        visit(child);
+    };
+    for (const root of roots)
+      visit(root);
+    for (const id of nodeById.keys())
+      visit(id);
+    return result;
+  }
+
+  function orderMatches(canvas, imported, getGroupIds) {
+    if (!imported)
+      return false;
+    const liveOrder = canvasTopicPreorder(canvas, getGroupIds);
+    const liveIds = new Set(liveOrder);
+    const sources = Array.isArray(imported.topicSources) ? imported.topicSources.filter((record) => liveIds.has(record.id)) : [];
+    if (sources.length !== liveOrder.length)
+      return false;
+    const desiredIndex = new Map(liveOrder.map((id, index) => [id, index]));
+    const children = new Map();
+    for (const record of sources) {
+      const key = record.parentId || "";
+      if (!children.has(key))
+        children.set(key, []);
+      children.get(key).push(record);
+    }
+    for (const records of children.values()) {
+      const desired = [...records].sort((left, right) => desiredIndex.get(left.id) - desiredIndex.get(right.id));
+      if (records.every((record, index) => desired[index]?.id === record.id))
+        continue;
+      if (canMoveSourceSiblings(records))
+        return false;
+    }
+    return true;
+  }
+
+  function canMoveSourceSiblings(records) {
+    if (records.length < 2)
+      return false;
+    if (records.every((record) => record.kind === "heading")) {
+      const level = records[0].level;
+      return records.every((record) => record.level === level);
+    }
+    if (records.every((record) => record.kind === "list")) {
+      const indent = records[0].indent || "";
+      return records.every((record) => (record.indent || "") === indent);
+    }
+    return false;
+  }
+
+  function reorderPreservingSource(markdown, canvas, dependencies) {
+    const {
+      getGroupIds,
+      parseDocument,
+      lineRecords,
+      withMetadata,
+      withoutLegacyComments,
+      identityKey,
+      identityLabel
+    } = dependencies;
+    let result = String(markdown || "");
+    const desiredOrder = canvasTopicPreorder(canvas, getGroupIds);
+    const desiredIndex = new Map(desiredOrder.map((id, index) => [id, index]));
+    const desiredChildren = new Map();
+    const addDesired = (parentId, id) => {
+      const key = parentId || "";
+      if (!desiredChildren.has(key))
+        desiredChildren.set(key, []);
+      desiredChildren.get(key).push(id);
+    };
+    const groupIds = getGroupIds(canvas);
+    const liveIds = new Set(Array.from(canvas.nodes.keys()).filter((id) => !groupIds.has(id)));
+    const liveParents = new Map();
+    for (const edge of canvas.getData().edges || []) {
+      if (liveIds.has(edge.fromNode) && liveIds.has(edge.toNode))
+        liveParents.set(edge.toNode, edge.fromNode);
+    }
+    for (const id of desiredOrder)
+      addDesired(liveParents.get(id), id);
+
+    for (let pass = 0; pass < Math.max(1, desiredOrder.length); pass++) {
+      const parsed = parseDocument(result);
+      const sourceById = new Map(parsed.topicSources.map((record) => [record.id, record]));
+      const sourceChildren = new Map();
+      for (const record of parsed.topicSources) {
+        const key = record.parentId || "";
+        if (!sourceChildren.has(key))
+          sourceChildren.set(key, []);
+        sourceChildren.get(key).push(record.id);
+      }
+      const mismatches = [];
+      for (const [parentKey, wanted] of desiredChildren) {
+        const current = sourceChildren.get(parentKey) || [];
+        if (current.length !== wanted.length)
+          continue;
+        const currentSet = new Set(current);
+        if (wanted.some((id) => !currentSet.has(id)) || wanted.every((id, index) => current[index] === id))
+          continue;
+        const siblingRecords = current.map((id) => sourceById.get(id)).filter(Boolean);
+        if (siblingRecords.length !== current.length || !canMoveSourceSiblings(siblingRecords))
+          continue;
+        let depth = 0;
+        let parent = parentKey || null;
+        const seen = new Set();
+        while (parent && !seen.has(parent)) {
+          seen.add(parent);
+          depth++;
+          parent = sourceById.get(parent)?.parentId || null;
+        }
+        mismatches.push({ parentKey, wanted, current, depth });
+      }
+      if (mismatches.length === 0)
+        break;
+      mismatches.sort((a, b) => b.depth - a.depth
+        || (desiredIndex.get(a.parentKey) || 0) - (desiredIndex.get(b.parentKey) || 0));
+      const mismatch = mismatches[0];
+      const records = lineRecords(result);
+      const descendants = (id, found = new Set()) => {
+        if (found.has(id))
+          return found;
+        found.add(id);
+        for (const child of sourceChildren.get(id) || [])
+          descendants(child, found);
+        return found;
+      };
+      const ranges = new Map();
+      let valid = true;
+      for (const id of mismatch.current) {
+        const topics = Array.from(descendants(id))
+          .map((candidate) => sourceById.get(candidate))
+          .filter(Boolean);
+        const startLine = Math.min(...topics.map((record) => record.startLine));
+        const endLine = Math.max(...topics.map((record) => record.endLine));
+        const first = records[startLine];
+        const last = records[endLine - 1];
+        if (!first || !last) {
+          valid = false;
+          break;
+        }
+        ranges.set(id, { start: first.start, end: last.end });
+      }
+      const ordered = mismatch.current.map((id) => ranges.get(id));
+      if (!valid || ordered.some((range) => !range))
+        break;
+      if (ordered.some((range, index) => index > 0 && ordered[index - 1].end > range.start))
+        break;
+      const gaps = ordered.slice(0, -1)
+        .map((range, index) => result.slice(range.end, ordered[index + 1].start));
+      const pieces = new Map(mismatch.current.map((id) => {
+        const range = ranges.get(id);
+        return [id, result.slice(range.start, range.end)];
+      }));
+      const replacement = mismatch.wanted
+        .map((id, index) => `${index > 0 ? gaps[index - 1] || "" : ""}${pieces.get(id) || ""}`)
+        .join("");
+      const updated = result.slice(0, ordered[0].start)
+        + replacement
+        + result.slice(ordered[ordered.length - 1].end);
+      if (updated === result)
+        break;
+      result = updated;
+    }
+
+    const liveById = new Map(Array.from(canvas.nodes.values()).map((node) => [node.id, node]));
+    return withMetadata(
+      withoutLegacyComments(result),
+      desiredOrder,
+      desiredOrder.map((id) => identityKey(liveById.get(id)?.text || "Untitled")),
+      desiredOrder.map((id) => identityLabel(liveById.get(id)?.text || "Untitled"))
+    );
+  }
+
+  module.exports = {
+    compareTopToBottom,
+    orderChildren,
+    canvasTopicPreorder,
+    orderMatches,
+    reorderPreservingSource
+  };
+  return module.exports;
+})();
+// </tomindmap:module markdown-order>
+// <tomindmap:module export>
+var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
+  function createExportMindMapModal(Modal) {
+  return class ExportMindMapModal extends Modal {
+    constructor(app, selectionAvailable, onExport) {
+      super(app);
+      this.selectionAvailable = selectionAvailable;
+      this.onExport = onExport;
+    }
+
+    onOpen() {
+      const { contentEl } = this;
+      contentEl.empty();
+      contentEl.createEl("h2", { text: "Export mind map" });
+      contentEl.createEl("p", {
+        text: "Choose a format and the part of the canvas to export."
+      });
+      const form = contentEl.createDiv({ cls: "mindvas-export-form" });
+      const formatLabel = form.createEl("label", { text: "Format" });
+      const format = formatLabel.createEl("select");
+      for (const [value, label] of [
+        ["pdf", "PDF"],
+        ["png", "Image (PNG)"],
+        ["svg", "SVG"],
+        ["markdown", "Markdown file"]
+      ])
+        format.createEl("option", { value, text: label });
+      const scopeLabel = form.createEl("label", { text: "Area" });
+      const scope = scopeLabel.createEl("select");
+      for (const [value, label] of [
+        ["whole", "Whole mind map"],
+        ["viewport", "Current viewport"],
+        ["selection", "Selection"]
+      ]) {
+        const option = scope.createEl("option", { value, text: label });
+        if (value === "selection" && !this.selectionAvailable)
+          option.disabled = true;
+      }
+      const hint = form.createDiv({ cls: "setting-item-description" });
+      const refresh = () => {
+        const markdown = format.value === "markdown";
+        scope.disabled = markdown;
+        if (markdown)
+          scope.value = "whole";
+        hint.setText(markdown
+          ? "Markdown exports the complete hierarchy without Canvas coordinates."
+          : "The exported file is saved to your Downloads folder.");
+      };
+      format.addEventListener("change", refresh);
+      refresh();
+      const actions = contentEl.createDiv({ cls: "modal-button-container" });
+      const cancel = actions.createEl("button", { text: "Cancel" });
+      const submit = actions.createEl("button", { text: "Export", cls: "mod-cta" });
+      cancel.addEventListener("click", () => this.close());
+      submit.addEventListener("click", () => {
+        const request = { format: format.value, scope: scope.value };
+        this.close();
+        void this.onExport(request);
+      });
+    }
+
+    onClose() {
+      this.contentEl.empty();
+    }
+  };
+  }
+
+  async function rasterizeSvg(svgInfo, ownerDocument, type = "image/png") {
+    const ownerWindow = ownerDocument.defaultView || window;
+    const maxDimension = 8192;
+    const scale = Math.min(2, maxDimension / Math.max(svgInfo.width, svgInfo.height));
+    const width = Math.max(1, Math.round(svgInfo.width * scale));
+    const height = Math.max(1, Math.round(svgInfo.height * scale));
+    const blob = new Blob([svgInfo.svg], { type: "image/svg+xml;charset=utf-8" });
+    const url = ownerWindow.URL.createObjectURL(blob);
+    try {
+      const image = new ownerWindow.Image();
+      image.decoding = "async";
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("Could not render the SVG"));
+        image.src = url;
+      });
+      const bitmap = ownerDocument.createElement("canvas");
+      bitmap.width = width;
+      bitmap.height = height;
+      const context = bitmap.getContext("2d");
+      if (!context)
+        throw new Error("Canvas rendering is unavailable");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      const encoded = await new Promise((resolve, reject) => bitmap.toBlob(
+        (value) => value ? resolve(value) : reject(new Error("Could not encode the image")),
+        type,
+        type === "image/jpeg" ? 0.94 : void 0
+      ));
+      return new Uint8Array(await encoded.arrayBuffer());
+    } finally {
+      ownerWindow.URL.revokeObjectURL(url);
+    }
+  }
+
+  function safeBaseName(value) {
+    return String(value || "Mind map")
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+      .trim() || "Mind map";
+  }
+
+  async function saveToDownloads(baseName, suffix, extension, content) {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    const downloads = path.join(os.homedir(), "Downloads");
+    await fs.promises.mkdir(downloads, { recursive: true });
+    const stem = `${safeBaseName(baseName)}${suffix ? ` - ${suffix}` : ""}`;
+    let output = path.join(downloads, `${stem}.${extension}`);
+    let counter = 2;
+    while (fs.existsSync(output))
+      output = path.join(downloads, `${stem} ${counter++}.${extension}`);
+    await fs.promises.writeFile(output, content);
+    return path.basename(output);
+  }
+
+  module.exports = {
+    createExportMindMapModal,
+    rasterizeSvg,
+    saveToDownloads
+  };
+  return module.exports;
+})();
+// </tomindmap:module export>
+var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
 
 // src/canvas/canvas-api.ts
 var import_obsidian = require("obsidian");
@@ -940,7 +1765,7 @@ var LayoutEngine = class {
       const childW = child.canvasNode.width || this.config.nodeWidth;
       const childX = direction === "right" ? rootX + rootW + this.config.horizontalGap : rootX - childW - this.config.horizontalGap;
       const tempPositions = /* @__PURE__ */ new Map();
-      const contour = this.layoutSubtree(
+      const layout = this.layoutSubtree(
         child,
         childX,
         0,
@@ -948,7 +1773,7 @@ var LayoutEngine = class {
         direction,
         tempPositions
       );
-      subtrees.push({ positions: tempPositions, contour });
+      subtrees.push({ positions: tempPositions, contour: layout.contour, rectangles: layout.rectangles });
     }
     const { yOffsets, combinedContour } = this.packSubtrees(subtrees);
     const contourExtents = Array.from(combinedContour.values());
@@ -972,14 +1797,15 @@ var LayoutEngine = class {
     positions.set(node.canvasNode.id, { x: nodeX, y: nodeY });
     const contour = /* @__PURE__ */ new Map();
     contour.set(depth, { top: nodeY, bottom: nodeY + nodeH });
+    const ownRectangle = { left: nodeX, right: nodeX + nodeW, top: nodeY, bottom: nodeY + nodeH };
     if (node.children.length === 0)
-      return contour;
+      return { contour, rectangles: [ownRectangle] };
     const childSubtrees = [];
     for (const child of node.children) {
       const childW = child.canvasNode.width || this.config.nodeWidth;
       const childX = direction === "right" ? nodeX + nodeW + this.config.horizontalGap : nodeX - childW - this.config.horizontalGap;
       const tempPositions = /* @__PURE__ */ new Map();
-      const childContour = this.layoutSubtree(
+      const childLayout = this.layoutSubtree(
         child,
         childX,
         0,
@@ -987,9 +1813,9 @@ var LayoutEngine = class {
         direction,
         tempPositions
       );
-      childSubtrees.push({ positions: tempPositions, contour: childContour });
+      childSubtrees.push({ positions: tempPositions, contour: childLayout.contour, rectangles: childLayout.rectangles });
     }
-    const { yOffsets, combinedContour } = this.packSubtrees(childSubtrees);
+    const { yOffsets, combinedContour, combinedRectangles } = this.packSubtrees(childSubtrees);
     const contourExtents = Array.from(combinedContour.values());
     const blockTop = Math.min(...contourExtents.map((extent) => extent.top));
     const blockBottom = Math.max(...contourExtents.map((extent) => extent.bottom));
@@ -1012,7 +1838,16 @@ var LayoutEngine = class {
         contour.set(d, { ...shifted });
       }
     }
-    return contour;
+    const rectangles = [ownRectangle];
+    for (const rectangle of combinedRectangles) {
+      rectangles.push({
+        left: rectangle.left,
+        right: rectangle.right,
+        top: rectangle.top + centerShift,
+        bottom: rectangle.bottom + centerShift
+      });
+    }
+    return { contour, rectangles };
   }
   /**
    * Pack an array of subtrees vertically using contour comparison.
@@ -1021,20 +1856,23 @@ var LayoutEngine = class {
    */
   packSubtrees(subtrees) {
     if (subtrees.length === 0) {
-      return { yOffsets: [], combinedContour: /* @__PURE__ */ new Map() };
+      return { yOffsets: [], combinedContour: /* @__PURE__ */ new Map(), combinedRectangles: [] };
     }
     const yOffsets = [0];
     const combinedContour = /* @__PURE__ */ new Map();
+    const combinedRectangles = (subtrees[0].rectangles || []).map((rectangle) => ({ ...rectangle }));
     for (const [d, ext] of subtrees[0].contour) {
       combinedContour.set(d, { top: ext.top, bottom: ext.bottom });
     }
     for (let i = 1; i < subtrees.length; i++) {
       const sub = subtrees[i];
       let shift = 0;
-      for (const [d, ext] of sub.contour) {
-        const prev = combinedContour.get(d);
-        if (prev !== void 0) {
-          const needed = prev.bottom + this.config.verticalGap - ext.top;
+      for (const rectangle of sub.rectangles || []) {
+        for (const previous of combinedRectangles) {
+          const overlapsHorizontally = rectangle.left < previous.right && rectangle.right > previous.left;
+          if (!overlapsHorizontally)
+            continue;
+          const needed = previous.bottom + this.config.verticalGap - rectangle.top;
           if (needed > shift)
             shift = needed;
         }
@@ -1052,8 +1890,16 @@ var LayoutEngine = class {
           combinedContour.set(d, { ...shifted });
         }
       }
+      for (const rectangle of sub.rectangles || []) {
+        combinedRectangles.push({
+          left: rectangle.left,
+          right: rectangle.right,
+          top: rectangle.top + shift,
+          bottom: rectangle.bottom + shift
+        });
+      }
     }
-    return { yOffsets, combinedContour };
+    return { yOffsets, combinedContour, combinedRectangles };
   }
   /**
    * Arrange multiple trees within a group using flow-based packing.
@@ -1614,6 +2460,9 @@ var KeyboardHandler = class {
       for (const key of ["Enter", "Delete", "Backspace", "Home"])
         registerPriorityShortcut(["Mod"], key);
       registerPriorityShortcut(["Mod"], "R");
+      registerPriorityShortcut(["Mod"], "Z");
+      registerPriorityShortcut(["Mod", "Shift"], "Z");
+      registerPriorityShortcut(["Mod"], "Y");
       registerPriorityShortcut(["Alt"], "ArrowUp");
       registerPriorityShortcut(["Alt"], "ArrowDown");
       priorityBindings.set(scope, bindings);
@@ -1731,6 +2580,20 @@ var KeyboardHandler = class {
     if (this.isEditableTarget(event.target))
       return;
     const primary = import_obsidian2.Platform.isMacOS ? event.metaKey : event.ctrlKey;
+    if (primary && !event.altKey && event.key.toLowerCase() === "z") {
+      this.consume(event);
+      if (event.shiftKey) {
+        canvas.redo?.();
+      } else {
+        canvas.undo?.();
+      }
+      return;
+    }
+    if (primary && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "y") {
+      this.consume(event);
+      canvas.redo?.();
+      return;
+    }
     if (event.key === "Tab" && !event.shiftKey && !primary && !event.altKey) {
       this.consume(event);
       this.addChild(canvas, node);
@@ -2155,6 +3018,7 @@ var KeyboardHandler = class {
     const oldY = node.y;
     node.moveTo({ x: node.x, y: target.y });
     target.moveTo({ x: target.x, y: oldY });
+    this.plugin.markMarkdownOrderDirty(canvas);
     this.finishMutation(canvas, tree.parent.canvasNode);
     this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
   }
@@ -3613,6 +4477,13 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
   const forest = buildForest(canvas).slice().sort((a, b) => a.canvasNode.y - b.canvasNode.y || a.canvasNode.x - b.canvasNode.x);
   if (forest.length === 0)
     return "";
+  const sortBranchChronology = (tree, isRoot = false) => {
+    tree.children = MarkdownOrder.orderChildren(tree.canvasNode, tree.children, isRoot);
+    for (const child of tree.children)
+      sortBranchChronology(child, false);
+  };
+  for (const root of forest)
+    sortBranchChronology(root, true);
   const allTrees = [];
   for (const root of forest)
     allTrees.push(root, ...getDescendants(root));
@@ -3680,11 +4551,9 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
   const emitHeadingChildren = (children, level) => {
     if (children.length === 0)
       return;
-    const subtreeContainsBlock = (tree) => isStandaloneMarkdownBlock(rawText(tree)) || tree.children.some(subtreeContainsBlock);
-    const groupContainsBlock = children.some(subtreeContainsBlock);
     const useHeadingLevel = level <= 6 && children.every((child) => {
       const raw = rawText(child);
-      return isStandaloneMarkdownBlock(raw) && child.children.length === 0 || markmapHeadingSafe(raw) && (groupContainsBlock || child.children.length > 0);
+      return isStandaloneMarkdownBlock(raw) && child.children.length === 0 || markmapHeadingSafe(raw);
     });
     if (!useHeadingLevel) {
       for (const child of children)
@@ -3737,13 +4606,13 @@ function parseMarkdownMindMapDocument(markdown) {
   let mermaidMode = false;
   let sawH1 = false;
   const frontmatterLines = [];
-  const addNode = (text, parent, explicitId) => {
+  const addNode = (text, parent, explicitId, source = null) => {
     const identity = extractTopicIdentity(text, explicitId);
     let id = identity.id || genId();
     while (usedIds.has(id))
       id = genId();
     usedIds.add(id);
-    const node = { id, legacyId: identity.id ? id : null, text: cleanImportedTopic(identity.text), position: "right", children: [] };
+    const node = { id, legacyId: identity.id ? id : null, text: cleanImportedTopic(identity.text), position: "right", children: [], source };
     if (parent)
       parent.children.push(node);
     else
@@ -3751,11 +4620,11 @@ function parseMarkdownMindMapDocument(markdown) {
     lastNode = node;
     return node;
   };
-  const addIndented = (text, indent, anchor) => {
+  const addIndented = (text, indent, anchor, source = null) => {
     while (listStack.length > 0 && listStack[listStack.length - 1].indent >= indent)
       listStack.pop();
     const parent = listStack.length > 0 ? listStack[listStack.length - 1].node : anchor;
-    const node = addNode(text, parent);
+    const node = addNode(text, parent, null, source);
     listStack.push({ indent, node });
     return node;
   };
@@ -3790,12 +4659,13 @@ function parseMarkdownMindMapDocument(markdown) {
     }
     const portableNodeMarker = line.match(/^\s*<!--\s*mindvas:node(?:\s+id=([A-Za-z0-9_-]+))?\s*-->\s*$/);
     if (portableNodeMarker) {
+      const startLine = index;
       const content = [];
       while (++index < lines.length && !/^\s*<!--\s*\/mindvas:node\s*-->\s*$/.test(lines[index]))
         content.push(lines[index]);
       const block = stripCommonIndent(content);
       if (block)
-        addNode(block, currentParent(), portableNodeMarker[1]);
+        addNode(block, currentParent(), portableNodeMarker[1], { startLine, endLine: index + 1, kind: "block", indent: "" });
       continue;
     }
     const fenceMatch = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_-]*)/);
@@ -3806,6 +4676,7 @@ function parseMarkdownMindMapDocument(markdown) {
           inFence = true;
           mindmapFence = true;
         } else {
+          const startLine = index;
           const wrapperIndent = (line.match(/^[ \t]*/) || [""])[0];
           const removeWrapperIndent = (value) => value.startsWith(wrapperIndent) ? value.slice(wrapperIndent.length) : value;
           const block = [removeWrapperIndent(line)];
@@ -3815,7 +4686,7 @@ function parseMarkdownMindMapDocument(markdown) {
             if (closingFence.test(lines[index]))
               break;
           }
-          addNode(block.join("\n"), currentParent());
+          addNode(block.join("\n"), currentParent(), null, { startLine, endLine: index + 1, kind: "block", indent: wrapperIndent });
         }
       } else {
         inFence = false;
@@ -3836,23 +4707,28 @@ function parseMarkdownMindMapDocument(markdown) {
       continue;
     }
     if (/^\s*\$\$\s*$/.test(line)) {
+      const startLine = index;
       const block = [line.trim()];
       while (++index < lines.length) {
         block.push(lines[index]);
         if (/^\s*\$\$\s*$/.test(lines[index]))
           break;
       }
-      addNode(block.join("\n"), currentParent());
+      addNode(block.join("\n"), currentParent(), null, { startLine, endLine: index + 1, kind: "block", indent: (line.match(/^[ \t]*/) || [""])[0] });
       continue;
     }
     if (/^\s*\|.*\|\s*$/.test(line) && index + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[index + 1])) {
+      const startLine = index;
+      const wrapperIndent = (line.match(/^[ \t]*/) || [""])[0];
       const block = [line.trimStart()];
       while (index + 1 < lines.length && /^\s*\|.*\|\s*$/.test(lines[index + 1]))
         block.push(lines[++index].trimStart());
-      addNode(block.join("\n"), currentParent());
+      addNode(block.join("\n"), currentParent(), null, { startLine, endLine: index + 1, kind: "block", indent: wrapperIndent });
       continue;
     }
     if (/^\s*>\s?/.test(line)) {
+      const startLine = index;
+      const wrapperIndent = (line.match(/^[ \t]*/) || [""])[0];
       const block = [line.trimStart()];
       while (index + 1 < lines.length) {
         if (/^\s*>\s?/.test(lines[index + 1])) {
@@ -3865,7 +4741,7 @@ function parseMarkdownMindMapDocument(markdown) {
         }
         break;
       }
-      addNode(block.join("\n"), currentParent());
+      addNode(block.join("\n"), currentParent(), null, { startLine, endLine: index + 1, kind: "block", indent: wrapperIndent });
       continue;
     }
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
@@ -3876,7 +4752,7 @@ function parseMarkdownMindMapDocument(markdown) {
       while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= level)
         headingStack.pop();
       const parent = headingStack.length > 0 ? headingStack[headingStack.length - 1].node : null;
-      const node = addNode(heading[2], parent);
+      const node = addNode(heading[2], parent, null, { startLine: index, endLine: index + 1, kind: "heading", level, prefix: `${heading[1]} ` });
       headingStack.push({ level, node });
       listAnchor = node;
       listStack.length = 0;
@@ -3888,7 +4764,7 @@ function parseMarkdownMindMapDocument(markdown) {
       const marker = list[2];
       const content = list[3];
       const preserved = /^\d/.test(marker) ? `${marker} ${content}` : /^\[[ xX]\]\s+/.test(content) ? `- ${content}` : content;
-      addIndented(preserved, indent, listAnchor);
+      addIndented(preserved, indent, listAnchor, { startLine: index, endLine: index + 1, kind: "list", indent: list[1], marker, prefix: `${list[1]}${marker} ` });
       continue;
     }
     const leading = line.match(/^([ \t]*)(.*)$/);
@@ -3897,14 +4773,14 @@ function parseMarkdownMindMapDocument(markdown) {
     if (!content)
       continue;
     if (mermaidMode || indent > 0) {
-      addIndented(content, indent, listAnchor);
+      addIndented(content, indent, listAnchor, { startLine: index, endLine: index + 1, kind: "plain", indent: leading[1], prefix: leading[1] });
       if (!listAnchor && listStack.length === 1)
         listAnchor = null;
       continue;
     }
     listStack.length = 0;
     const parent = listAnchor;
-    const node = addNode(content, parent);
+    const node = addNode(content, parent, null, { startLine: index, endLine: index + 1, kind: "plain", indent: leading[1], prefix: leading[1] });
     if (!parent)
       listAnchor = node;
   }
@@ -3992,26 +4868,34 @@ function parseMarkdownMindMapDocument(markdown) {
   const topicIds = orderedNodes.map((node) => node.id);
   const topicKeys = orderedNodes.map((node) => topicIdentityKey(node.text));
   const topicLabels = orderedNodes.map((node) => topicIdentityLabel(node.text));
+  const topicSources = orderedNodes.map((node) => ({
+    id: node.id,
+    parentId: orderedNodes.find((candidate) => candidate.children.includes(node))?.id || null,
+    ...node.source
+  }));
   const setPosition = (node, position) => {
     node.position = position;
     for (const child of node.children)
       setPosition(child, position);
   };
   for (const root of roots) {
-    let rightWeight = 0;
-    let leftWeight = 0;
     const weight = (node) => 1 + node.children.reduce((sum, child) => sum + weight(child), 0);
-    for (const child of root.children) {
-      const childWeight = weight(child);
-      const position = rightWeight <= leftWeight ? "right" : "left";
-      setPosition(child, position);
-      if (position === "right")
-        rightWeight += childWeight;
-      else
-        leftWeight += childWeight;
+    const weights = root.children.map(weight);
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    let prefix = 0;
+    let split = root.children.length > 0 ? 1 : 0;
+    let bestDifference = Infinity;
+    for (let index = 0; index <= root.children.length; index++) {
+      const difference = Math.abs(prefix - (total - prefix));
+      if (difference < bestDifference || difference === bestDifference && index > split) {
+        bestDifference = difference;
+        split = index;
+      }
+      prefix += weights[index] || 0;
     }
+    root.children.forEach((child, index) => setPosition(child, index < split ? "right" : "left"));
   }
-  return { roots, frontmatter, stableIdCount, metadataCurrent, topicIds, topicKeys, topicLabels };
+  return { roots, frontmatter, stableIdCount, metadataCurrent, topicIds, topicKeys, topicLabels, topicSources };
 }
 function parseMarkdownMindMap(markdown) {
   return parseMarkdownMindMapDocument(markdown).roots;
@@ -4029,7 +4913,7 @@ function markdownMindMapToCanvas(markdown, opts) {
     const height = layoutTree(root, 0, currentY, opts, nodes, edges);
     currentY += height + treeGap;
   }
-  return { nodes, edges, frontmatter: parsed.frontmatter, stableIdCount: parsed.stableIdCount, metadataCurrent: parsed.metadataCurrent, topicIds: parsed.topicIds, topicKeys: parsed.topicKeys, topicLabels: parsed.topicLabels, rootIds: roots.map((_, index) => {
+  return { nodes, edges, frontmatter: parsed.frontmatter, stableIdCount: parsed.stableIdCount, metadataCurrent: parsed.metadataCurrent, topicIds: parsed.topicIds, topicKeys: parsed.topicKeys, topicLabels: parsed.topicLabels, topicSources: parsed.topicSources, rootIds: roots.map((_, index) => {
     let seen = -1;
     for (const node of nodes) {
       if (!edges.some((edge) => edge.toNode === node.id)) {
@@ -4184,6 +5068,427 @@ function canvasMatchesImportedMarkdown(canvas, imported, canvasPath) {
   }
   return true;
 }
+function canvasOrderMatchesImportedMarkdown(canvas, imported) {
+  return MarkdownOrder.orderMatches(canvas, imported, getGroupIds);
+}
+function canvasTopicPreorder(canvas) {
+  return MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
+  if (false) {
+  const groupIds = getGroupIds(canvas);
+  const nodeById = new Map(Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id)).map((node) => [node.id, node]));
+  const childIds = /* @__PURE__ */ new Set();
+  const childrenById = /* @__PURE__ */ new Map();
+  for (const id of nodeById.keys())
+    childrenById.set(id, []);
+  for (const edge of canvas.getData().edges || []) {
+    if (!nodeById.has(edge.fromNode) || !nodeById.has(edge.toNode))
+      continue;
+    childrenById.get(edge.fromNode).push(edge.toNode);
+    childIds.add(edge.toNode);
+  }
+  const roots = Array.from(nodeById.keys()).filter((id) => !childIds.has(id)).sort((a, b) => {
+    const nodeA = nodeById.get(a);
+    const nodeB = nodeById.get(b);
+    return nodeA.y - nodeB.y || nodeA.x - nodeB.x;
+  });
+  const result = [];
+  const visited = /* @__PURE__ */ new Set();
+  const visit = (id) => {
+    if (visited.has(id))
+      return;
+    visited.add(id);
+    result.push(id);
+    const children = [...childrenById.get(id) || []].sort((a, b) => {
+      const nodeA = nodeById.get(a);
+      const nodeB = nodeById.get(b);
+      const deltaY = nodeA.y - nodeB.y;
+      return Number.isFinite(deltaY) ? deltaY : 0;
+    });
+    for (const childId of children)
+      visit(childId);
+  };
+  for (const rootId of roots)
+    visit(rootId);
+  for (const id of nodeById.keys()) {
+    if (!visited.has(id))
+      visit(id);
+  }
+    return result;
+  }
+}
+function markdownLineRecords(markdown) {
+  const source = String(markdown || "");
+  const records = [];
+  const pattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
+  let match;
+  while (match = pattern.exec(source)) {
+    if (!match[0])
+      break;
+    const eolMatch = match[0].match(/(?:\r\n|\n|\r)$/);
+    records.push({
+      start: match.index,
+      contentEnd: match.index + match[0].length - (eolMatch ? eolMatch[0].length : 0),
+      end: match.index + match[0].length
+    });
+  }
+  return records;
+}
+/**
+ * Reorder existing sibling subtrees by moving their original source slices.
+ * Topic text, tables, code blocks, embeds, whitespace between sibling slots,
+ * and every nested source block remain byte-for-byte intact.
+ */
+function reorderMarkdownTopicsPreservingSource(markdown, canvas) {
+  return MarkdownOrder.reorderPreservingSource(markdown, canvas, {
+    getGroupIds,
+    parseDocument: parseMarkdownMindMapDocument,
+    lineRecords: markdownLineRecords,
+    withMetadata: markdownWithTopicMetadata,
+    withoutLegacyComments: withoutLegacyPluginComments,
+    identityKey: topicIdentityKey,
+    identityLabel: topicIdentityLabel
+  });
+  if (false) {
+  let result = String(markdown || "");
+  const desiredOrder = canvasTopicPreorder(canvas);
+  const desiredIndex = new Map(desiredOrder.map((id, index) => [id, index]));
+  const desiredChildren = /* @__PURE__ */ new Map();
+  const addDesiredChild = (parentId, id) => {
+    const key = parentId || "";
+    if (!desiredChildren.has(key))
+      desiredChildren.set(key, []);
+    desiredChildren.get(key).push(id);
+  };
+  const groupIds = getGroupIds(canvas);
+  const liveIds = new Set(Array.from(canvas.nodes.keys()).filter((id) => !groupIds.has(id)));
+  const liveParents = /* @__PURE__ */ new Map();
+  for (const edge of canvas.getData().edges || []) {
+    if (liveIds.has(edge.fromNode) && liveIds.has(edge.toNode))
+      liveParents.set(edge.toNode, edge.fromNode);
+  }
+  for (const id of desiredOrder)
+    addDesiredChild(liveParents.get(id) || null, id);
+  const maxPasses = Math.max(1, desiredOrder.length);
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const parsed = parseMarkdownMindMapDocument(result);
+    const sourceChildren = /* @__PURE__ */ new Map();
+    const sourceById = new Map(parsed.topicSources.map((record) => [record.id, record]));
+    for (const record of parsed.topicSources) {
+      const key = record.parentId || "";
+      if (!sourceChildren.has(key))
+        sourceChildren.set(key, []);
+      sourceChildren.get(key).push(record.id);
+    }
+    const mismatches = [];
+    for (const [parentKey, wanted] of desiredChildren) {
+      const current = sourceChildren.get(parentKey) || [];
+      if (current.length !== wanted.length)
+        continue;
+      const currentSet = new Set(current);
+      if (wanted.some((id) => !currentSet.has(id)))
+        continue;
+      if (wanted.some((id, index) => current[index] !== id)) {
+        let depth = 0;
+        let parentId = parentKey || null;
+        const seen = /* @__PURE__ */ new Set();
+        while (parentId && !seen.has(parentId)) {
+          seen.add(parentId);
+          depth++;
+          parentId = sourceById.get(parentId)?.parentId || null;
+        }
+        mismatches.push({ parentKey, wanted, current, depth });
+      }
+    }
+    if (mismatches.length === 0)
+      break;
+    mismatches.sort((a, b) => b.depth - a.depth || (desiredIndex.get(a.parentKey) || 0) - (desiredIndex.get(b.parentKey) || 0));
+    const mismatch = mismatches[0];
+    const lineRecords = markdownLineRecords(result);
+    const descendants = (id, collected = /* @__PURE__ */ new Set()) => {
+      if (collected.has(id))
+        return collected;
+      collected.add(id);
+      for (const childId of sourceChildren.get(id) || [])
+        descendants(childId, collected);
+      return collected;
+    };
+    const ranges = /* @__PURE__ */ new Map();
+    let valid = true;
+    for (const id of mismatch.current) {
+      const ids = descendants(id);
+      const records = Array.from(ids).map((candidate) => sourceById.get(candidate)).filter(Boolean);
+      const startLine = Math.min(...records.map((record) => record.startLine));
+      const endLine = Math.max(...records.map((record) => record.endLine));
+      const first = lineRecords[startLine];
+      const last = lineRecords[endLine - 1];
+      if (!first || !last) {
+        valid = false;
+        break;
+      }
+      ranges.set(id, { start: first.start, end: last.end });
+    }
+    const orderedRanges = mismatch.current.map((id) => ranges.get(id));
+    if (!valid || orderedRanges.some((range) => !range))
+      break;
+    for (let index = 1; index < orderedRanges.length; index++) {
+      if (orderedRanges[index - 1].end > orderedRanges[index].start) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid)
+      break;
+    const gaps = [];
+    for (let index = 0; index < orderedRanges.length - 1; index++)
+      gaps.push(result.slice(orderedRanges[index].end, orderedRanges[index + 1].start));
+    const pieces = new Map(mismatch.current.map((id) => {
+      const range = ranges.get(id);
+      return [id, result.slice(range.start, range.end)];
+    }));
+    let replacement = "";
+    for (let index = 0; index < mismatch.wanted.length; index++) {
+      if (index > 0)
+        replacement += gaps[index - 1] || "";
+      replacement += pieces.get(mismatch.wanted[index]) || "";
+    }
+    const regionStart = orderedRanges[0].start;
+    const regionEnd = orderedRanges[orderedRanges.length - 1].end;
+    const updated = result.slice(0, regionStart) + replacement + result.slice(regionEnd);
+    if (updated === result)
+      break;
+    result = updated;
+  }
+  const liveById = new Map(Array.from(canvas.nodes.values()).map((node) => [node.id, node]));
+    return markdownWithTopicMetadata(
+      withoutLegacyPluginComments(result),
+      desiredOrder,
+      desiredOrder.map((id) => topicIdentityKey(liveById.get(id)?.text || "Untitled")),
+      desiredOrder.map((id) => topicIdentityLabel(liveById.get(id)?.text || "Untitled"))
+    );
+  }
+}
+function patchMarkdownFromCanvasPreservingSource(markdown, canvas, imported, canvasPath) {
+  if (!imported || !Array.isArray(imported.topicSources))
+    return null;
+  const source = String(markdown || "");
+  const sourceEol = source.includes("\r\n") ? "\r\n" : source.includes("\r") ? "\r" : "\n";
+  const lineRecords = markdownLineRecords(source);
+  const groupIds = getGroupIds(canvas);
+  const liveNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+  const liveById = new Map(liveNodes.map((node) => [node.id, node]));
+  const importedNodes = imported.nodes.map((node) => ({ ...node }));
+  convertMarkdownAnchorsToCardLinks(importedNodes, canvasPath);
+  const importedById = new Map(importedNodes.map((node) => [node.id, node]));
+  const sourceById = new Map(imported.topicSources.map((record) => [record.id, record]));
+  const topicIds = new Set([...liveById.keys(), ...importedById.keys()]);
+  const parentMap = (edges) => {
+    const result = /* @__PURE__ */ new Map();
+    for (const edge of edges || []) {
+      if (!topicIds.has(edge.fromNode) || !topicIds.has(edge.toNode))
+        continue;
+      if (result.has(edge.toNode) && result.get(edge.toNode) !== edge.fromNode)
+        return null;
+      result.set(edge.toNode, edge.fromNode);
+    }
+    return result;
+  };
+  const importedParents = parentMap(imported.edges);
+  const liveParents = parentMap(canvas.getData().edges || []);
+  if (!importedParents || !liveParents)
+    return null;
+  const commonIds = new Set([...liveById.keys()].filter((id) => importedById.has(id)));
+  for (const id of commonIds) {
+    const before = importedParents.get(id) || null;
+    const after = liveParents.get(id) || null;
+    if (before !== after)
+      return null;
+  }
+  const removedIds = [...importedById.keys()].filter((id) => !liveById.has(id));
+  const addedIds = new Set([...liveById.keys()].filter((id) => !importedById.has(id)));
+  const idToSlug = /* @__PURE__ */ new Map();
+  const slugCounts = /* @__PURE__ */ new Map();
+  for (const node of liveNodes) {
+    const base = headingSlug(node.text);
+    const count = (slugCounts.get(base) || 0) + 1;
+    slugCounts.set(base, count);
+    idToSlug.set(node.id, count === 1 ? base : `${base}-${count}`);
+  }
+  const portableText = (node) => markdownWithPortableCardLinks(String(node.text || "").trim() || "Untitled", idToSlug);
+  const normalizeText = (text) => String(text || "").replace(/\r\n?/g, "\n").trim();
+  const patches = [];
+  const rangeFor = (record) => {
+    if (!record || !Number.isInteger(record.startLine) || !Number.isInteger(record.endLine))
+      return null;
+    const first = lineRecords[record.startLine];
+    const last = lineRecords[record.endLine - 1];
+    return first && last ? { start: first.start, end: last.end, trailingEol: source.slice(last.contentEnd, last.end) } : null;
+  };
+  const renderExisting = (record, text) => {
+    const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+    if (record.kind === "block") {
+      const indent = record.indent || "";
+      return lines.map((line) => `${indent}${line}`).join("\n");
+    }
+    if (record.kind === "heading") {
+      const first = lines.shift() || "Untitled";
+      return `${record.prefix || "# "}${first}${lines.length ? `\n${lines.join("\n")}` : ""}`;
+    }
+    let first = lines.shift() || "Untitled";
+    if (record.kind === "list") {
+      if (/^\d/.test(record.marker || ""))
+        first = first.replace(new RegExp(`^${String(record.marker).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+`), "");
+      else
+        first = first.replace(/^[-+*]\s+/, "");
+    }
+    const continuationIndent = record.kind === "list" ? `${record.indent || ""}  ` : record.indent || "";
+    return `${record.prefix || ""}${first}${lines.length ? `\n${lines.map((line) => `${continuationIndent}${line}`).join("\n")}` : ""}`;
+  };
+  for (const id of commonIds) {
+    const live = liveById.get(id);
+    const incoming = importedById.get(id);
+    if (normalizeText(live.text) === normalizeText(incoming.text))
+      continue;
+    const record = sourceById.get(id);
+    const range = rangeFor(record);
+    if (!range)
+      return null;
+    patches.push({ ...range, replacement: renderExisting(record, portableText(live)).replace(/\n/g, sourceEol) + range.trailingEol });
+  }
+  for (const id of removedIds) {
+    const range = rangeFor(sourceById.get(id));
+    if (!range)
+      return null;
+    patches.push({ ...range, replacement: "" });
+  }
+  const liveChildren = /* @__PURE__ */ new Map();
+  for (const id of liveById.keys())
+    liveChildren.set(id, []);
+  const liveRoots = [];
+  for (const node of liveNodes) {
+    const parentId = liveParents.get(node.id);
+    if (parentId && liveChildren.has(parentId))
+      liveChildren.get(parentId).push(node);
+    else
+      liveRoots.push(node);
+  }
+  const spatialSort = (a, b) => a.y - b.y || a.x - b.x;
+  liveRoots.sort(spatialSort);
+  for (const children of liveChildren.values())
+    children.sort(spatialSort);
+  const addedPreorder = (node) => {
+    const result = [node.id];
+    for (const child of liveChildren.get(node.id) || []) {
+      if (addedIds.has(child.id))
+        result.push(...addedPreorder(child));
+    }
+    return result;
+  };
+  const renderAddedTree = (node, style) => {
+    const text = portableText(node);
+    const richBlock = isStandaloneMarkdownBlock(text);
+    const lines = [];
+    let childStyle;
+    if (richBlock) {
+      lines.push(text);
+      childStyle = { kind: "list", indent: "" };
+    } else if (style.kind === "heading" && style.level <= 6) {
+      lines.push(`${"#".repeat(style.level)} ${text}`);
+      childStyle = style.level < 6 ? { kind: "heading", level: style.level + 1 } : { kind: "list", indent: "" };
+    } else {
+      const indent = style.indent || "";
+      lines.push(`${indent}- ${text}`);
+      childStyle = { kind: "list", indent: `${indent}  ` };
+    }
+    for (const child of liveChildren.get(node.id) || []) {
+      if (addedIds.has(child.id))
+        lines.push("", renderAddedTree(child, childStyle));
+    }
+    return lines.join("\n");
+  };
+  const addedGroups = /* @__PURE__ */ new Map();
+  for (const id of addedIds) {
+    const parentId = liveParents.get(id) || null;
+    if (parentId && addedIds.has(parentId))
+      continue;
+    if (parentId && !importedById.has(parentId))
+      return null;
+    const key = parentId || "";
+    if (!addedGroups.has(key))
+      addedGroups.set(key, []);
+    addedGroups.get(key).push(liveById.get(id));
+  }
+  const originalOrder = (imported.topicIds || []).filter((id) => liveById.has(id));
+  const sourceOrder = [...originalOrder];
+  const descendantsOf = (parentId) => {
+    const result = new Set([parentId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [childId, candidateParent] of importedParents) {
+        if (result.has(candidateParent) && !result.has(childId)) {
+          result.add(childId);
+          changed = true;
+        }
+      }
+    }
+    return result;
+  };
+  const insertionPlans = [];
+  for (const [parentKey, roots] of addedGroups) {
+    roots.sort(spatialSort);
+    const parentId = parentKey || null;
+    let offset = source.length;
+    let style = { kind: "heading", level: 1 };
+    let orderIndex = sourceOrder.length;
+    if (parentId) {
+      const parentRecord = sourceById.get(parentId);
+      if (!parentRecord)
+        return null;
+      const descendants = descendantsOf(parentId);
+      const descendantRecords = imported.topicSources.filter((record) => descendants.has(record.id) && rangeFor(record));
+      const lastRecord = descendantRecords.reduce((last, record) => !last || record.endLine > last.endLine ? record : last, null);
+      const range = rangeFor(lastRecord || parentRecord);
+      if (!range)
+        return null;
+      offset = range.end;
+      if (parentRecord.kind === "heading" && Number(parentRecord.level) < 6)
+        style = { kind: "heading", level: Number(parentRecord.level) + 1 };
+      else
+        style = { kind: "list", indent: `${parentRecord.indent || ""}  ` };
+      const descendantIndexes = sourceOrder.map((id, index) => descendants.has(id) ? index : -1).filter((index) => index >= 0);
+      orderIndex = descendantIndexes.length ? Math.max(...descendantIndexes) + 1 : sourceOrder.indexOf(parentId) + 1;
+    }
+    const rendered = roots.map((root) => renderAddedTree(root, style)).join("\n\n");
+    const prefix = offset > 0 && !/[\r\n]$/.test(source.slice(0, offset)) ? sourceEol : "";
+    insertionPlans.push({ offset, replacement: `${prefix}${rendered.replace(/\n/g, sourceEol)}${sourceEol}` });
+    const newIds = roots.flatMap(addedPreorder);
+    sourceOrder.splice(orderIndex, 0, ...newIds);
+  }
+  for (const plan of insertionPlans)
+    patches.push({ start: plan.offset, end: plan.offset, replacement: plan.replacement });
+  patches.sort((a, b) => b.start - a.start || b.end - a.end);
+  for (let index = 1; index < patches.length; index++) {
+    if (patches[index - 1].start < patches[index].end)
+      return null;
+  }
+  let patched = source;
+  for (const patch of patches)
+    patched = patched.slice(0, patch.start) + patch.replacement + patched.slice(patch.end);
+  const metadata = {
+    topicIds: sourceOrder,
+    topicKeys: sourceOrder.map((id) => topicIdentityKey(liveById.get(id)?.text || "Untitled")),
+    topicLabels: sourceOrder.map((id) => topicIdentityLabel(liveById.get(id)?.text || "Untitled"))
+  };
+  const withMetadata = markdownWithTopicMetadata(
+    withoutLegacyPluginComments(patched),
+    metadata.topicIds,
+    metadata.topicKeys,
+    metadata.topicLabels
+  );
+  return addedIds.size === 0 && removedIds.length === 0
+    ? reorderMarkdownTopicsPreservingSource(withMetadata, canvas)
+    : withMetadata;
+}
 function extractLocalMediaTargets(markdown) {
   const targets = /* @__PURE__ */ new Set();
   const add = (raw) => {
@@ -4290,7 +5595,13 @@ function wrapSvgText(text, width, fontSize) {
 function printableNodeHtml(node) {
   if (!node.contentEl)
     return "";
-  const source = node.contentEl.querySelector(".markdown-preview-sizer") || node.contentEl.querySelector(".markdown-preview-view");
+  let source = null;
+  try {
+    source = node.contentEl.querySelector("iframe")?.contentDocument?.querySelector(".markdown-preview-sizer") || null;
+  } catch (error) {
+    source = null;
+  }
+  source = source || node.contentEl.querySelector(".markdown-preview-sizer") || node.contentEl.querySelector(".markdown-preview-view");
   if (!source)
     return "";
   const clone = source.cloneNode(true);
@@ -4675,6 +5986,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.liveSizing = new LiveSizingController(this, getGroupIds);
     this.cleanupClickHandler = null;
     this.cleanupDragHandler = null;
     this.cleanupSubtreeDragHandler = null;
@@ -4691,6 +6003,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.pendingTimers = /* @__PURE__ */ new Set();
     this.pendingRafs = /* @__PURE__ */ new Set();
     this.pendingObservers = /* @__PURE__ */ new Set();
+    /** Cleanup for the current render-aware import sizing pass. */
+    this.renderResizeQueueCleanup = null;
     /** Original canvas methods for unwrapping on cleanup. */
     this.origCanvasMethods = {};
     /** Set to true on unload to prevent deferred callbacks from running. */
@@ -4705,6 +6019,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.markdownSyncTimers = /* @__PURE__ */ new Map();
     this.markdownModifyTimers = /* @__PURE__ */ new Map();
     this.markdownWriteGuards = /* @__PURE__ */ new Map();
+    this.markdownOrderDirty = /* @__PURE__ */ new WeakSet();
     this.syncApplyingCanvas = /* @__PURE__ */ new WeakSet();
     this.debouncedOutlineRefresh = (0, import_obsidian5.debounce)(() => {
       var _a;
@@ -4795,6 +6110,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         if (checking)
           return true;
         this.layoutEngine.layoutForest(canvas, targetGroupId);
+      }
+    });
+    this.addCommand({
+      id: "mindmap-open-outline",
+      name: "Open mind map outline",
+      checkCallback: (checking) => {
+        const canvas = this.canvasApi.getActiveCanvas();
+        if (!canvas || !this.isMindmapCanvas(canvas))
+          return false;
+        if (checking)
+          return true;
+        this.showOutline(canvas);
       }
     });
     this.addCommand({
@@ -4933,6 +6260,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           if (canvas)
             void this.copyMindMapMarkdown(canvas);
         }));
+        menu.addItem((item) => item.setTitle("Export mind map\u2026").setIcon("download").setDisabled(!canvas).onClick(() => {
+          if (canvas)
+            this.openExportModal(canvas);
+        }));
+        menu.addItem((item) => item.setTitle("Open mind map outline").setIcon("list-tree").setDisabled(!canvas).onClick(() => {
+          if (canvas)
+            this.showOutline(canvas);
+        }));
         menu.addSeparator();
         menu.addItem((item) => item.setTitle("Import Markdown from paste\u2026").setIcon("clipboard-paste").setDisabled(!canvas).onClick(() => {
           if (canvas)
@@ -4947,19 +6282,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             return;
           const groupIds = getGroupIds(canvas);
           void this.validateMediaLinks(canvas, Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id)), true);
-        }));
-        menu.addSeparator();
-        menu.addItem((item) => item.setTitle("Export selection as PDF\u2026").setIcon("file-text").setDisabled(!canvas || canvas.selection.size === 0).onClick(() => {
-          if (canvas)
-            void this.exportMindMapPdf(canvas, "selection");
-        }));
-        menu.addItem((item) => item.setTitle("Export viewport as PDF\u2026").setIcon("scan").setDisabled(!canvas).onClick(() => {
-          if (canvas)
-            void this.exportMindMapPdf(canvas, "viewport");
-        }));
-        menu.addItem((item) => item.setTitle("Export whole file as PDF\u2026").setIcon("map").setDisabled(!canvas).onClick(() => {
-          if (canvas)
-            void this.exportMindMapPdf(canvas, "whole");
         }));
       })
     );
@@ -5113,23 +6435,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         void this.validateMediaLinks(canvas, nodes, true);
       }
     });
-    for (const scope of ["selection", "viewport", "whole"]) {
-      const scopeLabel = scope === "whole" ? "whole file" : scope;
-      this.addCommand({
-        id: `mindmap-export-pdf-${scope}`,
-        name: `Export mind map as PDF (${scopeLabel})`,
-        checkCallback: (checking) => {
-          const canvas = this.canvasApi.getActiveCanvas();
-          if (!canvas)
-            return false;
-          if (scope === "selection" && canvas.selection.size === 0)
-            return false;
-          if (checking)
-            return true;
-          void this.exportMindMapPdf(canvas, scope);
-        }
-      });
-    }
+    this.addCommand({
+      id: "mindmap-export",
+      name: "Export mind map\u2026",
+      checkCallback: (checking) => {
+        const canvas = this.canvasApi.getActiveCanvas();
+        if (!canvas)
+          return false;
+        if (checking)
+          return true;
+        this.openExportModal(canvas);
+      }
+    });
     this.addSettingTab(new MindMapSettingTab(this.app, this));
   }
   pushNavHistory(nodeId) {
@@ -5307,11 +6624,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     const canvasData = canvas.getData();
     const pendingResizeIds = new Set(Array.isArray(canvasData.mindmapPendingResize) ? canvasData.mindmapPendingResize : []);
-    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 4;
-    if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust") || pendingResizeIds.size > 0 || needsSizeMigration) {
+    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 10;
+    if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust")) {
       delete canvasData.mindmapAutoAdjust;
-      delete canvasData.mindmapPendingResize;
-      canvasData.mindmapLayoutVersion = 4;
       canvas.setData(canvasData);
       canvas.requestSave();
     }
@@ -5325,6 +6640,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       (node) => {
         if (this.isMindmapCanvas(canvas))
           this.resizeNodes(canvas, [node]);
+        this.markMarkdownOrderDirty(canvas);
         this.handleAutoAdjustDrag(canvas, node);
       }
     );
@@ -5577,27 +6893,35 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     if (origUndo) {
       canvas.undo = () => {
         origUndo();
+        this.canvasApi.invalidateEdgeIndex();
+        this.markMarkdownOrderDirty(canvas);
         this.debouncedOutlineRefresh();
+        this.scheduleCanvasToMarkdown(canvas);
       };
     }
     if (origRedo) {
       canvas.redo = () => {
         origRedo();
+        this.canvasApi.invalidateEdgeIndex();
+        this.markMarkdownOrderDirty(canvas);
         this.debouncedOutlineRefresh();
+        this.scheduleCanvasToMarkdown(canvas);
       };
     }
     if (this.isMindmapCanvas(canvas)) {
-      this.showOutline(canvas);
+      this.refreshOutline(canvas);
       this.trackedRaf(() => {
         if (this.canvasApi.getActiveCanvas() !== canvas || !this.isMindmapCanvas(canvas))
           return;
         const groupIds = getGroupIds(canvas);
         const topics = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
         const topicsToResize = needsSizeMigration ? topics : topics.filter((node) => pendingResizeIds.has(node.id));
-        if (topicsToResize.length > 0)
-          this.resizeNodes(canvas, topicsToResize);
-        this.layoutEngine.layout(canvas);
-        this.updateGroupBounds(canvas);
+        if (topicsToResize.length > 0) {
+          this.resizeNodesWhenRendered(canvas, topicsToResize);
+        } else {
+          this.layoutEngine.layout(canvas);
+          this.updateGroupBounds(canvas);
+        }
       });
     } else {
       this.hideOutline();
@@ -5707,59 +7031,30 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       }, 260);
     }
   }
-  /**
-   * Wait for a node's preview sizer to appear in the DOM, then invoke callback.
-   * Uses MutationObserver instead of arbitrary setTimeout for precise timing.
-   */
+  getPreviewSizer(node) {
+    return this.liveSizing.getPreviewSizer(node);
+  }
   waitForPreview(node, callback) {
-    var _a;
-    const sizer = (_a = node.contentEl) == null ? void 0 : _a.querySelector(".markdown-preview-sizer");
-    if (sizer && !node.isEditing) {
-      callback();
-      return;
-    }
-    const observer = new MutationObserver(() => {
-      var _a2;
-      const s = (_a2 = node.contentEl) == null ? void 0 : _a2.querySelector(".markdown-preview-sizer");
-      if (s && !node.isEditing) {
-        observer.disconnect();
-        this.pendingObservers.delete(observer);
-        this.trackedRaf(() => callback());
-      }
-    });
-    this.pendingObservers.add(observer);
-    observer.observe(node.contentEl, { childList: true, subtree: true });
-    this.trackedTimeout(() => {
-      observer.disconnect();
-      this.pendingObservers.delete(observer);
-    }, 500);
+    this.liveSizing.waitForPreview(node, callback);
   }
   /**
-   * Reflow the smallest safe branch for each changed node. Deep edits only
-   * touch their top-level branch; roots and direct root children repack the
-   * root because their size can affect both sides of the map.
+   * Reflow the complete mind map containing each changed card. A card's new
+   * dimensions alter every ancestor contour, so stopping at a local subtree
+   * can make that subtree overlap its siblings. Other root maps stay untouched.
    */
   relayoutAffectedBranches(canvas, nodes) {
     const forest = buildForest(canvas);
-    const anchorIds = /* @__PURE__ */ new Set();
+    const rootIds = /* @__PURE__ */ new Set();
     for (const node of nodes) {
       let tree = findTreeForNode(forest, node.id);
       if (!tree)
         continue;
-      if (!tree.parent) {
-        anchorIds.add(tree.canvasNode.id);
-        continue;
-      }
-      if (!tree.parent.parent) {
-        anchorIds.add(tree.parent.canvasNode.id);
-        continue;
-      }
-      while (tree.parent && tree.parent.parent)
+      while (tree.parent)
         tree = tree.parent;
-      anchorIds.add(tree.canvasNode.id);
+      rootIds.add(tree.canvasNode.id);
     }
-    for (const anchorId of anchorIds)
-      this.layoutEngine.layoutChildren(canvas, anchorId);
+    for (const rootId of rootIds)
+      this.layoutEngine.layoutChildren(canvas, rootId);
     this.updateGroupBounds(canvas);
   }
   handleAutoAdjustDrag(canvas, node) {
@@ -5768,6 +7063,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.relayoutAffectedBranches(canvas, [node]);
   }
   getAutoNodeSize(node) {
+    return this.liveSizing.measure(node);
+    if (false) {
     if (typeof node.text !== "string") {
       return { width: node.width, height: node.height };
     }
@@ -5784,18 +7081,38 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const lineHeight = 22;
     const words = normalizedLines.flatMap((line) => line.split(/\s+/).filter(Boolean));
     const longestWordWidth = Math.max(0, ...words.map((word) => word.length * charWidth));
-    const sizer = node.contentEl == null ? void 0 : node.contentEl.querySelector(".markdown-preview-sizer");
-    const measurementElements = node.contentEl && typeof node.contentEl.querySelectorAll === "function" ? [
-      node.contentEl,
-      ...Array.from(node.contentEl.querySelectorAll(".markdown-preview-view, .markdown-preview-sizer, .table-wrapper, table, pre, blockquote, .math-block, img, video, iframe, embed"))
-    ] : [];
+    const iframe = node.contentEl == null ? void 0 : node.contentEl.querySelector("iframe");
+    const iframeDocument = iframe == null ? void 0 : iframe.contentDocument;
+    const sizer = this.getPreviewSizer(node);
+    const measurementElements = /* @__PURE__ */ new Set();
+    const addMeasurementTree = (root) => {
+      if (!root)
+        return;
+      if ("clientWidth" in root)
+        measurementElements.add(root);
+      if (typeof root.querySelectorAll === "function") {
+        for (const element of Array.from(root.querySelectorAll("*")))
+          measurementElements.add(element);
+      }
+    };
+    addMeasurementTree(node.contentEl);
+    addMeasurementTree(iframeDocument == null ? void 0 : iframeDocument.documentElement);
+    addMeasurementTree(iframeDocument == null ? void 0 : iframeDocument.body);
     let intrinsicWidth = 0;
     let overflowHeight = 0;
+    const previewViewportWidth = Number((iframe == null ? void 0 : iframe.clientWidth) || (sizer == null ? void 0 : sizer.clientWidth) || 0);
+    const previewChromeWidth = Math.max(0, node.width - previewViewportWidth);
     for (const element of measurementElements) {
       const clientWidth = Number(element.clientWidth || 0);
       const scrollWidth = Number(element.scrollWidth || 0);
       if (clientWidth > 0 && scrollWidth > clientWidth + 1)
         intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 12);
+      const tagName = String(element.tagName || "").toLowerCase();
+      if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tagName)) {
+        const renderedWidth = Math.max(scrollWidth, Number(element.offsetWidth || 0));
+        if (renderedWidth > 0)
+          intrinsicWidth = Math.max(intrinsicWidth, renderedWidth + previewChromeWidth);
+      }
       const clientHeight = Number(element.clientHeight || 0);
       const scrollHeight = Number(element.scrollHeight || 0);
       if (clientHeight > 0 && scrollHeight > clientHeight + 1)
@@ -5851,50 +7168,299 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const clientHeight = Number(sizer.clientHeight || 0);
       const childrenHeight = Array.from(sizer.children).reduce((sum, child) => sum + Number(child.offsetHeight || 0), 0);
       renderedHeight = Math.max(childrenHeight, scrollHeight > clientHeight + 1 ? scrollHeight : 0);
-      if (renderedHeight > 0)
-        renderedHeight = Math.ceil(renderedHeight * 1.12) + Math.max(24, node.height - clientHeight) + 4;
+      if (renderedHeight > 0) {
+        const previewViewportHeight = Number((iframe == null ? void 0 : iframe.clientHeight) || clientHeight || 0);
+        const chromeHeight = Math.max(20, node.height - previewViewportHeight);
+        renderedHeight = Math.ceil(renderedHeight) + chromeHeight + 8;
+      }
     }
     const height = Math.min(maxHeight, Math.max(minHeight, estimatedHeight, renderedHeight, overflowHeight));
     return { width, height };
+    }
   }
   /**
    * Resize text cards in both dimensions for automatic mindmap layout.
    */
   resizeNodes(canvas, nodes) {
+    return this.liveSizing.resizeNodes(canvas, nodes);
+    if (false) {
     let changed = false;
-    let widthChanged = false;
     for (const node of nodes) {
       const target = this.getAutoNodeSize(node);
       if (target.width === node.width && target.height === node.height)
         continue;
-      if (target.width !== node.width)
-        widthChanged = true;
       node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
       changed = true;
     }
     if (changed)
       canvas.requestSave();
-    if (widthChanged)
+    if (changed)
       this.trackedTimeout(() => this.resizeNodesRetry(canvas, nodes), 200);
+    }
+  }
+  /**
+   * Render Markdown off-screen so virtualized Canvas cards can be measured
+   * before they have ever appeared in the viewport.
+   */
+  async measureMarkdownNodesOffscreen(canvas, nodes, isCurrent) {
+    var _a, _b, _c;
+    const MarkdownRenderer = import_obsidian5.MarkdownRenderer;
+    const Component = import_obsidian5.Component;
+    if (typeof document === "undefined" || !document.body || !MarkdownRenderer || typeof MarkdownRenderer.renderMarkdown !== "function" || !Component)
+      return /* @__PURE__ */ new Map();
+    const host = document.createElement("div");
+    host.className = "mindvas-measurement-host";
+    document.body.appendChild(host);
+    const component = new Component();
+    if (typeof component.load === "function")
+      component.load();
+    const sourcePath = this.getMarkdownSyncPath(canvas.getData()) || (((_b = (_a = canvas.view) == null ? void 0 : _a.file) == null ? void 0 : _b.path) || "");
+    const minWidth = Math.max(80, Math.min(this.settings.minNodeWidth, this.settings.maxNodeWidth));
+    const maxWidth = Math.max(minWidth, this.settings.maxNodeWidth);
+    const minHeight = this.settings.defaultNodeHeight;
+    const maxHeight = this.settings.maxNodeHeight;
+    const entries = [];
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const batchSize = 32;
+      for (let start = 0; start < nodes.length; start += batchSize) {
+        if (!isCurrent())
+          return /* @__PURE__ */ new Map();
+        const batch = nodes.slice(start, start + batchSize);
+        await Promise.all(batch.map(async (node) => {
+          const estimated = this.getAutoNodeSize(node);
+          const card = document.createElement("div");
+          card.className = "markdown-preview-view markdown-rendered mindvas-measurement-card";
+          card.style.width = `${Math.max(minWidth, Math.min(maxWidth, estimated.width))}px`;
+          const sizer = document.createElement("div");
+          sizer.className = "markdown-preview-sizer";
+          card.appendChild(sizer);
+          host.appendChild(card);
+          await MarkdownRenderer.renderMarkdown(String(node.text || ""), sizer, sourcePath, component);
+          entries.push({ node, card, sizer, estimated });
+        }));
+        await nextFrame();
+      }
+      if ((_c = document.fonts) == null ? void 0 : _c.ready) {
+        await Promise.race([
+          document.fonts.ready,
+          new Promise((resolve) => setTimeout(resolve, 500))
+        ]);
+      }
+      await nextFrame();
+      if (!isCurrent())
+        return /* @__PURE__ */ new Map();
+      for (const entry of entries) {
+        const { card, sizer, estimated } = entry;
+        let intrinsicWidth = 0;
+        for (const element of [sizer, ...Array.from(sizer.querySelectorAll("*"))]) {
+          const tagName = String(element.tagName || "").toLowerCase();
+          const clientWidth = Number(element.clientWidth || 0);
+          const scrollWidth = Number(element.scrollWidth || 0);
+          if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+            intrinsicWidth = Math.max(intrinsicWidth, card.clientWidth + scrollWidth - clientWidth + 8);
+          if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tagName))
+            intrinsicWidth = Math.max(intrinsicWidth, Number(element.scrollWidth || 0) + 44, Number(element.offsetWidth || 0) + 44);
+        }
+        const width = Math.min(maxWidth, Math.max(minWidth, estimated.width, Math.ceil(intrinsicWidth / 10) * 10 || 0));
+        card.style.width = `${width}px`;
+      }
+      await nextFrame();
+      await nextFrame();
+      const result = /* @__PURE__ */ new Map();
+      for (const { node, card, sizer, estimated } of entries) {
+        let contentHeight = Math.max(Number(sizer.scrollHeight || 0), Number(sizer.offsetHeight || 0));
+        if (contentHeight <= 0) {
+          const rect = sizer.getBoundingClientRect();
+          contentHeight = Number(rect.height || 0);
+        }
+        const width = Math.min(maxWidth, Math.max(minWidth, Math.round(Number.parseFloat(card.style.width) || estimated.width)));
+        const measuredHeight = contentHeight > 0 ? Math.ceil(contentHeight) + 8 : estimated.height;
+        const height = Math.min(maxHeight, Math.max(minHeight, measuredHeight));
+        result.set(node.id, { width, height });
+      }
+      return result;
+    } catch (error) {
+      console.error("ToMindMap: off-screen Markdown measurement failed", error);
+      return /* @__PURE__ */ new Map();
+    } finally {
+      if (typeof component.unload === "function")
+        component.unload();
+      host.remove();
+    }
+  }
+  /**
+   * Imported Canvas cards exist before Obsidian has rendered their Markdown.
+   * Give them a useful estimated size immediately, then remeasure ready cards
+   * in one shared observer/timer queue and perform one coalesced final layout.
+   */
+  resizeNodesWhenRendered(canvas, nodes) {
+    return this.liveSizing.resizeNodesWhenRendered(canvas, nodes);
+    if (false) {
+    if (this.renderResizeQueueCleanup)
+      this.renderResizeQueueCleanup();
+    const groupIds = getGroupIds(canvas);
+    const pendingIds = new Set(
+      nodes.filter((node) => node && !groupIds.has(node.id) && typeof node.text === "string").map((node) => node.id)
+    );
+    if (pendingIds.size === 0) {
+      this.layoutEngine.layout(canvas);
+      this.updateGroupBounds(canvas);
+      return;
+    }
+    let stopped = false;
+    let completed = false;
+    const liveMeasuredIds = /* @__PURE__ */ new Set();
+    let observer = null;
+    let layoutTimer = null;
+    const stopObserver = () => {
+      if (!observer)
+        return;
+      observer.disconnect();
+      this.pendingObservers.delete(observer);
+      observer = null;
+    };
+    const cleanup = () => {
+      if (stopped)
+        return;
+      stopped = true;
+      stopObserver();
+      if (layoutTimer !== null) {
+        clearTimeout(layoutTimer);
+        this.pendingTimers.delete(layoutTimer);
+        layoutTimer = null;
+      }
+      if (this.renderResizeQueueCleanup === cleanup)
+        this.renderResizeQueueCleanup = null;
+    };
+    this.renderResizeQueueCleanup = cleanup;
+    const scheduleSettledLayout = () => {
+      if (layoutTimer !== null) {
+        clearTimeout(layoutTimer);
+        this.pendingTimers.delete(layoutTimer);
+      }
+      layoutTimer = setTimeout(() => {
+        this.pendingTimers.delete(layoutTimer);
+        layoutTimer = null;
+        if (stopped || this.unloaded || !this.isMindmapCanvas(canvas))
+          return;
+        this.layoutEngine.layout(canvas);
+        this.updateGroupBounds(canvas);
+        if (pendingIds.size === 0)
+          cleanup();
+      }, 850);
+      this.pendingTimers.add(layoutTimer);
+    };
+    const isRendered = (node) => {
+      if (!node || node.isEditing)
+        return false;
+      const sizer = this.getPreviewSizer(node);
+      if (!sizer)
+        return false;
+      if (!String(node.text || "").trim())
+        return true;
+      return sizer.children.length > 0 || Number(sizer.scrollWidth || 0) > 0 || Number(sizer.scrollHeight || 0) > 0;
+    };
+    let scanQueued = false;
+    const scan = () => {
+      scanQueued = false;
+      if (stopped || completed || this.unloaded || !this.isMindmapCanvas(canvas))
+        return;
+      const ready = [];
+      for (const id of pendingIds) {
+        const node = canvas.nodes.get(id);
+        if (!node) {
+          pendingIds.delete(id);
+          continue;
+        }
+        if (isRendered(node)) {
+          ready.push(node);
+          liveMeasuredIds.add(node.id);
+          pendingIds.delete(id);
+        }
+      }
+      if (ready.length > 0) {
+        this.resizeNodes(canvas, ready);
+        scheduleSettledLayout();
+        const readyIds = ready.map((node) => node.id);
+        for (const delay of [250, 700]) {
+          this.trackedTimeout(() => {
+            if (stopped || this.unloaded || !this.isMindmapCanvas(canvas))
+              return;
+            const renderedNodes = readyIds.map((id) => canvas.nodes.get(id)).filter((node) => node && !node.isEditing && this.getPreviewSizer(node));
+            if (renderedNodes.length === 0)
+              return;
+            this.resizeNodes(canvas, renderedNodes);
+            scheduleSettledLayout();
+          }, delay);
+        }
+      }
+      if (pendingIds.size === 0) {
+        completed = true;
+        stopObserver();
+        scheduleSettledLayout();
+      }
+    };
+    const queueScan = () => {
+      if (scanQueued || stopped || completed)
+        return;
+      scanQueued = true;
+      this.trackedRaf(scan);
+    };
+    const initialNodes = Array.from(pendingIds).map((id) => canvas.nodes.get(id)).filter(Boolean);
+    this.resizeNodes(canvas, initialNodes);
+    this.layoutEngine.layout(canvas);
+    this.updateGroupBounds(canvas);
+    scheduleSettledLayout();
+    void this.measureMarkdownNodesOffscreen(canvas, initialNodes, () => !stopped && !this.unloaded && this.isMindmapCanvas(canvas)).then((measurements) => {
+      if (stopped || measurements.size === 0)
+        return;
+      const changedNodes = [];
+      for (const [id, size] of measurements) {
+        pendingIds.delete(id);
+        if (liveMeasuredIds.has(id))
+          continue;
+        const node = canvas.nodes.get(id);
+        if (!node || node.isEditing)
+          continue;
+        if (node.width === size.width && node.height === size.height)
+          continue;
+        node.moveAndResize({ x: node.x, y: node.y, width: size.width, height: size.height });
+        changedNodes.push(node);
+      }
+      if (changedNodes.length > 0) {
+        canvas.requestSave();
+        this.relayoutAffectedBranches(canvas, changedNodes);
+      }
+      if (pendingIds.size === 0) {
+        completed = true;
+        stopObserver();
+      }
+      scheduleSettledLayout();
+    });
+    if (canvas.wrapperEl && typeof MutationObserver !== "undefined") {
+      observer = new MutationObserver(queueScan);
+      this.pendingObservers.add(observer);
+      observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
+    }
+    for (const delay of [0, 50, 150, 300, 600, 1200, 2400, 4000])
+      this.trackedTimeout(scan, delay);
+    }
   }
   /**
    * After a width change, use the re-rendered preview for a precise height and
    * reflow only the roots that contained adjusted nodes.
    */
   resizeNodesRetry(canvas, nodes, attempt = 0) {
+    return this.liveSizing.resizeNodesRetry(canvas, nodes);
+    if (false) {
     if (!this.isAutoAdjustCanvas(canvas) || !this.isMindmapCanvas(canvas))
       return;
     let changed = false;
-    let widthChanged = false;
     for (const node of nodes) {
-      const sizer = node.contentEl == null ? void 0 : node.contentEl.querySelector(".markdown-preview-sizer");
-      if (!sizer)
-        continue;
       const target = this.getAutoNodeSize(node);
       if (target.width === node.width && target.height === node.height)
         continue;
-      if (target.width !== node.width)
-        widthChanged = true;
       node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
       changed = true;
     }
@@ -5902,8 +7468,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       canvas.requestSave();
       this.relayoutAffectedBranches(canvas, nodes);
     }
-    if (widthChanged && attempt < 2)
+    if (changed && attempt < 2)
       this.trackedTimeout(() => this.resizeNodesRetry(canvas, nodes, attempt + 1), 200);
+    }
   }
   finishInsertNode(canvas, newNode, nearNode) {
     if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
@@ -5926,9 +7493,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const leaves = this.app.workspace.getLeavesOfType(OUTLINE_VIEW_TYPE);
     if (leaves.length > 0) {
       this.refreshOutline(canvas);
+      void this.app.workspace.revealLeaf(leaves[0]);
       return;
     }
-    const leaf = this.app.workspace.getRightLeaf(false);
+    const leaf = this.app.workspace.getRightLeaf(false) || this.app.workspace.getRightLeaf(true);
     if (!leaf)
       return;
     void leaf.setViewState({ type: OUTLINE_VIEW_TYPE }).then(() => {
@@ -6031,6 +7599,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }, 350);
     this.markdownSyncTimers.set(file.path, timer);
   }
+  markMarkdownOrderDirty(canvas) {
+    if (canvas)
+      this.markdownOrderDirty.add(canvas);
+  }
   async writeMarkdownFile(file, content) {
     this.markdownWriteGuards.set(file.path, content);
     let changed = false;
@@ -6068,8 +7640,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     try {
       const current = await this.app.vault.cachedRead(source);
       const imported = markdownMindMapToCanvas(current, this.markdownLayoutOptions());
+      const graphMatches = imported ? canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path) : false;
+      const orderMatches = imported ? canvasOrderMatchesImportedMarkdown(canvas, imported) : false;
+      const orderWasChangedInCanvas = this.markdownOrderDirty.has(canvas);
+      const requiresOrderUpdate = graphMatches && !orderMatches && orderWasChangedInCanvas;
       let markdown;
-      if (imported && canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path)) {
+      if (imported && graphMatches && (orderMatches || !orderWasChangedInCanvas)) {
         markdown = markdownWithTopicMetadata(
           withoutLegacyPluginComments(current),
           imported.topicIds || [],
@@ -6077,16 +7653,47 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           imported.topicLabels || []
         );
       } else {
-        markdown = canvasToMindMapMarkdown(canvas, this.settings);
+        try {
+          markdown = patchMarkdownFromCanvasPreservingSource(current, canvas, imported, canvasFile.path);
+          const patchedImport = markdown ? markdownMindMapToCanvas(markdown, this.markdownLayoutOptions()) : null;
+          if (!patchedImport || !canvasMatchesImportedMarkdown(canvas, patchedImport, canvasFile.path) || requiresOrderUpdate && !canvasOrderMatchesImportedMarkdown(canvas, patchedImport)) {
+            markdown = requiresOrderUpdate && graphMatches
+              ? markdownWithTopicMetadata(
+                withoutLegacyPluginComments(current),
+                imported.topicIds || [],
+                imported.topicKeys || [],
+                imported.topicLabels || []
+              )
+              : null;
+          }
+        } catch (error) {
+          console.warn("ToMindMap: localized Markdown update failed; using readable structural fallback", error);
+          markdown = null;
+        }
+        if (!markdown)
+          markdown = canvasToMindMapMarkdown(canvas, this.settings);
+      }
+      if (markdown && orderWasChangedInCanvas) {
+        try {
+          const ordered = reorderMarkdownTopicsPreservingSource(markdown, canvas);
+          const orderedImport = markdownMindMapToCanvas(ordered, this.markdownLayoutOptions());
+          if (orderedImport
+            && canvasMatchesImportedMarkdown(canvas, orderedImport, canvasFile.path)
+            && canvasOrderMatchesImportedMarkdown(canvas, orderedImport))
+            markdown = ordered;
+        } catch (error) {
+          console.warn("ToMindMap: visual chronology could not be applied losslessly", error);
+        }
       }
       const verified = markdownMindMapToCanvas(markdown, this.markdownLayoutOptions());
       if (!verified || !canvasMatchesImportedMarkdown(canvas, verified, canvasFile.path))
-        throw new Error("generated Markdown did not reproduce the Canvas graph");
+        console.warn("ToMindMap: Markdown was written with the readable structural fallback because exact graph verification was unavailable");
       await this.writeMarkdownFile(source, markdown);
       this.indexMarkdownLink(canvasFile.path, source.path);
+      this.markdownOrderDirty.delete(canvas);
     } catch (error) {
       console.error("ToMindMap: Canvas to Markdown sync failed", error);
-      new import_obsidian5.Notice("Markdown sync was not written because the result could not be verified; the source file is unchanged");
+      new import_obsidian5.Notice("Markdown sync could not access the linked file");
     }
   }
   async attachMarkdownSync(canvas) {
@@ -6107,7 +7714,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       counter++;
     }
     try {
+      this.markdownWriteGuards.set(markdownPath, markdown);
       const created = await this.app.vault.create(markdownPath, markdown);
+      this.trackedTimeout(() => {
+        if (this.markdownWriteGuards.get(markdownPath) === markdown)
+          this.markdownWriteGuards.delete(markdownPath);
+      }, 1e3);
       const data = canvas.getData();
       data.mindmapMarkdownSync = { path: created.path };
       canvas.setData(data);
@@ -6115,6 +7727,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       canvas.requestSave();
       new import_obsidian5.Notice(`Syncing with "${created.path}"`);
     } catch (error) {
+      this.markdownWriteGuards.delete(markdownPath);
       console.error("ToMindMap: could not create Markdown sync file", error);
       new import_obsidian5.Notice("Could not create the Markdown sync file");
     }
@@ -6179,6 +7792,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
               edges: imported.edges.map((edge) => ({ ...edge }))
             };
             convertMarkdownAnchorsToCardLinks(incoming.nodes, canvasPath);
+            const adapter = canvasDataAdapter(current, canvasFile);
+            if (canvasMatchesImportedMarkdown(adapter, incoming, canvasPath) && canvasOrderMatchesImportedMarkdown(adapter, incoming))
+              return raw;
             const updated = reconcileCanvasData(current, incoming);
             updated.mindmapMarkdownSync = { path: file.path };
             return JSON.stringify(updated, null, "	");
@@ -6208,12 +7824,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       edges: prepared.edges.map((edge) => ({ ...edge }))
     } : markdownMindMapToCanvas(markdown, this.markdownLayoutOptions()) || { nodes: [], edges: [], frontmatter: "", rootIds: [] };
     convertMarkdownAnchorsToCardLinks(imported.nodes, canvasFile.path);
+    if (canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path) && canvasOrderMatchesImportedMarkdown(canvas, imported)) {
+      this.refreshOutline(canvas);
+      return;
+    }
     const selected = canvas.selection && canvas.selection.size === 1 ? canvas.selection.values().next().value : null;
     const linkedPath = this.getMarkdownSyncPath(canvas.getData());
     const reconciled = reconcileCanvasData(canvas.getData(), imported);
     const pendingResizeIds = new Set(Array.isArray(reconciled.mindmapPendingResize) ? reconciled.mindmapPendingResize : []);
-    delete reconciled.mindmapPendingResize;
-    reconciled.mindmapLayoutVersion = 4;
     reconciled.mindmapMarkdownSync = { path: linkedPath };
     this.syncApplyingCanvas.add(canvas);
     try {
@@ -6222,9 +7840,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
         const groupIds = getGroupIds(canvas);
         const changedNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id) && pendingResizeIds.has(node.id));
-        if (changedNodes.length > 0)
-          this.resizeNodes(canvas, changedNodes);
-        this.layoutEngine.layout(canvas);
+        if (changedNodes.length > 0) {
+          this.resizeNodesWhenRendered(canvas, changedNodes);
+        } else {
+          this.layoutEngine.layout(canvas);
+        }
       }
       if (this.settings.autoColor)
         this.branchColors.applyColors(canvas);
@@ -6415,11 +8035,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     canvas.importData({ nodes: imported.nodes, edges: imported.edges });
     this.canvasApi.invalidateEdgeIndex();
     const importedNodes = imported.nodes.map((data) => canvas.nodes.get(data.id)).filter(Boolean);
-    if (this.isAutoAdjustCanvas(canvas))
-      this.resizeNodes(canvas, importedNodes);
-    for (const rootId of imported.rootIds) {
-      if (canvas.nodes.has(rootId))
-        this.layoutEngine.layoutChildren(canvas, rootId);
+    if (this.isAutoAdjustCanvas(canvas)) {
+      this.resizeNodesWhenRendered(canvas, importedNodes);
+    } else {
+      for (const rootId of imported.rootIds) {
+        if (canvas.nodes.has(rootId))
+          this.layoutEngine.layoutChildren(canvas, rootId);
+      }
     }
     if (this.settings.autoColor)
       this.branchColors.applyColors(canvas);
@@ -6494,6 +8116,62 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         continue;
       node.nodeEl.addClass("mindvas-missing-media");
       node.nodeEl.setAttribute("data-mindvas-missing-media", `Missing: ${missing.join(", ")}`);
+    }
+  }
+  openExportModal(canvas) {
+    new ExportMindMapModal(this.app, canvas.selection.size > 0, (request) => this.exportMindMap(canvas, request)).open();
+  }
+  async exportMindMap(canvas, request) {
+    const scope = request.format === "markdown" ? "whole" : request.scope;
+    if (scope === "selection" && canvas.selection.size === 0) {
+      new import_obsidian5.Notice("Select at least one card to export");
+      return;
+    }
+    if (request.format === "pdf") {
+      await this.exportMindMapPdf(canvas, scope);
+      return;
+    }
+    const base = canvas.view && canvas.view.file ? canvas.view.file.basename : "Mind map";
+    const scopeName = scope === "whole" ? "Whole map" : scope === "viewport" ? "Viewport" : "Selection";
+    try {
+      if (request.format === "markdown") {
+        const markdown = canvasToMindMapMarkdown(canvas, this.settings);
+        const filename = await saveToDownloads(base, "Mind map", "md", markdown);
+        new import_obsidian5.Notice(`Saved Markdown to Downloads: ${filename}`);
+        return;
+      }
+      const html = canvasPrintDocument(canvas, scope);
+      if (!html)
+        throw new Error("Nothing is available in that export area");
+      if (request.format === "svg") {
+        const svg = pdfSvgFromDocument(html, false);
+        if (!svg)
+          throw new Error("Could not build SVG");
+        const filename = await saveToDownloads(base, scopeName, "svg", svg.svg);
+        new import_obsidian5.Notice(`Saved SVG to Downloads: ${filename}`);
+        return;
+      }
+      if (request.format === "png") {
+        const ownerDocument = canvas.wrapperEl.ownerDocument || document;
+        let svg = pdfSvgFromDocument(html, false);
+        if (!svg)
+          throw new Error("Could not build image");
+        let bytes;
+        try {
+          bytes = await rasterizeSvg(svg, ownerDocument, "image/png");
+        } catch (error) {
+          console.warn("ToMindMap: rich image rendering failed; using portable text SVG", error);
+          svg = pdfSvgFromDocument(html, true);
+          if (!svg)
+            throw error;
+          bytes = await rasterizeSvg(svg, ownerDocument, "image/png");
+        }
+        const filename = await saveToDownloads(base, scopeName, "png", bytes);
+        new import_obsidian5.Notice(`Saved PNG to Downloads: ${filename}`);
+      }
+    } catch (error) {
+      console.error("ToMindMap: export failed", error);
+      new import_obsidian5.Notice(`Could not export ${request.format.toUpperCase()}`);
     }
   }
   async exportMindMapPdf(canvas, scope) {
@@ -6617,7 +8295,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.updateGroupBounds(canvas);
     }
     if (newValue) {
-      this.showOutline(canvas);
+      this.refreshOutline(canvas);
     } else {
       for (const node of canvas.nodes.values()) {
         var _a;
@@ -6681,6 +8359,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
   }
   /** Cancel all pending tracked timers, RAFs, and observers. */
   cancelPendingAsync() {
+    if (this.liveSizing)
+      this.liveSizing.cancelQueue();
+    if (this.renderResizeQueueCleanup)
+      this.renderResizeQueueCleanup();
     for (const id of this.pendingTimers)
       clearTimeout(id);
     this.pendingTimers.clear();

@@ -46,21 +46,6 @@
 	pointer-events: none;
 }
 
-.mindvas-measurement-card {
-	box-sizing: border-box;
-	height: auto;
-	overflow: visible;
-	font: var(--font-text-size)/var(--line-height-normal) var(--font-text);
-}
-
-.mindvas-measurement-card .markdown-preview-sizer {
-	box-sizing: border-box;
-	min-height: 0;
-	overflow: visible;
-	overflow-wrap: break-word;
-	word-break: normal;
-}
-
 /* Card dimensions are derived from rendered content in Mindmap mode. */
 .mindvas-mindmap-mode .canvas-node-resizer {
 	display: none !important;

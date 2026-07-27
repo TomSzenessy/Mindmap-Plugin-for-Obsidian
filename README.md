@@ -85,6 +85,7 @@ Mindmap shortcuts take priority over native Canvas shortcuts while Mindmap mode 
 | Navigate spatially | `←` `→` `↑` `↓` |
 | Select central topic | `Mod` + `R` or `Mod` + `Home` |
 | Reorder siblings | `Alt` + `↑` / `Alt` + `↓` |
+| Find a topic in the map outline | `Mod` + `F` |
 | Delete topic and branch | `Delete` or `Backspace` |
 | Delete topic but retain its children | `Mod` + `Delete` |
 | Undo / redo Canvas change | `Mod` + `Z` / `Mod` + `Shift` + `Z` |
@@ -93,7 +94,7 @@ Central topics can be deleted. Most actions are also available from the Command 
 
 ## Automatic layout and navigation
 
-ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, manages card dimensions from their rendered content without routine scrollbars, and reflows the affected mind map without disturbing other maps on the same Canvas.
+ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, manages card dimensions from their rendered content without routine scrollbars, and reflows the affected mind map without disturbing other maps on the same Canvas. New or changed topics are measured as one atomic batch in Canvas's real Markdown rendering context, then their dimensions are persisted. Reopening an unchanged map reuses those dimensions, and zooming or panning never remeasures ordinary text cards.
 
 Arrow navigation is based on visible geometry rather than only parent/child relationships. It prefers well-aligned nearby topics, uses the viewport to resolve wider directional choices, wraps at map edges when enabled, and keeps the selected topic in view.
 
@@ -149,7 +150,7 @@ ToMindMap understands heading/list-based Markdown used by Markmap, common Mermai
 
 ## Outline, import, and export
 
-The **Map outline** in the right sidebar shows the complete nested hierarchy and lets you search or jump to any topic. Open it when needed with **Open mind map outline** from the Command Palette.
+The **Map outline** in the right sidebar shows the complete collapsible hierarchy and lets you search or jump to any topic. Press `Mod` + `F` from a mind map to open and focus its search, or use **Open mind map outline** from the Command Palette.
 
 The Canvas menu includes:
 

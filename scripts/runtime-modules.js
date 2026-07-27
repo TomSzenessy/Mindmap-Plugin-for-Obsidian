@@ -60,6 +60,36 @@ const modules = [
     source: "lib/canvas-session.js",
     requireLine: 'var { flushCanvasView, reflowCanvasAfterMove } = require("./lib/canvas-session.js");',
     declaration: "var { flushCanvasView, reflowCanvasAfterMove }"
+  },
+  {
+    name: "canvas-api",
+    source: "lib/canvas-api.js",
+    requireLine: 'var { CanvasAPI, findNodeFromEvent, genId } = require("./lib/canvas-api.js");',
+    declaration: "var { CanvasAPI, findNodeFromEvent, genId }"
+  },
+  {
+    name: "node-operations",
+    source: "lib/node-operations.js",
+    requireLine: 'var { NodeOperations } = require("./lib/node-operations.js");',
+    declaration: "var { NodeOperations }"
+  },
+  {
+    name: "layout",
+    source: "lib/layout.js",
+    requireLine: 'var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, updateAllEdgeSides } = require("./lib/layout.js");',
+    declaration: "var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, updateAllEdgeSides }"
+  },
+  {
+    name: "keyboard-navigation",
+    source: "lib/keyboard-navigation.js",
+    requireLine: 'var { KeyboardHandler, Navigation } = require("./lib/keyboard-navigation.js");',
+    declaration: "var { KeyboardHandler, Navigation }"
+  },
+  {
+    name: "freemind",
+    source: "lib/freemind.js",
+    requireLine: 'var { freemindToCanvas, layoutTree, parseFreeMindXml } = require("./lib/freemind.js");',
+    declaration: "var { freemindToCanvas, layoutTree, parseFreeMindXml }"
   }
 ];
 

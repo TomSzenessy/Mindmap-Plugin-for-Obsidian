@@ -8,10 +8,20 @@ const sourcePath = path.join(root, "src", "main.js");
 const mainPath = path.join(root, "main.js");
 const { markerPattern, modules } = require("./runtime-modules");
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function moduleBlock(definition) {
-  const source = fs.readFileSync(path.join(root, definition.source), "utf8")
+  let source = fs.readFileSync(path.join(root, definition.source), "utf8")
     .replace(/^["']use strict["'];\s*/, "")
     .trimEnd();
+  for (const dependency of modules) {
+    source = source.replace(
+      new RegExp(`^const ([^\\n]+) = require\\(["']\\.\\/${escapeRegExp(path.basename(dependency.source))}["']\\);\\n?`, "m"),
+      ""
+    );
+  }
   return [
     `// <tomindmap:module ${definition.name}>`,
     `${definition.declaration} = (() => {`,

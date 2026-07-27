@@ -5660,10 +5660,16 @@ function patchMarkdownFromCanvasPreservingSource(markdown, canvas, imported, can
     else
       liveRoots.push(node);
   }
-  const spatialSort = (a, b) => a.y - b.y || a.x - b.x;
+  const spatialSort = (a, b) => a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id));
   liveRoots.sort(spatialSort);
-  for (const children of liveChildren.values())
-    children.sort(spatialSort);
+  const liveRootIds = new Set(liveRoots.map((node) => node.id));
+  for (const [parentId, children] of liveChildren) {
+    const parent = liveById.get(parentId);
+    liveChildren.set(
+      parentId,
+      MarkdownOrder.orderChildren(parent, children, liveRootIds.has(parentId))
+    );
+  }
   const addedPreorder = (node) => {
     const result = [node.id];
     for (const child of liveChildren.get(node.id) || []) {
@@ -5707,7 +5713,6 @@ function patchMarkdownFromCanvasPreservingSource(markdown, canvas, imported, can
     addedGroups.get(key).push(liveById.get(id));
   }
   const originalOrder = (imported.topicIds || []).filter((id) => liveById.has(id));
-  const sourceOrder = [...originalOrder];
   const descendantsOf = (parentId) => {
     const result = new Set([parentId]);
     let changed = true;
@@ -5722,39 +5727,101 @@ function patchMarkdownFromCanvasPreservingSource(markdown, canvas, imported, can
     }
     return result;
   };
+  const subtreeRangeCache = /* @__PURE__ */ new Map();
+  const subtreeRangeFor = (id) => {
+    if (subtreeRangeCache.has(id))
+      return subtreeRangeCache.get(id);
+    const ranges = Array.from(descendantsOf(id))
+      .map((descendantId) => rangeFor(sourceById.get(descendantId)))
+      .filter(Boolean);
+    const range = ranges.length > 0 ? {
+      start: Math.min(...ranges.map((candidate) => candidate.start)),
+      end: Math.max(...ranges.map((candidate) => candidate.end))
+    } : null;
+    subtreeRangeCache.set(id, range);
+    return range;
+  };
+  const visualOrder = MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
+  const visualIndex = new Map(visualOrder.map((id, index) => [id, index]));
   const insertionPlans = [];
   for (const [parentKey, roots] of addedGroups) {
-    roots.sort(spatialSort);
     const parentId = parentKey || null;
-    let offset = source.length;
     let style = { kind: "heading", level: 1 };
-    let orderIndex = sourceOrder.length;
     if (parentId) {
       const parentRecord = sourceById.get(parentId);
       if (!parentRecord)
         return null;
-      const descendants = descendantsOf(parentId);
-      const descendantRecords = imported.topicSources.filter((record) => descendants.has(record.id) && rangeFor(record));
-      const lastRecord = descendantRecords.reduce((last, record) => !last || record.endLine > last.endLine ? record : last, null);
-      const range = rangeFor(lastRecord || parentRecord);
-      if (!range)
-        return null;
-      offset = range.end;
       if (parentRecord.kind === "heading" && Number(parentRecord.level) < 6)
         style = { kind: "heading", level: Number(parentRecord.level) + 1 };
       else
         style = { kind: "list", indent: `${parentRecord.indent || ""}  ` };
-      const descendantIndexes = sourceOrder.map((id, index) => descendants.has(id) ? index : -1).filter((index) => index >= 0);
-      orderIndex = descendantIndexes.length ? Math.max(...descendantIndexes) + 1 : sourceOrder.indexOf(parentId) + 1;
     }
-    const rendered = roots.map((root) => renderAddedTree(root, style)).join("\n\n");
-    const prefix = offset > 0 && !/[\r\n]$/.test(source.slice(0, offset)) ? sourceEol : "";
-    insertionPlans.push({ offset, replacement: `${prefix}${rendered.replace(/\n/g, sourceEol)}${sourceEol}` });
-    const newIds = roots.flatMap(addedPreorder);
-    sourceOrder.splice(orderIndex, 0, ...newIds);
+    const addedRootIds = new Set(roots.map((root) => root.id));
+    const siblings = parentId ? liveChildren.get(parentId) || [] : liveRoots;
+    for (let index = 0; index < siblings.length; ) {
+      if (!addedRootIds.has(siblings[index].id)) {
+        index++;
+        continue;
+      }
+      const run = [];
+      while (index < siblings.length && addedRootIds.has(siblings[index].id))
+        run.push(siblings[index++]);
+      const nextExisting = siblings.slice(index).find((sibling) => !addedIds.has(sibling.id)) || null;
+      const previousExisting = siblings.slice(0, index - run.length).reverse().find((sibling) => !addedIds.has(sibling.id)) || null;
+      let offset;
+      if (nextExisting) {
+        const nextRange = subtreeRangeFor(nextExisting.id);
+        if (!nextRange)
+          return null;
+        offset = nextRange.start;
+      } else if (previousExisting) {
+        const previousRange = subtreeRangeFor(previousExisting.id);
+        if (!previousRange)
+          return null;
+        offset = previousRange.end;
+      } else if (parentId) {
+        const parentRange = rangeFor(sourceById.get(parentId));
+        if (!parentRange)
+          return null;
+        offset = parentRange.end;
+      } else {
+        offset = source.length;
+      }
+      insertionPlans.push({
+        offset,
+        desiredIndex: Math.min(...run.map((root) => visualIndex.get(root.id) ?? Number.MAX_SAFE_INTEGER)),
+        rendered: run.map((root) => renderAddedTree(root, style)).join("\n\n"),
+        newIds: run.flatMap(addedPreorder)
+      });
+    }
   }
-  for (const plan of insertionPlans)
-    patches.push({ start: plan.offset, end: plan.offset, replacement: plan.replacement });
+  insertionPlans.sort((a, b) => a.offset - b.offset || a.desiredIndex - b.desiredIndex);
+  const mergedInsertionPlans = [];
+  for (const plan of insertionPlans) {
+    const previous = mergedInsertionPlans[mergedInsertionPlans.length - 1];
+    if (previous && previous.offset === plan.offset) {
+      previous.rendered += `\n${plan.rendered}`;
+      previous.newIds.push(...plan.newIds);
+    } else {
+      mergedInsertionPlans.push({ ...plan, newIds: [...plan.newIds] });
+    }
+  }
+  for (const plan of mergedInsertionPlans) {
+    const prefix = plan.offset > 0 && !/[\r\n]$/.test(source.slice(0, plan.offset)) ? sourceEol : "";
+    const replacement = `${prefix}${plan.rendered.replace(/\n/g, sourceEol)}${sourceEol}`;
+    patches.push({ start: plan.offset, end: plan.offset, replacement });
+  }
+  const orderEntries = originalOrder.map((id) => ({
+    offset: rangeFor(sourceById.get(id))?.start ?? source.length,
+    inserted: false,
+    ids: [id]
+  }));
+  for (const plan of mergedInsertionPlans)
+    orderEntries.push({ offset: plan.offset, inserted: true, desiredIndex: plan.desiredIndex, ids: plan.newIds });
+  orderEntries.sort((a, b) => a.offset - b.offset
+    || Number(b.inserted) - Number(a.inserted)
+    || (a.desiredIndex ?? Number.MAX_SAFE_INTEGER) - (b.desiredIndex ?? Number.MAX_SAFE_INTEGER));
+  const sourceOrder = orderEntries.flatMap((entry) => entry.ids);
   patches.sort((a, b) => b.start - a.start || b.end - a.end);
   for (let index = 1; index < patches.length; index++) {
     if (patches[index - 1].start < patches[index].end)

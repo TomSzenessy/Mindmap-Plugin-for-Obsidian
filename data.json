@@ -13,6 +13,5 @@
   "navigationZoomPadding": 200,
   "mouseNavigation": false,
   "exportMarkmapFrontmatter": true,
-  "markmapColorFreezeLevel": 2,
-  "navigationConeAngle": 90
+  "markmapColorFreezeLevel": 2
 }

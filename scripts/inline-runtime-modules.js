@@ -4,50 +4,9 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
+const sourcePath = path.join(root, "src", "main.js");
 const mainPath = path.join(root, "main.js");
-
-const modules = [
-  {
-    name: "tree-model",
-    source: "lib/tree-model.js",
-    requireLine: 'var {\n  buildForest,\n  getGroupIds,\n  findTreeForNode,\n  countReachable,\n  setDepths,\n  findTreeNode,\n  getDescendants,\n  assignDirections,\n  propagateDirection,\n  countChildrenPerSide\n} = require("./lib/tree-model.js");',
-    declaration: "var {\n  buildForest,\n  getGroupIds,\n  findTreeForNode,\n  countReachable,\n  setDepths,\n  findTreeNode,\n  getDescendants,\n  assignDirections,\n  propagateDirection,\n  countChildrenPerSide\n}"
-  },
-  {
-    name: "settings",
-    source: "lib/settings.js",
-    requireLine: 'var { DEFAULT_SETTINGS, normalizeSettings } = require("./lib/settings.js");',
-    declaration: "var { DEFAULT_SETTINGS, normalizeSettings }"
-  },
-  {
-    name: "media-drop",
-    source: "lib/media-drop.js",
-    requireLine: 'var MediaDrop = require("./lib/media-drop.js");',
-    declaration: "var MediaDrop"
-  },
-  {
-    name: "live-sizing",
-    source: "lib/live-sizing.js",
-    requireLine: 'var { CARD_LAYOUT_VERSION, LiveSizingController } = require("./lib/live-sizing.js");',
-    declaration: "var { CARD_LAYOUT_VERSION, LiveSizingController }"
-  },
-  {
-    name: "markdown-order",
-    source: "lib/markdown-order.js",
-    requireLine: 'var MarkdownOrder = require("./lib/markdown-order.js");',
-    declaration: "var MarkdownOrder"
-  },
-  {
-    name: "export",
-    source: "lib/export.js",
-    requireLine: 'var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = require("./lib/export.js");',
-    declaration: "var { createExportMindMapModal, rasterizeSvg, saveToDownloads }"
-  }
-];
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+const { markerPattern, modules } = require("./runtime-modules");
 
 function moduleBlock(definition) {
   const source = fs.readFileSync(path.join(root, definition.source), "utf8")
@@ -66,16 +25,9 @@ function moduleBlock(definition) {
 }
 
 const original = fs.readFileSync(mainPath, "utf8");
-let main = original;
+let main = fs.readFileSync(sourcePath, "utf8");
 for (const definition of modules) {
   const block = moduleBlock(definition);
-  const markerPattern = new RegExp(
-    `// <tomindmap:module ${escapeRegExp(definition.name)}>\\n[\\s\\S]*?// </tomindmap:module ${escapeRegExp(definition.name)}>`
-  );
-  if (markerPattern.test(main)) {
-    main = main.replace(markerPattern, block);
-    continue;
-  }
   if (!main.includes(definition.requireLine))
     throw new Error(`Could not find runtime import for ${definition.name}`);
   main = main.replace(definition.requireLine, block);

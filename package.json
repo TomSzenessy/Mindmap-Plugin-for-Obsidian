@@ -5,9 +5,10 @@
   "description": "Keyboard-first mind mapping for Obsidian Canvas",
   "scripts": {
     "build": "node scripts/inline-runtime-modules.js",
+    "source:extract": "node scripts/extract-main-source.js",
     "build:check": "node scripts/inline-runtime-modules.js --check",
     "test": "node --test tests/*.test.js",
-    "check": "npm run build:check && npm test && node --check main.js"
+    "check": "npm run build:check && npm test && node --check main.js && node test-load.js"
   },
   "engines": {
     "node": ">=20"

@@ -108,14 +108,20 @@ Mindmap mode continuously keeps the active map readable. Topic dimensions are me
 
 The Command Palette also exposes topic creation, deletion, branch flipping, layout balancing, resizing, coloring, import, export, Markdown sync, media validation, outline, and navigation actions. Obsidian can assign custom hotkeys to every command.
 
-### Mouse actions
+### Mouse and Context Menu actions
 
+- Drag a card or complete branch near another node to preview and **switch** its single parent connection (XMind-style), keeping the complete subtree intact.
+- Attachment uses a fixed 180-Canvas-unit edge-to-edge distance. Moving beyond every node’s attachment distance detaches the branch; moving any standalone node inside that distance previews and creates a new connection.
+- Drop an image, PDF, audio file, video, or URL on a topic card to create a connected **standalone child media node**.
+- Drop a file or URL on empty Canvas space to create an independent **root media node**.
+- Standalone file and link nodes maintain their readable default sizes and support manual resizing without being affected by text auto-layout.
+- Right-click any topic to access branch tools:
+  - **Separate branch**: Detach a branch from its parent into an independent root node/tree.
+  - **Collapse / Expand subtree**: Fold or unfold child branches to streamline complex maps.
+  - **Color branch**: Color-code a topic and all its descendants recursively.
 - `Mod`-click a topic to zoom to its complete branch.
 - `Alt`-click a topic to select its complete tree.
 - `Alt`-drag a group to move the group while keeping unrelated trees in place.
-- Drop an image, PDF, audio file, video, or other file on a topic to embed it in that topic.
-- Drop a file on empty Canvas space to create a native file card at that position.
-- Drop a web or Obsidian URL on a topic to add it to the topic, or on empty space to create a link card.
 - Select two topics, open one topic’s context menu, and choose **Connect this topic → selected topic** to create a branch connection.
 - Enable mouse back/forward navigation in settings to move through topic history with extra mouse buttons.
 
@@ -246,10 +252,12 @@ npm run check     # verify the bundle, tests, and JavaScript syntax
 Runtime modules live in `lib/`:
 
 - `tree-model.js` builds a deterministic, cycle-safe forest from Canvas data;
+- `tree-drag.js` handles XMind-style node drag-and-drop reparenting and drop zone classification;
+- `mindmap-actions.js` manages branch separation, subtree collapse/expand, and branch coloring;
 - `live-sizing.js` owns text and media measurement plus render observers;
 - `markdown-order.js` preserves source slices while updating visual chronology;
 - `settings.js` defines and normalizes persisted configuration;
-- `media-drop.js` classifies dropped files and URLs and chooses native card sizes;
+- `media-drop.js` classifies dropped files and URLs and constructs native card specifications;
 - `export.js` owns export UI, image rasterization, and collision-free filenames.
 
 `scripts/inline-runtime-modules.js` embeds those modules into `main.js`, producing the three-file Obsidian release: `main.js`, `manifest.json`, and `styles.css`.

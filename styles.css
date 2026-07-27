@@ -58,8 +58,11 @@
 	flex: 0 0 auto;
 }
 
-/* Card dimensions are derived from rendered content in Mindmap mode. */
-.mindvas-mindmap-mode .canvas-node-resizer {
+/* Mind-map geometry is owned by automatic content sizing and layout. */
+.mindvas-mindmap-mode .canvas-node-resizer,
+.mindvas-mindmap-mode .canvas-node-resizers,
+.mindvas-mindmap-mode .canvas-node-resize-handle,
+.mindvas-mindmap-mode [class*="resizer"] {
 	display: none !important;
 	pointer-events: none !important;
 }
@@ -271,4 +274,17 @@
 	border: 0;
 	opacity: 0;
 	pointer-events: none;
+}
+
+/* Moving a rendered note/PDF can otherwise repaint an entire embedded
+ * document on every pointer event. Keep the card geometry, but temporarily
+ * suppress its expensive preview until the drag ends. */
+.mindvas-media-dragging .canvas-node-content,
+.mindvas-media-dragging.canvas-node-content,
+.mindvas-media-dragging .markdown-embed,
+.mindvas-media-dragging iframe,
+.mindvas-media-dragging object,
+.mindvas-media-dragging embed {
+	visibility: hidden !important;
+	pointer-events: none !important;
 }

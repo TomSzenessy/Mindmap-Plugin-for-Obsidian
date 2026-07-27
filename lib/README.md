@@ -6,6 +6,7 @@ These files are the maintainable source modules for focused runtime services:
 - `live-sizing.js` — deterministic first-pass sizing followed by measurements from the real Canvas preview. It owns the single batched observer used for virtualized cards.
 - `markdown-order.js` — visual topic chronology and lossless movement of existing Markdown source subtrees.
 - `media-drop.js` — dropped file/URL classification and native Canvas card sizing.
+- `canvas-session.js` — whole-map drag reflow and native Canvas save flushing across leaf changes.
 - `settings.js` — immutable defaults plus persisted-settings normalization.
 - `export.js` — the export chooser, rasterization, and collision-free Downloads filenames.
 
@@ -19,4 +20,6 @@ npm run build
 npm run check
 ```
 
-The build script embeds the modules into `main.js`. Obsidian installations use the standard `main.js`, `manifest.json`, and `styles.css` release files.
+`src/main.js` is the maintainable entry point. The build script embeds these
+modules into the generated `main.js`; Obsidian installations still use the
+standard `main.js`, `manifest.json`, and `styles.css` release files.

@@ -6,7 +6,8 @@ const test = require("node:test");
 const {
   CARD_LAYOUT_VERSION,
   LiveSizingController,
-  embeddedContentFloor
+  embeddedContentFloor,
+  isResizableCanvasNode
 } = require("../lib/live-sizing.js");
 const { DEFAULT_SETTINGS } = require("../lib/settings.js");
 
@@ -31,6 +32,19 @@ test("uses smaller, content-appropriate floors for other media", () => {
   assert.equal(embeddedContentFloor("![[photo.png]]", DEFAULT_SETTINGS).kind, "image");
   assert.equal(embeddedContentFloor("![[clip.mp4]]", DEFAULT_SETTINGS).kind, "video");
   assert.equal(embeddedContentFloor("![[interview.mp3]]", DEFAULT_SETTINGS).kind, "audio");
+});
+
+test("only plain text cards have manual resizing blocked", () => {
+  assert.equal(isResizableCanvasNode({ id: "text", text: "Plain topic" }), false);
+  assert.equal(isResizableCanvasNode({ id: "embed", text: "![[Documents/Guide.pdf]]" }), true);
+  assert.equal(
+    isResizableCanvasNode({ id: "file", type: "file", file: "Documents/Guide.pdf" }),
+    true
+  );
+  assert.equal(
+    isResizableCanvasNode({ id: "link", type: "link", url: "https://example.com/image.png" }),
+    true
+  );
 });
 
 test("respects configured maximum dimensions", () => {

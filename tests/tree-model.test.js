@@ -70,6 +70,34 @@ test("ignores groups, self-links, cycles, and surplus parents safely", () => {
   assert.equal(findTreeForNode(forest, "group"), null);
 });
 
+test("ignores transient drag preview edges when deriving hierarchy", () => {
+  const root = { id: "root", x: 0, y: 0, width: 200, height: 60 };
+  const parent = { id: "parent", x: 300, y: 0, width: 200, height: 60 };
+  const dragged = { id: "dragged", x: 600, y: 0, width: 200, height: 60 };
+  const permanent = {
+    id: "permanent",
+    from: { node: root },
+    to: { node: dragged }
+  };
+  const preview = {
+    id: "preview",
+    from: { node: parent },
+    to: { node: dragged },
+    __mindMapPreview: true
+  };
+  const canvas = {
+    nodes: new Map([root, parent, dragged].map((node) => [node.id, node])),
+    edges: new Map([[preview.id, preview], [permanent.id, permanent]]),
+    getData: () => ({
+      nodes: [root, parent, dragged].map((node) => ({ ...node, type: "text" }))
+    })
+  };
+
+  const forest = buildForest(canvas);
+  const draggedTree = findTreeForNode(forest, "dragged");
+  assert.equal(draggedTree.parent.canvasNode.id, "root");
+});
+
 test("handles very deep maps without recursive tree-model overflow", () => {
   const size = 12000;
   const ids = Array.from({ length: size }, (_, index) => `n${index}`);

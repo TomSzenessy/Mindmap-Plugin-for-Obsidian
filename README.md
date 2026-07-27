@@ -67,7 +67,7 @@ To update a Git installation, run `git pull` in the plugin directory and reload 
 5. Press `Tab` for a child or `Enter` for a sibling.
 6. Navigate with the arrow keys.
 
-Mindmap shortcuts take priority over native Canvas shortcuts while Mindmap mode is active. ToMindMap automatically sizes and arranges every map; there is no separate custom-positioning mode.
+Mindmap shortcuts take priority over native Canvas shortcuts while Mindmap mode is active. ToMindMap automatically sizes and arranges every map as you work.
 
 ## Keyboard shortcuts
 
@@ -92,7 +92,7 @@ Central topics can be deleted. Most actions are also available from the Command 
 
 ## Automatic layout and navigation
 
-ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, compacts card width and height after editing, and reflows only the part of the map affected by a change.
+ToMindMap treats a Canvas as one or more independent trees. It balances the two sides of each central topic, manages card dimensions from their rendered content without routine scrollbars, and reflows only the part of the map affected by a change.
 
 Arrow navigation is based on visible geometry rather than only parent/child relationships. It prefers well-aligned nearby topics, uses the viewport to resolve wider directional choices, wraps at map edges when enabled, and keeps the selected topic in view.
 
@@ -164,7 +164,7 @@ Open **Settings → ToMindMap** to customize:
 
 - default Mindmap mode and automatic branch colors;
 - horizontal and vertical spacing;
-- automatic card width and height limits;
+- card sizing safety limits for exceptionally large content;
 - arrow-navigation wrapping, corridor tolerance, and camera padding;
 - optional mouse back/forward navigation;
 - Markmap export frontmatter and color freeze level.

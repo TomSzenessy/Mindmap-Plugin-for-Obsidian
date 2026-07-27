@@ -35,6 +35,12 @@
 	word-break: normal;
 }
 
+/* Card dimensions are derived from rendered content in Mindmap mode. */
+.mindvas-mindmap-mode .canvas-node-resizer {
+	display: none !important;
+	pointer-events: none !important;
+}
+
 .canvas-node.mindvas-missing-media {
 	outline: 2px solid var(--color-red);
 	outline-offset: 3px;

@@ -2330,10 +2330,10 @@ var DEFAULT_SETTINGS = {
   horizontalGap: 80,
   verticalGap: 20,
   minNodeWidth: 180,
-  maxNodeWidth: 420,
+  maxNodeWidth: 1200,
   defaultNodeWidth: 300,
   defaultNodeHeight: 60,
-  maxNodeHeight: 300,
+  maxNodeHeight: 2400,
   defaultMindmapMode: true,
   wrapArrowNavigation: true,
   navigationCrossAxisBuffer: 40,
@@ -2393,7 +2393,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Minimum auto width").setDesc("Smallest card width used by auto-adjust (px)").addText(
+    new import_obsidian3.Setting(containerEl).setName("Minimum automatic width").setDesc("Smallest card width used by automatic layout (px)").addText(
       (text) => text.setValue(String(this.plugin.settings.minNodeWidth)).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -2402,7 +2402,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Maximum auto width").setDesc("Largest card width used by auto-adjust (px)").addText(
+    new import_obsidian3.Setting(containerEl).setName("Maximum auto width").setDesc("Generous safety limit for exceptionally wide content (px)").addText(
       (text) => text.setValue(String(this.plugin.settings.maxNodeWidth)).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -2420,7 +2420,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Max node height").setDesc("Maximum height a node can grow to before scrolling (px)").addText(
+    new import_obsidian3.Setting(containerEl).setName("Maximum auto height").setDesc("Generous safety limit for exceptionally tall content (px)").addText(
       (text) => text.setValue(String(this.plugin.settings.maxNodeHeight)).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -3806,10 +3806,12 @@ function parseMarkdownMindMapDocument(markdown) {
           inFence = true;
           mindmapFence = true;
         } else {
-          const block = [line.trimStart()];
+          const wrapperIndent = (line.match(/^[ \t]*/) || [""])[0];
+          const removeWrapperIndent = (value) => value.startsWith(wrapperIndent) ? value.slice(wrapperIndent.length) : value;
+          const block = [removeWrapperIndent(line)];
           const closingFence = fenceMatch[1][0] === "`" ? /^\s*`{3,}\s*$/ : /^\s*~{3,}\s*$/;
           while (++index < lines.length) {
-            block.push(lines[index]);
+            block.push(removeWrapperIndent(lines[index]));
             if (closingFence.test(lines[index]))
               break;
           }
@@ -5305,11 +5307,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     const canvasData = canvas.getData();
     const pendingResizeIds = new Set(Array.isArray(canvasData.mindmapPendingResize) ? canvasData.mindmapPendingResize : []);
-    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 2;
+    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 4;
     if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust") || pendingResizeIds.size > 0 || needsSizeMigration) {
       delete canvasData.mindmapAutoAdjust;
       delete canvasData.mindmapPendingResize;
-      canvasData.mindmapLayoutVersion = 2;
+      canvasData.mindmapLayoutVersion = 4;
       canvas.setData(canvasData);
       canvas.requestSave();
     }
@@ -5783,9 +5785,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const words = normalizedLines.flatMap((line) => line.split(/\s+/).filter(Boolean));
     const longestWordWidth = Math.max(0, ...words.map((word) => word.length * charWidth));
     const sizer = node.contentEl == null ? void 0 : node.contentEl.querySelector(".markdown-preview-sizer");
-    const sizerScrollWidth = sizer ? Number(sizer.scrollWidth || 0) : 0;
-    const sizerClientWidth = sizer ? Number(sizer.clientWidth || 0) : 0;
-    const intrinsicWidth = sizer && sizerScrollWidth > sizerClientWidth + 1 ? sizerScrollWidth + Math.max(0, node.width - sizerClientWidth) : 0;
+    const measurementElements = node.contentEl && typeof node.contentEl.querySelectorAll === "function" ? [
+      node.contentEl,
+      ...Array.from(node.contentEl.querySelectorAll(".markdown-preview-view, .markdown-preview-sizer, .table-wrapper, table, pre, blockquote, .math-block, img, video, iframe, embed"))
+    ] : [];
+    let intrinsicWidth = 0;
+    let overflowHeight = 0;
+    for (const element of measurementElements) {
+      const clientWidth = Number(element.clientWidth || 0);
+      const scrollWidth = Number(element.scrollWidth || 0);
+      if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+        intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 12);
+      const clientHeight = Number(element.clientHeight || 0);
+      const scrollHeight = Number(element.scrollHeight || 0);
+      if (clientHeight > 0 && scrollHeight > clientHeight + 1)
+        overflowHeight = Math.max(overflowHeight, node.height + scrollHeight - clientHeight + 12);
+    }
+    intrinsicWidth = Math.min(maxWidth, intrinsicWidth);
     const minimumContentWidth = Math.min(maxWidth, Math.max(minWidth, longestWordWidth + contentPadding, intrinsicWidth));
     const estimateLines = (candidateWidth) => {
       const available = Math.max(charWidth * 4, candidateWidth - contentPadding);
@@ -5813,28 +5829,36 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
     let width = Math.min(maxWidth, Math.ceil(minimumContentWidth / 10) * 10);
     let estimatedHeight = Math.min(maxHeight, Math.max(minHeight, 28 + estimateLines(width) * lineHeight));
-    let bestArea = width * estimatedHeight;
-    for (let candidate = width + 10; candidate <= maxWidth; candidate += 10) {
+    const sizeScore = (candidateWidth, candidateHeight) => {
+      const aspect = candidateWidth / Math.max(1, candidateHeight);
+      const tallPenalty = Math.max(0, 1.15 - aspect) * 0.55;
+      const widePenalty = Math.max(0, aspect - 6) * 0.08;
+      return candidateWidth * candidateHeight * (1 + tallPenalty + widePenalty);
+    };
+    let bestScore = sizeScore(width, estimatedHeight);
+    for (let candidate = width + 20; candidate <= maxWidth; candidate += 20) {
       const candidateHeight = Math.min(maxHeight, Math.max(minHeight, 28 + estimateLines(candidate) * lineHeight));
-      const area = candidate * candidateHeight;
-      if (area < bestArea || area === bestArea && candidateHeight < estimatedHeight) {
+      const score = sizeScore(candidate, candidateHeight);
+      if (score < bestScore || score === bestScore && candidateHeight < estimatedHeight) {
         width = candidate;
         estimatedHeight = candidateHeight;
-        bestArea = area;
+        bestScore = score;
       }
     }
     let renderedHeight = 0;
     if (sizer && Math.abs(width - node.width) < 2) {
-      for (const child of Array.from(sizer.children))
-        renderedHeight += child.offsetHeight;
+      const scrollHeight = Number(sizer.scrollHeight || 0);
+      const clientHeight = Number(sizer.clientHeight || 0);
+      const childrenHeight = Array.from(sizer.children).reduce((sum, child) => sum + Number(child.offsetHeight || 0), 0);
+      renderedHeight = Math.max(childrenHeight, scrollHeight > clientHeight + 1 ? scrollHeight : 0);
       if (renderedHeight > 0)
-        renderedHeight = Math.ceil(renderedHeight * 1.15) + 2;
+        renderedHeight = Math.ceil(renderedHeight * 1.12) + Math.max(24, node.height - clientHeight) + 4;
     }
-    const height = Math.min(maxHeight, Math.max(minHeight, estimatedHeight, renderedHeight));
+    const height = Math.min(maxHeight, Math.max(minHeight, estimatedHeight, renderedHeight, overflowHeight));
     return { width, height };
   }
   /**
-   * Resize text cards in both dimensions for auto-adjust mode.
+   * Resize text cards in both dimensions for automatic mindmap layout.
    */
   resizeNodes(canvas, nodes) {
     let changed = false;
@@ -5857,29 +5881,29 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
    * After a width change, use the re-rendered preview for a precise height and
    * reflow only the roots that contained adjusted nodes.
    */
-  resizeNodesRetry(canvas, nodes) {
+  resizeNodesRetry(canvas, nodes, attempt = 0) {
     if (!this.isAutoAdjustCanvas(canvas) || !this.isMindmapCanvas(canvas))
       return;
     let changed = false;
+    let widthChanged = false;
     for (const node of nodes) {
       const sizer = node.contentEl == null ? void 0 : node.contentEl.querySelector(".markdown-preview-sizer");
       if (!sizer)
         continue;
-      let contentH = 0;
-      for (const child of Array.from(sizer.children))
-        contentH += child.offsetHeight;
-      if (contentH === 0)
+      const target = this.getAutoNodeSize(node);
+      if (target.width === node.width && target.height === node.height)
         continue;
-      const targetH = Math.min(this.settings.maxNodeHeight, Math.max(this.settings.defaultNodeHeight, Math.ceil(contentH * 1.15) + 2));
-      if (targetH === node.height)
-        continue;
-      node.moveAndResize({ x: node.x, y: node.y, width: node.width, height: targetH });
+      if (target.width !== node.width)
+        widthChanged = true;
+      node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
       changed = true;
     }
     if (changed) {
       canvas.requestSave();
       this.relayoutAffectedBranches(canvas, nodes);
     }
+    if (widthChanged && attempt < 2)
+      this.trackedTimeout(() => this.resizeNodesRetry(canvas, nodes, attempt + 1), 200);
   }
   finishInsertNode(canvas, newNode, nearNode) {
     if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
@@ -6028,6 +6052,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("Markdown sync detached because the linked file no longer exists");
       return;
     }
+    const groupIds = getGroupIds(canvas);
+    const topicNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+    if (topicNodes.some((node) => node.isEditing))
+      return;
+    let finalizedBlankTopic = false;
+    for (const node of topicNodes) {
+      if (typeof node.text === "string" && !node.text.trim()) {
+        node.setText("Untitled");
+        finalizedBlankTopic = true;
+      }
+    }
+    if (finalizedBlankTopic)
+      canvas.requestSave();
     try {
       const current = await this.app.vault.cachedRead(source);
       const imported = markdownMindMapToCanvas(current, this.markdownLayoutOptions());
@@ -6176,7 +6213,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const reconciled = reconcileCanvasData(canvas.getData(), imported);
     const pendingResizeIds = new Set(Array.isArray(reconciled.mindmapPendingResize) ? reconciled.mindmapPendingResize : []);
     delete reconciled.mindmapPendingResize;
-    reconciled.mindmapLayoutVersion = 2;
+    reconciled.mindmapLayoutVersion = 4;
     reconciled.mindmapMarkdownSync = { path: linkedPath };
     this.syncApplyingCanvas.add(canvas);
     try {
@@ -6595,6 +6632,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.toggleBtnEl.remove();
       this.toggleBtnEl = null;
     }
+    if (canvas.wrapperEl)
+      canvas.wrapperEl.toggleClass("mindvas-mindmap-mode", this.isMindmapCanvas(canvas));
     const controls = canvas.view.containerEl.querySelector(".canvas-controls");
     if (!controls)
       return;
@@ -6611,6 +6650,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.updateToggleButton(canvas);
   }
   updateToggleButton(canvas) {
+    if (canvas.wrapperEl)
+      canvas.wrapperEl.toggleClass("mindvas-mindmap-mode", this.isMindmapCanvas(canvas));
     if (!this.toggleBtnEl)
       return;
     const isActive = this.isMindmapCanvas(canvas);
@@ -6676,14 +6717,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.origCanvasMethods = {};
   }
   async loadSettings() {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
+    const stored = await this.loadData() || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, stored);
+    let migratedSizingLimits = false;
+    if (this.settings.maxNodeWidth === 420) {
+      this.settings.maxNodeWidth = DEFAULT_SETTINGS.maxNodeWidth;
+      migratedSizingLimits = true;
+    }
+    if (this.settings.maxNodeHeight === 300) {
+      this.settings.maxNodeHeight = DEFAULT_SETTINGS.maxNodeHeight;
+      migratedSizingLimits = true;
+    }
     delete this.settings.autoLayout;
     delete this.settings.preserveManualPositions;
     delete this.settings.defaultAutoAdjust;
+    if (migratedSizingLimits)
+      await this.saveData(this.settings);
   }
   async saveSettings() {
     await this.saveData(this.settings);

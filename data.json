@@ -1,0 +1,19 @@
+{
+  "autoLayout": true,
+  "preserveManualPositions": true,
+  "defaultAutoAdjust": true,
+  "autoColor": true,
+  "horizontalGap": 80,
+  "verticalGap": 20,
+  "minNodeWidth": 180,
+  "maxNodeWidth": 420,
+  "defaultNodeWidth": 300,
+  "defaultNodeHeight": 60,
+  "maxNodeHeight": 300,
+  "defaultMindmapMode": true,
+  "wrapArrowNavigation": true,
+  "navigationConeAngle": 90,
+  "navigationCrossAxisBuffer": 40,
+  "navigationZoomPadding": 200,
+  "mouseNavigation": false
+}

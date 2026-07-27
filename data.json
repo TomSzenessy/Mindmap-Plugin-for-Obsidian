@@ -1,7 +1,4 @@
 {
-  "autoLayout": true,
-  "preserveManualPositions": true,
-  "defaultAutoAdjust": true,
   "autoColor": true,
   "horizontalGap": 80,
   "verticalGap": 20,

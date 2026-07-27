@@ -13,10 +13,6 @@
 	color: var(--interactive-accent);
 }
 
-.mindvas-auto-adjust-btn.is-disabled {
-	opacity: 0.45;
-}
-
 /* Smooth node repositioning animation */
 .canvas-node.mindmap-animating {
 	transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
@@ -31,6 +27,12 @@
 
 .canvas-node.mindvas-navigation-selected .canvas-node-content {
 	cursor: text;
+}
+
+.canvas-node .markdown-preview-view,
+.canvas-node .markdown-preview-sizer {
+	overflow-wrap: break-word;
+	word-break: normal;
 }
 
 .canvas-node.mindvas-missing-media {

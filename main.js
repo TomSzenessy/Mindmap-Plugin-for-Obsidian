@@ -1241,7 +1241,7 @@ var BranchColors = class {
 // src/ui/keyboard-handler.ts
 var import_obsidian2 = require("obsidian");
 var KeyboardHandler = class {
-  constructor(plugin, canvasApi, nodeOps, layoutEngine, branchColors, autoColorEnabled, autoLayoutEnabled, isMindmapEnabled = () => true, onNodesChanged = () => {
+  constructor(plugin, canvasApi, nodeOps, layoutEngine, branchColors, autoColorEnabled, isMindmapEnabled = () => true, onNodesChanged = () => {
   }) {
     this.plugin = plugin;
     this.canvasApi = canvasApi;
@@ -1249,7 +1249,6 @@ var KeyboardHandler = class {
     this.layoutEngine = layoutEngine;
     this.branchColors = branchColors;
     this.autoColorEnabled = autoColorEnabled;
-    this.autoLayoutEnabled = autoLayoutEnabled;
     this.isMindmapEnabled = isMindmapEnabled;
     this.onNodesChanged = onNodesChanged;
     /** Called before actions that leave the current node, to finalize auto-resize. */
@@ -2327,9 +2326,6 @@ var Navigation = class {
 // src/settings.ts
 var import_obsidian3 = require("obsidian");
 var DEFAULT_SETTINGS = {
-  autoLayout: true,
-  preserveManualPositions: true,
-  defaultAutoAdjust: true,
   autoColor: true,
   horizontalGap: 80,
   verticalGap: 20,
@@ -2364,12 +2360,6 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Keyboard workflow").setDesc("Type to edit · Enter creates a sibling (or saves while editing) · Shift+Enter creates a sibling above (or a line break while editing) · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+Delete removes only the topic · Mod+Enter inserts a parent · Alt+Up/Down reorders · F2 edits · Mod+R selects the root.");
-    new import_obsidian3.Setting(containerEl).setName("Default auto-adjust").setDesc("New and unconfigured canvases resize cards and reflow each mind map automatically. Use the Canvas toolbar toggle to switch an individual canvas to custom positioning.").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.defaultAutoAdjust).onChange(async (value) => {
-        this.plugin.settings.defaultAutoAdjust = value;
-        await this.plugin.saveSettings();
-      })
-    );
     new import_obsidian3.Setting(containerEl).setName("Auto-color branches").setDesc("Assign distinct colors to top-level branches").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.autoColor).onChange(async (value) => {
         this.plugin.settings.autoColor = value;
@@ -2548,8 +2538,6 @@ function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
   const downHandler = (e) => {
     if (draggedNode)
       clearDragSession();
-    if (e.altKey)
-      return;
     const node = findNodeFromEvent(canvas, e);
     if (node) {
       installWrapper(node);
@@ -2558,11 +2546,6 @@ function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
   const moveHandler = (e) => {
     if (e.buttons === 0)
       return;
-    if (e.altKey) {
-      if (draggedNode)
-        clearDragSession();
-      return;
-    }
     if (!draggedNode) {
       const node = canvasApi.getSelectedNode(canvas);
       if (node)
@@ -2692,73 +2675,18 @@ function getEditorElements(node) {
 function registerAutoResize(canvas, config, onEditExit) {
   var _a, _b, _c;
   let activeNode = null;
-  let observer = null;
-  let inputHandler = null;
-  let cachedCmContent = null;
-  let cachedScroller = null;
-  let cachedInputTarget = null;
-  function onContentChange() {
+  function startWatching(node) {
     if (typeof config.enabled === "function" && !config.enabled())
       return;
-    if (!activeNode || !cachedScroller || !cachedCmContent)
-      return;
-    const contentH = cachedCmContent.offsetHeight;
-    const chrome = activeNode.height - cachedScroller.clientHeight;
-    const targetH = Math.min(Math.max(contentH + chrome, config.minHeight), config.maxHeight);
-    if (targetH > activeNode.height) {
-      activeNode.moveAndResize({
-        x: activeNode.x,
-        y: activeNode.y,
-        width: activeNode.width,
-        height: targetH
-      });
-      canvas.requestSave();
-    }
-  }
-  function startWatching(node) {
-    var _a2, _b2;
     if (node.nodeEl)
       node.nodeEl.removeClass("mindvas-navigation-selected");
-    const { iframe, scroller, cmContent } = getEditorElements(node);
     activeNode = node;
-    cachedCmContent = cmContent;
-    cachedScroller = scroller;
-    const observeTarget = cmContent != null ? cmContent : (_a2 = iframe == null ? void 0 : iframe.contentDocument) == null ? void 0 : _a2.body;
-    if (observeTarget) {
-      observer = new MutationObserver(onContentChange);
-      observer.observe(observeTarget, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-    } else {
-      observer = new MutationObserver(onContentChange);
-      observer.observe(node.contentEl, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-    }
-    cachedInputTarget = (_b2 = iframe == null ? void 0 : iframe.contentDocument) != null ? _b2 : node.contentEl;
-    const handler = () => onContentChange();
-    inputHandler = handler;
-    cachedInputTarget.addEventListener("input", handler);
-    onContentChange();
   }
   function stopWatching(triggerRelayout = true) {
     if (!activeNode)
       return;
     const node = activeNode;
-    observer == null ? void 0 : observer.disconnect();
-    if (inputHandler && cachedInputTarget) {
-      cachedInputTarget.removeEventListener("input", inputHandler);
-    }
     activeNode = null;
-    observer = null;
-    inputHandler = null;
-    cachedCmContent = null;
-    cachedScroller = null;
-    cachedInputTarget = null;
     if (triggerRelayout && onEditExit) {
       onEditExit(canvas, node);
     }
@@ -3601,6 +3529,59 @@ function frontmatterWithTopicIds(frontmatter, topicIds, topicKeys, topicLabels) 
   cleaned.splice(closing, 0, ...metadata);
   return cleaned.join("\n");
 }
+function markdownWithTopicMetadata(markdown, topicIds, topicKeys, topicLabels) {
+  const original = String(markdown || "");
+  const bom = original.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const source = bom ? original.slice(1) : original;
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const metadata = [
+    "tomindmap:",
+    "  version: 1",
+    `  topicIds: ${JSON.stringify(topicIds)}`,
+    `  topicKeys: ${JSON.stringify(topicKeys)}`,
+    `  topicLabels: ${JSON.stringify(topicLabels)}`
+  ].join(eol);
+  const opening = source.match(/^---[ \t]*(\r\n|\n|\r)/);
+  if (!opening)
+    return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
+  const contentStart = opening[0].length;
+  const closingPattern = /^---[ \t]*(?:\r\n|\n|\r|$)/gm;
+  closingPattern.lastIndex = contentStart;
+  const closing = closingPattern.exec(source);
+  if (!closing)
+    return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
+  const frontmatterBody = source.slice(contentStart, closing.index);
+  const linePattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
+  const lineRecords = [];
+  let match;
+  while (match = linePattern.exec(frontmatterBody)) {
+    if (!match[0])
+      break;
+    lineRecords.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[0].replace(/(?:\r\n|\n|\r)$/, "")
+    });
+  }
+  const blockStartIndex = lineRecords.findIndex((line) => /^tomindmap:[ \t]*$/.test(line.text));
+  let updatedBody;
+  if (blockStartIndex >= 0) {
+    let blockEndIndex = blockStartIndex + 1;
+    while (blockEndIndex < lineRecords.length && /^[ \t]+/.test(lineRecords[blockEndIndex].text))
+      blockEndIndex++;
+    const start = lineRecords[blockStartIndex].start;
+    const end = blockEndIndex < lineRecords.length ? lineRecords[blockEndIndex].start : frontmatterBody.length;
+    const replacement = metadata + (end > start && /(?:\r\n|\n|\r)$/.test(frontmatterBody.slice(start, end)) ? eol : "");
+    updatedBody = frontmatterBody.slice(0, start) + replacement + frontmatterBody.slice(end);
+  } else {
+    const separator = frontmatterBody.length === 0 || /(?:\r\n|\n|\r)$/.test(frontmatterBody) ? "" : eol;
+    updatedBody = frontmatterBody + separator + metadata + eol;
+  }
+  return bom + source.slice(0, contentStart) + updatedBody + source.slice(closing.index);
+}
+function withoutLegacyPluginComments(markdown) {
+  return String(markdown || "").replace(/[ \t]*<!--\s*tomindmap:id=[A-Za-z0-9_-]+\s*-->/gi, "").replace(/^[ \t]*<!--\s*\/?mindvas:(?:node|content)(?:\s+id=[A-Za-z0-9_-]+)?\s*-->[ \t]*(?:\r\n|\n|\r|$)/gim, "");
+}
 function markdownFrontmatterForCanvas(canvas, options = {}) {
   const data = canvas.getData();
   const stored = typeof data.mindmapMarkdownFrontmatter === "string" ? data.mindmapMarkdownFrontmatter.trim() : "";
@@ -3616,7 +3597,7 @@ function markdownFrontmatterForCanvas(canvas, options = {}) {
 function isStandaloneMarkdownBlock(text) {
   const trimmed = String(text || "").trim();
   const lines = trimmed.split("\n");
-  return /^(```|~~~|\$\$)/.test(trimmed) || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) || /^!\[\[[^\]]+\]\]\s*$/.test(trimmed) || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(trimmed) || lines.length >= 2 && /^\s*\|.*\|\s*$/.test(lines[0]) && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
+  return /^(```|~~~|\$\$)/.test(trimmed) || /^>\s?/.test(trimmed) || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) || /^!\[\[[^\]]+\]\]\s*$/.test(trimmed) || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(trimmed) || lines.length >= 2 && /^\s*\|.*\|\s*$/.test(lines[0]) && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
 }
 function markmapHeadingSafe(text) {
   const firstLine = String(text || "").trim().split("\n")[0];
@@ -3658,19 +3639,19 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
   const frontmatter = frontmatterWithTopicIds(markdownFrontmatterForCanvas(canvas, options), topicIds, topicKeys, topicLabels);
   const lines = frontmatter ? [frontmatter, ""] : [];
   const rawText = (tree) => markdownWithPortableCardLinks(portableTopicText(tree.canvasNode.text), idToSlug);
-  const emitIndentedBlock = (text, indent, marker) => {
+  const emitIndentedBlock = (text, indent) => {
     const prefix = "  ".repeat(indent);
-    if (marker)
-      lines.push(`${prefix}<!-- mindvas:node -->`);
     for (const line of String(text).split("\n"))
       lines.push(`${prefix}${line}`);
-    if (marker)
-      lines.push(`${prefix}<!-- /mindvas:node -->`);
   };
   const emitListNode = (tree, indent) => {
     const raw = rawText(tree);
     if (isStandaloneMarkdownBlock(raw)) {
-      emitIndentedBlock(raw, indent, true);
+      if (lines.length > 0 && lines[lines.length - 1] !== "")
+        lines.push("");
+      emitIndentedBlock(raw, indent);
+      if (lines[lines.length - 1] !== "")
+        lines.push("");
       for (const child of tree.children)
         emitListNode(child, indent + 1);
       return;
@@ -3681,10 +3662,8 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     const keepsOwnMarker = /^(?:[-+*]\s+\[[ xX]\]|\d+[.)]\s+)/.test(first);
     lines.push(`${prefix}${keepsOwnMarker ? first : `- ${first}`}`);
     if (parts.length > 0) {
-      lines.push(`${prefix}  <!-- mindvas:content -->`);
       for (const line of parts)
         lines.push(`${prefix}  ${line}`);
-      lines.push(`${prefix}  <!-- /mindvas:content -->`);
     }
     for (const child of tree.children)
       emitListNode(child, indent + 1);
@@ -3694,17 +3673,18 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     const parts = raw.split("\n");
     const title = parts.shift() || "Untitled";
     lines.push("", `${"#".repeat(level)} ${title}`);
-    if (parts.length > 0) {
-      lines.push("<!-- mindvas:content -->", ...parts, "<!-- /mindvas:content -->");
-    }
+    if (parts.length > 0)
+      lines.push(...parts);
     emitHeadingChildren(tree.children, level + 1);
   };
   const emitHeadingChildren = (children, level) => {
     if (children.length === 0)
       return;
+    const subtreeContainsBlock = (tree) => isStandaloneMarkdownBlock(rawText(tree)) || tree.children.some(subtreeContainsBlock);
+    const groupContainsBlock = children.some(subtreeContainsBlock);
     const useHeadingLevel = level <= 6 && children.every((child) => {
       const raw = rawText(child);
-      return isStandaloneMarkdownBlock(raw) && child.children.length === 0 || child.children.length > 0 && markmapHeadingSafe(raw);
+      return isStandaloneMarkdownBlock(raw) && child.children.length === 0 || markmapHeadingSafe(raw) && (groupContainsBlock || child.children.length > 0);
     });
     if (!useHeadingLevel) {
       for (const child of children)
@@ -3715,7 +3695,8 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
       const raw = rawText(child);
       if (isStandaloneMarkdownBlock(raw)) {
         lines.push("");
-        emitIndentedBlock(raw, 0, true);
+        emitIndentedBlock(raw, 0);
+        emitHeadingChildren(child.children, level + 1);
       } else {
         emitHeadingNode(child, level);
       }
@@ -3729,7 +3710,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     const rootParts = rootRaw.split("\n");
     lines.push(`# ${rootParts.shift() || "Untitled"}`);
     if (rootParts.length > 0)
-      lines.push("<!-- mindvas:content -->", ...rootParts, "<!-- /mindvas:content -->");
+      lines.push(...rootParts);
     emitHeadingChildren(root.children, 2);
   }
   return lines.join("\n").trim() + "\n";
@@ -3869,6 +3850,22 @@ function parseMarkdownMindMapDocument(markdown) {
       addNode(block.join("\n"), currentParent());
       continue;
     }
+    if (/^\s*>\s?/.test(line)) {
+      const block = [line.trimStart()];
+      while (index + 1 < lines.length) {
+        if (/^\s*>\s?/.test(lines[index + 1])) {
+          block.push(lines[++index].trimStart());
+          continue;
+        }
+        if (!lines[index + 1].trim() && index + 2 < lines.length && /^\s*>\s?/.test(lines[index + 2])) {
+          block.push(lines[++index]);
+          continue;
+        }
+        break;
+      }
+      addNode(block.join("\n"), currentParent());
+      continue;
+    }
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading && !mermaidMode) {
       const level = heading[1].length;
@@ -3990,6 +3987,9 @@ function parseMarkdownMindMapDocument(markdown) {
     assignedIds.add(candidate);
   }
   const metadataCurrent = metadataIds.length === orderedNodes.length && metadataKeys.length === orderedNodes.length && metadataLabels.length === orderedNodes.length && orderedNodes.every((node, index) => metadataIds[index] === node.id && metadataKeys[index] === topicIdentityKey(node.text) && metadataLabels[index] === topicIdentityLabel(node.text));
+  const topicIds = orderedNodes.map((node) => node.id);
+  const topicKeys = orderedNodes.map((node) => topicIdentityKey(node.text));
+  const topicLabels = orderedNodes.map((node) => topicIdentityLabel(node.text));
   const setPosition = (node, position) => {
     node.position = position;
     for (const child of node.children)
@@ -4009,7 +4009,7 @@ function parseMarkdownMindMapDocument(markdown) {
         leftWeight += childWeight;
     }
   }
-  return { roots, frontmatter, stableIdCount, metadataCurrent };
+  return { roots, frontmatter, stableIdCount, metadataCurrent, topicIds, topicKeys, topicLabels };
 }
 function parseMarkdownMindMap(markdown) {
   return parseMarkdownMindMapDocument(markdown).roots;
@@ -4027,7 +4027,7 @@ function markdownMindMapToCanvas(markdown, opts) {
     const height = layoutTree(root, 0, currentY, opts, nodes, edges);
     currentY += height + treeGap;
   }
-  return { nodes, edges, frontmatter: parsed.frontmatter, stableIdCount: parsed.stableIdCount, metadataCurrent: parsed.metadataCurrent, rootIds: roots.map((_, index) => {
+  return { nodes, edges, frontmatter: parsed.frontmatter, stableIdCount: parsed.stableIdCount, metadataCurrent: parsed.metadataCurrent, topicIds: parsed.topicIds, topicKeys: parsed.topicKeys, topicLabels: parsed.topicLabels, rootIds: roots.map((_, index) => {
     let seen = -1;
     for (const node of nodes) {
       if (!edges.some((edge) => edge.toNode === node.id)) {
@@ -4072,75 +4072,30 @@ function canvasDataToMindMapMarkdown(data, file, options = {}) {
 function reconcileCanvasData(existingData, imported) {
   const current = existingData && typeof existingData === "object" ? existingData : {};
   const existingNodes = new Map((current.nodes || []).map((node) => [node.id, node]));
-  const importedNodes = new Map(imported.nodes.map((node) => [node.id, node]));
-  const importedChildren = /* @__PURE__ */ new Map();
-  for (const edge of imported.edges) {
-    let children = importedChildren.get(edge.fromNode);
-    if (!children) {
-      children = [];
-      importedChildren.set(edge.fromNode, children);
-    }
-    children.push(edge.toNode);
-  }
-  const rootOffsetById = /* @__PURE__ */ new Map();
-  let nextNewRootY = (current.nodes || []).filter((node) => node.type !== "group").reduce((bottom, node) => Math.max(bottom, Number(node.y || 0) + Number(node.height || 0)), -Infinity);
-  const hasExistingTopics = Number.isFinite(nextNewRootY);
-  const assignRootOffset = (nodeId, offset) => {
-    if (rootOffsetById.has(nodeId))
-      return;
-    rootOffsetById.set(nodeId, offset);
-    for (const childId of importedChildren.get(nodeId) || [])
-      assignRootOffset(childId, offset);
-  };
-  for (const rootId of imported.rootIds || []) {
-    const generatedRoot = importedNodes.get(rootId);
-    const existingRoot = existingNodes.get(rootId);
-    if (generatedRoot && existingRoot) {
-      assignRootOffset(rootId, {
-        x: Number(existingRoot.x || 0) - Number(generatedRoot.x || 0),
-        y: Number(existingRoot.y || 0) - Number(generatedRoot.y || 0)
-      });
-      continue;
-    }
-    if (!generatedRoot || !hasExistingTopics) {
-      assignRootOffset(rootId, { x: 0, y: 0 });
-      continue;
-    }
-    const descendantIds = [];
-    const collect = (id) => {
-      if (descendantIds.includes(id))
-        return;
-      descendantIds.push(id);
-      for (const childId of importedChildren.get(id) || [])
-        collect(childId);
-    };
-    collect(rootId);
-    const subtree = descendantIds.map((id) => importedNodes.get(id)).filter(Boolean);
-    const minX = Math.min(...subtree.map((node) => node.x));
-    const minY = Math.min(...subtree.map((node) => node.y));
-    const maxY = Math.max(...subtree.map((node) => node.y + node.height));
-    const existingLeft = (current.nodes || []).filter((node) => node.type !== "group").reduce((left, node) => Math.min(left, Number(node.x || 0)), 0);
-    const offset = { x: existingLeft - minX, y: nextNewRootY + 160 - minY };
-    assignRootOffset(rootId, offset);
-    nextNewRootY = maxY + offset.y;
-  }
+  const pendingResizeIds = new Set(Array.isArray(current.mindmapPendingResize) ? current.mindmapPendingResize : []);
+  const normalizeText = (text) => String(text || "").replace(/\r\n?/g, "\n").trim();
   const nodes = [];
   for (const incoming of imported.nodes) {
     const existing = existingNodes.get(incoming.id);
     if (existing) {
+      const contentChanged = normalizeText(existing.text) !== normalizeText(incoming.text);
+      if (contentChanged)
+        pendingResizeIds.add(incoming.id);
+      else
+        pendingResizeIds.delete(incoming.id);
       nodes.push({
         ...existing,
         type: incoming.type,
         text: incoming.text,
         id: incoming.id,
-        x: existing.x,
-        y: existing.y,
-        width: existing.width,
-        height: existing.height
+        x: incoming.x,
+        y: incoming.y,
+        width: contentChanged ? incoming.width : existing.width,
+        height: contentChanged ? incoming.height : existing.height
       });
     } else {
-      const offset = rootOffsetById.get(incoming.id) || { x: 0, y: 0 };
-      nodes.push({ ...incoming, x: incoming.x + offset.x, y: incoming.y + offset.y });
+      pendingResizeIds.add(incoming.id);
+      nodes.push({ ...incoming });
     }
   }
   const groupIds = /* @__PURE__ */ new Set();
@@ -4162,13 +4117,21 @@ function reconcileCanvasData(existingData, imported) {
     if (retainedIds.has(edge.fromNode) && retainedIds.has(edge.toNode))
       edges.push(edge);
   }
-  return {
+  const reconciled = {
     ...current,
     nodes,
     edges,
     mindmap: true,
     mindmapMarkdownFrontmatter: imported.frontmatter || current.mindmapMarkdownFrontmatter || ""
   };
+  delete reconciled.mindmapAutoAdjust;
+  const retainedTopicIds = new Set(imported.nodes.map((node) => node.id));
+  const pending = Array.from(pendingResizeIds).filter((id) => retainedTopicIds.has(id));
+  if (pending.length > 0)
+    reconciled.mindmapPendingResize = pending;
+  else
+    delete reconciled.mindmapPendingResize;
+  return reconciled;
 }
 function convertMarkdownAnchorsToCardLinks(nodes, canvasPath) {
   const slugToId = /* @__PURE__ */ new Map();
@@ -4190,6 +4153,34 @@ function convertMarkdownAnchorsToCardLinks(nodes, canvasPath) {
       return `](obsidian://mindvas-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${targetId})`;
     });
   }
+}
+function canvasMatchesImportedMarkdown(canvas, imported, canvasPath) {
+  if (!imported)
+    return false;
+  const groupIds = getGroupIds(canvas);
+  const liveNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+  const incomingNodes = imported.nodes.map((node) => ({ ...node }));
+  convertMarkdownAnchorsToCardLinks(incomingNodes, canvasPath);
+  if (liveNodes.length !== incomingNodes.length)
+    return false;
+  const liveById = new Map(liveNodes.map((node) => [node.id, node]));
+  const normalizeText = (text) => String(text || "").replace(/\r\n?/g, "\n").trim();
+  for (const incoming of incomingNodes) {
+    const live = liveById.get(incoming.id);
+    if (!live || normalizeText(live.text) !== normalizeText(incoming.text))
+      return false;
+  }
+  const topicIds = new Set(incomingNodes.map((node) => node.id));
+  const edgeKey = (edge) => `${edge.fromNode}\0${edge.toNode}`;
+  const incomingEdges = new Set(imported.edges.filter((edge) => topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)).map(edgeKey));
+  const liveEdges = new Set((canvas.getData().edges || []).filter((edge) => topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)).map(edgeKey));
+  if (incomingEdges.size !== liveEdges.size)
+    return false;
+  for (const key of incomingEdges) {
+    if (!liveEdges.has(key))
+      return false;
+  }
+  return true;
 }
 function extractLocalMediaTargets(markdown) {
   const targets = /* @__PURE__ */ new Set();
@@ -4689,7 +4680,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.autoResizeHandle = null;
     this.interceptedCanvas = null;
     this.toggleBtnEl = null;
-    this.autoAdjustBtnEl = null;
     this.cleanupGroupBoundsHandler = null;
     this.cleanupSelectionSyncHandler = null;
     this.cleanupInsertNodeHandler = null;
@@ -4749,7 +4739,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.layoutEngine,
       this.branchColors,
       () => this.settings.autoColor,
-      () => this.settings.autoLayout,
       (canvas) => this.isMindmapCanvas(canvas),
       (canvas) => this.updateGroupBounds(canvas)
     );
@@ -4898,18 +4887,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         if (checking)
           return true;
         this.toggleMindmapMode(canvas);
-      }
-    });
-    this.addCommand({
-      id: "mindmap-toggle-auto-adjust",
-      name: "Toggle auto-adjust / custom positioning",
-      checkCallback: (checking) => {
-        const canvas = this.canvasApi.getActiveCanvas();
-        if (!canvas || !this.isMindmapCanvas(canvas))
-          return false;
-        if (checking)
-          return true;
-        this.toggleAutoAdjust(canvas);
       }
     });
     this.registerEvent(
@@ -5253,10 +5230,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.toggleBtnEl.remove();
       this.toggleBtnEl = null;
     }
-    if (this.autoAdjustBtnEl) {
-      this.autoAdjustBtnEl.remove();
-      this.autoAdjustBtnEl = null;
-    }
   }
   /**
    * Called when the active leaf changes — set up canvas-specific UI.
@@ -5327,12 +5300,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         this.toggleBtnEl.remove();
         this.toggleBtnEl = null;
       }
-      if (this.autoAdjustBtnEl) {
-        this.autoAdjustBtnEl.remove();
-        this.autoAdjustBtnEl = null;
-      }
       this.hideOutline();
       return;
+    }
+    const canvasData = canvas.getData();
+    const pendingResizeIds = new Set(Array.isArray(canvasData.mindmapPendingResize) ? canvasData.mindmapPendingResize : []);
+    const needsSizeMigration = canvasData.mindmapLayoutVersion !== 2;
+    if (Object.prototype.hasOwnProperty.call(canvasData, "mindmapAutoAdjust") || pendingResizeIds.size > 0 || needsSizeMigration) {
+      delete canvasData.mindmapAutoAdjust;
+      delete canvasData.mindmapPendingResize;
+      canvasData.mindmapLayoutVersion = 2;
+      canvas.setData(canvasData);
+      canvas.requestSave();
     }
     this.injectToggleButton(canvas);
     this.cleanupKeyboardHandler = this.keyboardHandler.attachToCanvas(canvas);
@@ -5341,7 +5320,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.cleanupSubtreeDragHandler = registerSubtreeDragHandler(
       canvas,
       this.canvasApi,
-      (node) => this.handleAutoAdjustDrag(canvas, node)
+      (node) => {
+        if (this.isMindmapCanvas(canvas))
+          this.resizeNodes(canvas, [node]);
+        this.handleAutoAdjustDrag(canvas, node);
+      }
     );
     this.cleanupGroupDragHandler = registerGroupDragHandler(canvas, this.canvasApi);
     const onDragEnd = () => this.trackedRaf(() => this.updateGroupBounds(canvas));
@@ -5476,7 +5459,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.waitForPreview(node, () => {
         if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
           this.resizeNodes(canvas, [node]);
-          this.relayoutFromRoot(canvas, node);
+          this.relayoutAffectedBranches(canvas, [node]);
         }
       });
     };
@@ -5503,9 +5486,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.autoResizeHandle = registerAutoResize(
       canvas,
       {
-        minHeight: this.settings.defaultNodeHeight,
-        maxHeight: this.settings.maxNodeHeight,
-        enabled: () => this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)
+        enabled: () => this.isMindmapCanvas(canvas)
       },
       (canvas2, editedNode) => {
         this.waitForPreview(editedNode, () => {
@@ -5514,15 +5495,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           if (!this.isAutoAdjustCanvas(canvas2) || !this.isMindmapCanvas(canvas2)) {
             return;
           }
-          const forest = buildForest(canvas2);
-          const treeNode = findTreeForNode(forest, editedNode.id);
-          if (!treeNode)
-            return;
-          let root2 = treeNode;
-          while (root2.parent)
-            root2 = root2.parent;
-          this.resizeNodes(canvas2, this.collectSubtreeNodes(canvas2, root2.canvasNode));
-          this.layoutEngine.layoutChildren(canvas2, root2.canvasNode.id);
+          this.resizeNodes(canvas2, [editedNode]);
+          this.relayoutAffectedBranches(canvas2, [editedNode]);
           this.updateGroupBounds(canvas2);
         });
       }
@@ -5536,7 +5510,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           if (this.canvasApi.getActiveCanvas() !== canvas)
             return;
           this.resizeNodes(canvas, [node]);
-          this.relayoutFromRoot(canvas, node);
+          this.relayoutAffectedBranches(canvas, [node]);
         });
       }
     };
@@ -5612,6 +5586,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     if (this.isMindmapCanvas(canvas)) {
       this.showOutline(canvas);
+      this.trackedRaf(() => {
+        if (this.canvasApi.getActiveCanvas() !== canvas || !this.isMindmapCanvas(canvas))
+          return;
+        const groupIds = getGroupIds(canvas);
+        const topics = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+        const topicsToResize = needsSizeMigration ? topics : topics.filter((node) => pendingResizeIds.has(node.id));
+        if (topicsToResize.length > 0)
+          this.resizeNodes(canvas, topicsToResize);
+        this.layoutEngine.layout(canvas);
+        this.updateGroupBounds(canvas);
+      });
     } else {
       this.hideOutline();
     }
@@ -5748,36 +5733,37 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }, 500);
   }
   /**
-   * Find the root of the tree containing a node and relayout from there.
+   * Reflow the smallest safe branch for each changed node. Deep edits only
+   * touch their top-level branch; roots and direct root children repack the
+   * root because their size can affect both sides of the map.
    */
-  relayoutFromRoot(canvas, node) {
+  relayoutAffectedBranches(canvas, nodes) {
     const forest = buildForest(canvas);
-    const treeNode = findTreeForNode(forest, node.id);
-    if (!treeNode)
-      return;
-    let root = treeNode;
-    while (root.parent)
-      root = root.parent;
-    this.layoutEngine.layoutChildren(canvas, root.canvasNode.id);
+    const anchorIds = /* @__PURE__ */ new Set();
+    for (const node of nodes) {
+      let tree = findTreeForNode(forest, node.id);
+      if (!tree)
+        continue;
+      if (!tree.parent) {
+        anchorIds.add(tree.canvasNode.id);
+        continue;
+      }
+      if (!tree.parent.parent) {
+        anchorIds.add(tree.parent.canvasNode.id);
+        continue;
+      }
+      while (tree.parent && tree.parent.parent)
+        tree = tree.parent;
+      anchorIds.add(tree.canvasNode.id);
+    }
+    for (const anchorId of anchorIds)
+      this.layoutEngine.layoutChildren(canvas, anchorId);
     this.updateGroupBounds(canvas);
   }
   handleAutoAdjustDrag(canvas, node) {
     if (!this.isMindmapCanvas(canvas) || !this.isAutoAdjustCanvas(canvas))
       return;
-    const forest = buildForest(canvas);
-    let tree = findTreeForNode(forest, node.id);
-    if (!tree)
-      return;
-    if (!tree.parent || !tree.parent.parent) {
-      while (tree.parent)
-        tree = tree.parent;
-      this.layoutEngine.layoutChildren(canvas, tree.canvasNode.id);
-    } else {
-      while (tree.parent && tree.parent.parent)
-        tree = tree.parent;
-      this.layoutEngine.layoutChildren(canvas, tree.canvasNode.id);
-    }
-    this.updateGroupBounds(canvas);
+    this.relayoutAffectedBranches(canvas, [node]);
   }
   getAutoNodeSize(node) {
     if (typeof node.text !== "string") {
@@ -5788,20 +5774,56 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const minHeight = this.settings.defaultNodeHeight;
     const maxHeight = this.settings.maxNodeHeight;
     const { cmContent } = getEditorElements(node);
-    const rawText = node.isEditing && (cmContent == null ? void 0 : cmContent.innerText) ? cmContent.innerText : node.text;
+    const rawText = node.isEditing && cmContent ? cmContent.innerText : node.text;
     const lines = String(rawText || "").split("\n");
-    const normalizedLines = lines.map((line) => line.replace(/^[\s>*#\-\d.]+/, "").replace(/[*_`~[\]]/g, ""));
-    const longestLine = Math.max(0, ...normalizedLines.map((line) => line.length));
-    const idealWidth = rawText ? 64 + Math.min(longestLine, 52) * 7.2 : this.settings.defaultNodeWidth;
-    const width = Math.round(Math.min(maxWidth, Math.max(minWidth, idealWidth)) / 10) * 10;
-    const charsPerLine = Math.max(8, Math.floor((width - 42) / 7.2));
-    let visualLines = 0;
-    for (const line of normalizedLines) {
-      visualLines += Math.max(1, Math.ceil(Math.max(1, line.length) / charsPerLine));
-    }
-    const estimatedHeight = 28 + Math.max(1, visualLines) * 22;
-    let renderedHeight = 0;
+    const normalizedLines = lines.map((line) => line.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/<[^>]+>/g, " ").replace(/^[\s>*#\-\d.)]+/, "").replace(/[*_`~[\]|]/g, " ").replace(/\s+/g, " ").trim());
+    const charWidth = 7.2;
+    const contentPadding = 54;
+    const lineHeight = 22;
+    const words = normalizedLines.flatMap((line) => line.split(/\s+/).filter(Boolean));
+    const longestWordWidth = Math.max(0, ...words.map((word) => word.length * charWidth));
     const sizer = node.contentEl == null ? void 0 : node.contentEl.querySelector(".markdown-preview-sizer");
+    const sizerScrollWidth = sizer ? Number(sizer.scrollWidth || 0) : 0;
+    const sizerClientWidth = sizer ? Number(sizer.clientWidth || 0) : 0;
+    const intrinsicWidth = sizer && sizerScrollWidth > sizerClientWidth + 1 ? sizerScrollWidth + Math.max(0, node.width - sizerClientWidth) : 0;
+    const minimumContentWidth = Math.min(maxWidth, Math.max(minWidth, longestWordWidth + contentPadding, intrinsicWidth));
+    const estimateLines = (candidateWidth) => {
+      const available = Math.max(charWidth * 4, candidateWidth - contentPadding);
+      let count = 0;
+      for (const line of normalizedLines) {
+        const lineWords = line.split(/\s+/).filter(Boolean);
+        if (lineWords.length === 0) {
+          count++;
+          continue;
+        }
+        let used = 0;
+        for (const word of lineWords) {
+          const wordWidth = word.length * charWidth;
+          const next = used === 0 ? wordWidth : used + charWidth + wordWidth;
+          if (used > 0 && next > available) {
+            count++;
+            used = wordWidth;
+          } else {
+            used = next;
+          }
+        }
+        count++;
+      }
+      return Math.max(1, count);
+    };
+    let width = Math.min(maxWidth, Math.ceil(minimumContentWidth / 10) * 10);
+    let estimatedHeight = Math.min(maxHeight, Math.max(minHeight, 28 + estimateLines(width) * lineHeight));
+    let bestArea = width * estimatedHeight;
+    for (let candidate = width + 10; candidate <= maxWidth; candidate += 10) {
+      const candidateHeight = Math.min(maxHeight, Math.max(minHeight, 28 + estimateLines(candidate) * lineHeight));
+      const area = candidate * candidateHeight;
+      if (area < bestArea || area === bestArea && candidateHeight < estimatedHeight) {
+        width = candidate;
+        estimatedHeight = candidateHeight;
+        bestArea = area;
+      }
+    }
+    let renderedHeight = 0;
     if (sizer && Math.abs(width - node.width) < 2) {
       for (const child of Array.from(sizer.children))
         renderedHeight += child.offsetHeight;
@@ -5856,23 +5878,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     if (changed) {
       canvas.requestSave();
-      this.relayoutAffectedRoots(canvas, nodes);
+      this.relayoutAffectedBranches(canvas, nodes);
     }
-  }
-  relayoutAffectedRoots(canvas, nodes) {
-    const forest = buildForest(canvas);
-    const rootIds = /* @__PURE__ */ new Set();
-    for (const node of nodes) {
-      let tree = findTreeForNode(forest, node.id);
-      if (!tree)
-        continue;
-      while (tree.parent)
-        tree = tree.parent;
-      rootIds.add(tree.canvasNode.id);
-    }
-    for (const rootId of rootIds)
-      this.layoutEngine.layoutChildren(canvas, rootId);
-    this.updateGroupBounds(canvas);
   }
   finishInsertNode(canvas, newNode, nearNode) {
     if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
@@ -6021,13 +6028,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("Markdown sync detached because the linked file no longer exists");
       return;
     }
-    const markdown = canvasToMindMapMarkdown(canvas, this.settings);
     try {
+      const current = await this.app.vault.cachedRead(source);
+      const imported = markdownMindMapToCanvas(current, this.markdownLayoutOptions());
+      let markdown;
+      if (imported && canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path)) {
+        markdown = markdownWithTopicMetadata(
+          withoutLegacyPluginComments(current),
+          imported.topicIds || [],
+          imported.topicKeys || [],
+          imported.topicLabels || []
+        );
+      } else {
+        markdown = canvasToMindMapMarkdown(canvas, this.settings);
+      }
+      const verified = markdownMindMapToCanvas(markdown, this.markdownLayoutOptions());
+      if (!verified || !canvasMatchesImportedMarkdown(canvas, verified, canvasFile.path))
+        throw new Error("generated Markdown did not reproduce the Canvas graph");
       await this.writeMarkdownFile(source, markdown);
       this.indexMarkdownLink(canvasFile.path, source.path);
     } catch (error) {
       console.error("ToMindMap: Canvas to Markdown sync failed", error);
-      new import_obsidian5.Notice("Could not update the linked Markdown file");
+      new import_obsidian5.Notice("Markdown sync was not written because the result could not be verified; the source file is unchanged");
     }
   }
   async attachMarkdownSync(canvas) {
@@ -6100,10 +6122,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       return;
     let imported = markdownMindMapToCanvas(markdown, this.markdownLayoutOptions());
     if (!imported)
-      imported = { nodes: [], edges: [], frontmatter: "", rootIds: [] };
-    const stableIdCount = imported.stableIdCount || 0;
-    let canonicalData = null;
-    let canonicalFile = null;
+      imported = { nodes: [], edges: [], frontmatter: "", rootIds: [], topicIds: [], topicKeys: [], topicLabels: [], stableIdCount: 0, metadataCurrent: false };
     for (const canvasPath of linkedCanvases) {
       const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
       if (!(canvasFile instanceof import_obsidian5.TFile)) {
@@ -6113,10 +6132,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const openCanvas = this.getOpenCanvasByPath(canvasPath);
       if (openCanvas) {
         await this.applyMarkdownToLiveCanvas(openCanvas, markdown, imported);
-        if (!canonicalData)
-          canonicalData = openCanvas.getData();
       } else {
-        let updated = null;
         await this.app.vault.process(canvasFile, (raw) => {
           try {
             const current = JSON.parse(raw);
@@ -6126,7 +6142,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
               edges: imported.edges.map((edge) => ({ ...edge }))
             };
             convertMarkdownAnchorsToCardLinks(incoming.nodes, canvasPath);
-            updated = reconcileCanvasData(current, incoming);
+            const updated = reconcileCanvasData(current, incoming);
             updated.mindmapMarkdownSync = { path: file.path };
             return JSON.stringify(updated, null, "	");
           } catch (error) {
@@ -6134,18 +6150,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             return raw;
           }
         });
-        if (!canonicalData && updated) {
-          canonicalData = updated;
-          canonicalFile = canvasFile;
-        }
       }
     }
-    if ((!imported.metadataCurrent || stableIdCount < imported.nodes.length) && canonicalData) {
-      const fileInfo = canonicalFile || { basename: linkedCanvases[0].split("/").pop().replace(/\.canvas$/i, "") };
-      const canonical = canvasDataToMindMapMarkdown(canonicalData, fileInfo, this.settings);
-      if (canonical && canonical !== markdown)
-        await this.writeMarkdownFile(file, canonical);
-    }
+    const preserved = markdownWithTopicMetadata(
+      withoutLegacyPluginComments(markdown),
+      imported.topicIds || [],
+      imported.topicKeys || [],
+      imported.topicLabels || []
+    );
+    if (preserved !== markdown)
+      await this.writeMarkdownFile(file, preserved);
   }
   async applyMarkdownToLiveCanvas(canvas, markdown, prepared) {
     const canvasFile = canvas.view && canvas.view.file;
@@ -6160,6 +6174,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const selected = canvas.selection && canvas.selection.size === 1 ? canvas.selection.values().next().value : null;
     const linkedPath = this.getMarkdownSyncPath(canvas.getData());
     const reconciled = reconcileCanvasData(canvas.getData(), imported);
+    const pendingResizeIds = new Set(Array.isArray(reconciled.mindmapPendingResize) ? reconciled.mindmapPendingResize : []);
+    delete reconciled.mindmapPendingResize;
+    reconciled.mindmapLayoutVersion = 2;
     reconciled.mindmapMarkdownSync = { path: linkedPath };
     this.syncApplyingCanvas.add(canvas);
     try {
@@ -6167,7 +6184,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.canvasApi.invalidateEdgeIndex();
       if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
         const groupIds = getGroupIds(canvas);
-        this.resizeNodes(canvas, Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id)));
+        const changedNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id) && pendingResizeIds.has(node.id));
+        if (changedNodes.length > 0)
+          this.resizeNodes(canvas, changedNodes);
         this.layoutEngine.layout(canvas);
       }
       if (this.settings.autoColor)
@@ -6267,15 +6286,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         nodes: imported.nodes,
         edges: imported.edges,
         mindmap: true,
-        mindmapAutoAdjust: true,
+        mindmapPendingResize: imported.nodes.map((node) => node.id),
         mindmapMarkdownFrontmatter: imported.frontmatter || "",
         mindmapMarkdownSync: { path: file.path }
       };
       const created = await this.app.vault.create(canvasPath, JSON.stringify(canvasData, null, "	"));
       this.indexMarkdownLink(created.path, file.path);
-      const canonical = canvasDataToMindMapMarkdown(canvasData, created, this.settings);
-      if (canonical && canonical !== markdown)
-        await this.writeMarkdownFile(file, canonical);
+      const preserved = markdownWithTopicMetadata(
+        withoutLegacyPluginComments(markdown),
+        imported.topicIds || [],
+        imported.topicKeys || [],
+        imported.topicLabels || []
+      );
+      if (preserved !== markdown)
+        await this.writeMarkdownFile(file, preserved);
       await this.app.workspace.getLeaf(false).openFile(created);
       new import_obsidian5.Notice(`Created "${created.path}" and linked it to "${file.path}"`);
     } catch (error) {
@@ -6537,36 +6561,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     return this.settings.defaultMindmapMode;
   }
   isAutoAdjustCanvas(canvas) {
-    const data = canvas.getData();
-    if (typeof data.mindmapAutoAdjust === "boolean")
-      return data.mindmapAutoAdjust;
-    return this.settings.defaultAutoAdjust;
-  }
-  toggleAutoAdjust(canvas) {
-    const data = canvas.getData();
-    const newValue = !this.isAutoAdjustCanvas(canvas);
-    data.mindmapAutoAdjust = newValue;
-    canvas.setData(data);
-    canvas.requestSave();
-    if (newValue && this.isMindmapCanvas(canvas)) {
-      const groupIds = getGroupIds(canvas);
-      const topics = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
-      this.resizeNodes(canvas, topics);
-      this.layoutEngine.layout(canvas);
-      this.updateGroupBounds(canvas);
-    }
-    this.updateAutoAdjustButton(canvas);
+    return this.isMindmapCanvas(canvas);
   }
   toggleMindmapMode(canvas) {
     const data = canvas.getData();
     const newValue = !this.isMindmapCanvas(canvas);
     data.mindmap = newValue;
+    delete data.mindmapAutoAdjust;
     canvas.setData(data);
     canvas.requestSave();
     if (newValue && this.settings.autoColor) {
       this.branchColors.applyColors(canvas);
     }
-    if (newValue && this.isAutoAdjustCanvas(canvas)) {
+    if (newValue) {
       const groupIds = getGroupIds(canvas);
       this.resizeNodes(canvas, Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id)));
       this.layoutEngine.layout(canvas);
@@ -6582,16 +6589,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.hideOutline();
     }
     this.updateToggleButton(canvas);
-    this.updateAutoAdjustButton(canvas);
   }
   injectToggleButton(canvas) {
     if (this.toggleBtnEl) {
       this.toggleBtnEl.remove();
       this.toggleBtnEl = null;
-    }
-    if (this.autoAdjustBtnEl) {
-      this.autoAdjustBtnEl.remove();
-      this.autoAdjustBtnEl = null;
     }
     const controls = canvas.view.containerEl.querySelector(".canvas-controls");
     if (!controls)
@@ -6606,17 +6608,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     });
     controls.prepend(btn);
     this.toggleBtnEl = btn;
-    const autoAdjustBtn = ownerDocument.createElement("div");
-    autoAdjustBtn.addClass("mindvas-toggle-btn", "mindvas-auto-adjust-btn", "clickable-icon");
-    autoAdjustBtn.setAttribute("aria-label", "Toggle auto-adjust");
-    this.registerDomEvent(autoAdjustBtn, "click", (e) => {
-      e.stopPropagation();
-      this.toggleAutoAdjust(canvas);
-    });
-    controls.append(autoAdjustBtn);
-    this.autoAdjustBtnEl = autoAdjustBtn;
     this.updateToggleButton(canvas);
-    this.updateAutoAdjustButton(canvas);
   }
   updateToggleButton(canvas) {
     if (!this.toggleBtnEl)
@@ -6628,20 +6620,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.toggleBtnEl.setAttribute(
       "aria-label",
       isActive ? "Mindmap mode: Enter sibling · Tab child · Type to edit" : "Mindmap mode (inactive)"
-    );
-  }
-  updateAutoAdjustButton(canvas) {
-    if (!this.autoAdjustBtnEl)
-      return;
-    const mindmapActive = this.isMindmapCanvas(canvas);
-    const autoAdjust = this.isAutoAdjustCanvas(canvas);
-    this.autoAdjustBtnEl.empty();
-    (0, import_obsidian5.setIcon)(this.autoAdjustBtnEl, autoAdjust ? "wand-sparkles" : "move");
-    this.autoAdjustBtnEl.toggleClass("is-active", mindmapActive && autoAdjust);
-    this.autoAdjustBtnEl.toggleClass("is-disabled", !mindmapActive);
-    this.autoAdjustBtnEl.setAttribute(
-      "aria-label",
-      !mindmapActive ? "Auto-adjust is available in mindmap mode" : autoAdjust ? "Auto-adjust: on — resize cards and reflow each mind map" : "Custom positioning — preserve manual card sizes and positions"
     );
   }
   /** Schedule a setTimeout that is automatically cancelled on unload/canvas switch. */
@@ -6703,6 +6681,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       DEFAULT_SETTINGS,
       await this.loadData()
     );
+    delete this.settings.autoLayout;
+    delete this.settings.preserveManualPositions;
+    delete this.settings.defaultAutoAdjust;
   }
   async saveSettings() {
     await this.saveData(this.settings);

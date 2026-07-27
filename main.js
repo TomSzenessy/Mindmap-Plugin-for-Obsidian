@@ -3500,9 +3500,6 @@ function portableTopicText(text) {
   const value = String(text || "").trim().replace(/^\s{0,3}#{1,6}\s+/, "");
   return value || "Untitled";
 }
-function topicIdComment(id) {
-  return `<!-- tomindmap:id=${id} -->`;
-}
 function extractTopicIdentity(text, explicitId) {
   let id = explicitId || null;
   const cleaned = String(text || "").replace(/<!--\s*tomindmap:id=([A-Za-z0-9_-]+)\s*-->/gi, (match, foundId) => {
@@ -3511,6 +3508,98 @@ function extractTopicIdentity(text, explicitId) {
     return "";
   }).replace(/[ \t]+\n/g, "\n").trim();
   return { id, text: cleaned || "Untitled" };
+}
+function frontmatterStringArray(frontmatter, property) {
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(frontmatter || "").match(new RegExp(`^\\s{2}${escaped}:\\s*(\\[[^\\n]*\\])\\s*$`, "m"));
+  if (!match)
+    return [];
+  try {
+    const ids = JSON.parse(match[1]);
+    return Array.isArray(ids) ? ids.filter((value) => typeof value === "string") : [];
+  } catch (error) {
+    return [];
+  }
+}
+function topicIdentityKey(text) {
+  const value = getRootTitle(text).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+function topicIdentityLabel(text) {
+  return getRootTitle(text).normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+function topicLabelSimilarity(left, right) {
+  const normalize = (value) => String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const a = normalize(left);
+  const b = normalize(right);
+  if (!a || !b)
+    return 0;
+  if (a === b)
+    return 1;
+  const tokenSet = (value) => new Set(value.split(/\s+/).filter(Boolean));
+  const aTokens = tokenSet(a);
+  const bTokens = tokenSet(b);
+  let commonTokens = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token))
+      commonTokens++;
+  }
+  const tokenScore = commonTokens / Math.max(aTokens.size, bTokens.size, 1);
+  const bigrams = (value) => {
+    const result = [];
+    const compact = value.replace(/\s+/g, " ");
+    for (let index = 0; index < compact.length - 1; index++)
+      result.push(compact.slice(index, index + 2));
+    return result;
+  };
+  const aBigrams = bigrams(a);
+  const bBigrams = bigrams(b);
+  const remaining = new Map();
+  for (const pair of aBigrams)
+    remaining.set(pair, (remaining.get(pair) || 0) + 1);
+  let commonBigrams = 0;
+  for (const pair of bBigrams) {
+    const count = remaining.get(pair) || 0;
+    if (count > 0) {
+      commonBigrams++;
+      remaining.set(pair, count - 1);
+    }
+  }
+  const bigramScore = 2 * commonBigrams / Math.max(1, aBigrams.length + bBigrams.length);
+  const containmentScore = a.includes(b) || b.includes(a) ? Math.min(a.length, b.length) / Math.max(a.length, b.length) : 0;
+  return Math.max(tokenScore, bigramScore, containmentScore);
+}
+function frontmatterWithTopicIds(frontmatter, topicIds, topicKeys, topicLabels) {
+  let value = String(frontmatter || "").trim();
+  if (!value.startsWith("---"))
+    value = value ? `---\n${value}\n---` : "---\n---";
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const cleaned = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (/^tomindmap:\s*$/.test(lines[index])) {
+      while (index + 1 < lines.length && (/^\s+/.test(lines[index + 1]) || !lines[index + 1].trim()))
+        index++;
+      continue;
+    }
+    cleaned.push(lines[index]);
+  }
+  let closing = cleaned.length - 1;
+  while (closing > 0 && cleaned[closing].trim() !== "---")
+    closing--;
+  const metadata = [
+    "tomindmap:",
+    "  version: 1",
+    `  topicIds: ${JSON.stringify(topicIds)}`,
+    `  topicKeys: ${JSON.stringify(topicKeys)}`,
+    `  topicLabels: ${JSON.stringify(topicLabels)}`
+  ];
+  cleaned.splice(closing, 0, ...metadata);
+  return cleaned.join("\n");
 }
 function markdownFrontmatterForCanvas(canvas, options = {}) {
   const data = canvas.getData();
@@ -3554,13 +3643,25 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     slugCounts.set(base, count);
     idToSlug.set(tree.canvasNode.id, count === 1 ? base : `${base}-${count}`);
   }
-  const frontmatter = markdownFrontmatterForCanvas(canvas, options);
+  const topicIds = [];
+  const topicKeys = [];
+  const topicLabels = [];
+  const collectTopicIds = (tree) => {
+    topicIds.push(tree.canvasNode.id);
+    topicKeys.push(topicIdentityKey(tree.canvasNode.text));
+    topicLabels.push(topicIdentityLabel(tree.canvasNode.text));
+    for (const child of tree.children)
+      collectTopicIds(child);
+  };
+  for (const root of forest)
+    collectTopicIds(root);
+  const frontmatter = frontmatterWithTopicIds(markdownFrontmatterForCanvas(canvas, options), topicIds, topicKeys, topicLabels);
   const lines = frontmatter ? [frontmatter, ""] : [];
   const rawText = (tree) => markdownWithPortableCardLinks(portableTopicText(tree.canvasNode.text), idToSlug);
-  const emitIndentedBlock = (text, indent, marker, topicId) => {
+  const emitIndentedBlock = (text, indent, marker) => {
     const prefix = "  ".repeat(indent);
     if (marker)
-      lines.push(`${prefix}<!-- mindvas:node id=${topicId} -->`);
+      lines.push(`${prefix}<!-- mindvas:node -->`);
     for (const line of String(text).split("\n"))
       lines.push(`${prefix}${line}`);
     if (marker)
@@ -3569,7 +3670,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
   const emitListNode = (tree, indent) => {
     const raw = rawText(tree);
     if (isStandaloneMarkdownBlock(raw)) {
-      emitIndentedBlock(raw, indent, true, tree.canvasNode.id);
+      emitIndentedBlock(raw, indent, true);
       for (const child of tree.children)
         emitListNode(child, indent + 1);
       return;
@@ -3578,7 +3679,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     const first = parts.shift() || "Untitled";
     const prefix = "  ".repeat(indent);
     const keepsOwnMarker = /^(?:[-+*]\s+\[[ xX]\]|\d+[.)]\s+)/.test(first);
-    lines.push(`${prefix}${keepsOwnMarker ? first : `- ${first}`} ${topicIdComment(tree.canvasNode.id)}`);
+    lines.push(`${prefix}${keepsOwnMarker ? first : `- ${first}`}`);
     if (parts.length > 0) {
       lines.push(`${prefix}  <!-- mindvas:content -->`);
       for (const line of parts)
@@ -3592,7 +3693,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
     const raw = rawText(tree);
     const parts = raw.split("\n");
     const title = parts.shift() || "Untitled";
-    lines.push("", `${"#".repeat(level)} ${title} ${topicIdComment(tree.canvasNode.id)}`);
+    lines.push("", `${"#".repeat(level)} ${title}`);
     if (parts.length > 0) {
       lines.push("<!-- mindvas:content -->", ...parts, "<!-- /mindvas:content -->");
     }
@@ -3614,7 +3715,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
       const raw = rawText(child);
       if (isStandaloneMarkdownBlock(raw)) {
         lines.push("");
-        emitIndentedBlock(raw, 0, true, child.canvasNode.id);
+        emitIndentedBlock(raw, 0, true);
       } else {
         emitHeadingNode(child, level);
       }
@@ -3626,7 +3727,7 @@ function canvasToMindMapMarkdown(canvas, options = {}) {
       lines.push("");
     const rootRaw = rawText(root);
     const rootParts = rootRaw.split("\n");
-    lines.push(`# ${rootParts.shift() || "Untitled"} ${topicIdComment(root.canvasNode.id)}`);
+    lines.push(`# ${rootParts.shift() || "Untitled"}`);
     if (rootParts.length > 0)
       lines.push("<!-- mindvas:content -->", ...rootParts, "<!-- /mindvas:content -->");
     emitHeadingChildren(root.children, 2);
@@ -3661,7 +3762,7 @@ function parseMarkdownMindMapDocument(markdown) {
     while (usedIds.has(id))
       id = genId();
     usedIds.add(id);
-    const node = { id, text: cleanImportedTopic(identity.text), position: "right", children: [] };
+    const node = { id, legacyId: identity.id ? id : null, text: cleanImportedTopic(identity.text), position: "right", children: [] };
     if (parent)
       parent.children.push(node);
     else
@@ -3816,9 +3917,79 @@ function parseMarkdownMindMapDocument(markdown) {
     while (usedIds.has(id))
       id = genId();
     usedIds.add(id);
-    const syntheticRoot = { id, text: frontmatterTitle, position: "right", children: roots.splice(0) };
+    const syntheticRoot = { id, legacyId: null, text: frontmatterTitle, position: "right", children: roots.splice(0) };
     roots.push(syntheticRoot);
   }
+  const metadataIds = frontmatterStringArray(frontmatter, "topicIds").filter((id) => /^[A-Za-z0-9_-]+$/.test(id));
+  const metadataKeys = frontmatterStringArray(frontmatter, "topicKeys");
+  const metadataLabels = frontmatterStringArray(frontmatter, "topicLabels");
+  const orderedNodes = [];
+  const collectOrderedNodes = (node) => {
+    orderedNodes.push(node);
+    for (const child of node.children)
+      collectOrderedNodes(child);
+  };
+  for (const root of roots)
+    collectOrderedNodes(root);
+  const assignedIds = /* @__PURE__ */ new Set();
+  const metadataIndexByNode = /* @__PURE__ */ new Map();
+  const metadataIndexesByKey = /* @__PURE__ */ new Map();
+  for (let index = 0; index < Math.min(metadataIds.length, metadataKeys.length); index++) {
+    let indexes = metadataIndexesByKey.get(metadataKeys[index]);
+    if (!indexes) {
+      indexes = [];
+      metadataIndexesByKey.set(metadataKeys[index], indexes);
+    }
+    indexes.push(index);
+  }
+  const claimedMetadataIndexes = /* @__PURE__ */ new Set();
+  for (const node of orderedNodes) {
+    const indexes = metadataIndexesByKey.get(topicIdentityKey(node.text));
+    if (!indexes)
+      continue;
+    const match = indexes.find((index) => !claimedMetadataIndexes.has(index));
+    if (match === void 0)
+      continue;
+    metadataIndexByNode.set(node, match);
+    claimedMetadataIndexes.add(match);
+  }
+  const unmatchedNodes = orderedNodes.filter((node) => !metadataIndexByNode.has(node));
+  const similarityPairs = [];
+  for (const node of unmatchedNodes) {
+    for (let index = 0; index < Math.min(metadataIds.length, metadataLabels.length); index++) {
+      if (claimedMetadataIndexes.has(index))
+        continue;
+      const score = topicLabelSimilarity(metadataLabels[index], topicIdentityLabel(node.text));
+      if (score >= 0.34)
+        similarityPairs.push({ node, index, score });
+    }
+  }
+  similarityPairs.sort((a, b) => b.score - a.score || Math.abs(orderedNodes.indexOf(a.node) - a.index) - Math.abs(orderedNodes.indexOf(b.node) - b.index));
+  const similarityMatchedNodes = /* @__PURE__ */ new Set();
+  for (const pair of similarityPairs) {
+    if (similarityMatchedNodes.has(pair.node) || claimedMetadataIndexes.has(pair.index))
+      continue;
+    metadataIndexByNode.set(pair.node, pair.index);
+    similarityMatchedNodes.add(pair.node);
+    claimedMetadataIndexes.add(pair.index);
+  }
+  const unmatchedMetadataIndexes = metadataIds.map((_, index) => index).filter((index) => !claimedMetadataIndexes.has(index));
+  let stableIdCount = 0;
+  for (let index = 0; index < orderedNodes.length; index++) {
+    const node = orderedNodes[index];
+    let metadataIndex = metadataIndexByNode.get(node);
+    if (metadataIndex === void 0 && unmatchedMetadataIndexes.length > 0)
+      metadataIndex = unmatchedMetadataIndexes.shift();
+    let candidate = node.legacyId || (metadataIndex !== void 0 ? metadataIds[metadataIndex] : null) || node.id;
+    if ((node.legacyId || metadataIndex !== void 0) && !assignedIds.has(candidate))
+      stableIdCount++;
+    while (!candidate || assignedIds.has(candidate))
+      candidate = genId();
+    node.id = candidate;
+    delete node.legacyId;
+    assignedIds.add(candidate);
+  }
+  const metadataCurrent = metadataIds.length === orderedNodes.length && metadataKeys.length === orderedNodes.length && metadataLabels.length === orderedNodes.length && orderedNodes.every((node, index) => metadataIds[index] === node.id && metadataKeys[index] === topicIdentityKey(node.text) && metadataLabels[index] === topicIdentityLabel(node.text));
   const setPosition = (node, position) => {
     node.position = position;
     for (const child of node.children)
@@ -3838,7 +4009,7 @@ function parseMarkdownMindMapDocument(markdown) {
         leftWeight += childWeight;
     }
   }
-  return { roots, frontmatter };
+  return { roots, frontmatter, stableIdCount, metadataCurrent };
 }
 function parseMarkdownMindMap(markdown) {
   return parseMarkdownMindMapDocument(markdown).roots;
@@ -3856,7 +4027,7 @@ function markdownMindMapToCanvas(markdown, opts) {
     const height = layoutTree(root, 0, currentY, opts, nodes, edges);
     currentY += height + treeGap;
   }
-  return { nodes, edges, frontmatter: parsed.frontmatter, rootIds: roots.map((_, index) => {
+  return { nodes, edges, frontmatter: parsed.frontmatter, stableIdCount: parsed.stableIdCount, metadataCurrent: parsed.metadataCurrent, rootIds: roots.map((_, index) => {
     let seen = -1;
     for (const node of nodes) {
       if (!edges.some((edge) => edge.toNode === node.id)) {
@@ -5930,7 +6101,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     let imported = markdownMindMapToCanvas(markdown, this.markdownLayoutOptions());
     if (!imported)
       imported = { nodes: [], edges: [], frontmatter: "", rootIds: [] };
-    const stableIdCount = (markdown.match(/(?:tomindmap:id=|mindvas:node\s+id=)/gi) || []).length;
+    const stableIdCount = imported.stableIdCount || 0;
     let canonicalData = null;
     let canonicalFile = null;
     for (const canvasPath of linkedCanvases) {
@@ -5969,7 +6140,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         }
       }
     }
-    if (stableIdCount < imported.nodes.length && canonicalData) {
+    if ((!imported.metadataCurrent || stableIdCount < imported.nodes.length) && canonicalData) {
       const fileInfo = canonicalFile || { basename: linkedCanvases[0].split("/").pop().replace(/\.canvas$/i, "") };
       const canonical = canvasDataToMindMapMarkdown(canonicalData, fileInfo, this.settings);
       if (canonical && canonical !== markdown)

@@ -6,7 +6,7 @@
 
 Turn native Canvas cards into fast, automatically arranged mind maps. Write with Markdown, move through ideas spatially, synchronize maps with notes, and export finished work in practical formats.
 
-[Install](#install) · [Create a map](#create-a-map) · [Shortcuts](#keyboard-workflow) · [Markdown sync](#markdown-sync) · [Import and export](#import-and-export)
+[Installation](#installation) · [Create a map](#create-a-map) · [Shortcuts](#keyboard-workflow) · [Markdown sync](#markdown-sync) · [Import and export](#import-and-export)
 
 </div>
 
@@ -31,18 +31,27 @@ ToMindMap adds a focused mind-mapping workflow to Obsidian Canvas:
 
 The result remains a native `.canvas` file, so the map fits naturally into an Obsidian vault and works with Canvas links, groups, colors, undo, and redo.
 
-## Install
+## Installation
 
-ToMindMap is distributed as a desktop Obsidian plugin. It supports Obsidian `1.5.0` and newer.
+ToMindMap is a desktop-only Obsidian plugin for Obsidian `1.5.0` and newer.
+
+Before installing, make sure **Settings → Community plugins → Restricted mode** is turned off. The plugin directory must be named `tomindmap`, because that name matches the plugin ID in `manifest.json`.
 
 ### Install with Git
+
+Clone the repository directly into your vault’s plugin directory:
 
 ```bash
 cd "/path/to/Your Vault/.obsidian/plugins"
 git clone https://github.com/TomSzenessy/Obsidian-Mindmap.git tomindmap
 ```
 
-Reload Obsidian, open **Settings → Community plugins**, and enable **ToMindMap**.
+Then:
+
+1. Reload Obsidian.
+2. Open **Settings → Community plugins**.
+3. Select **Reload plugins** if ToMindMap is not listed.
+4. Enable **ToMindMap**.
 
 To update:
 
@@ -51,9 +60,9 @@ cd "/path/to/Your Vault/.obsidian/plugins/tomindmap"
 git pull
 ```
 
-Then reload Obsidian.
+Reload Obsidian after updating. A Git installation includes the development source, but Obsidian loads only the generated `main.js`, `manifest.json`, and `styles.css`.
 
-### Install from downloaded files
+### Install a downloaded release
 
 Create this folder:
 
@@ -69,7 +78,16 @@ manifest.json
 styles.css
 ```
 
+Use the files from the same release version. Do not copy `src/`, `lib/`, `scripts/`, or the test files for a normal installation; those are development sources and are already bundled into `main.js`.
+
 Reload Obsidian and enable **ToMindMap** under **Settings → Community plugins**.
+
+### Troubleshooting installation
+
+- Confirm the final path is `<vault>/.obsidian/plugins/tomindmap/manifest.json`, without an extra nested folder.
+- Confirm all three release files are present and came from the same version.
+- Confirm community plugins are enabled and ToMindMap is switched on.
+- After replacing files manually, reload the plugin or restart Obsidian.
 
 ## Create a map
 
@@ -241,28 +259,59 @@ Settings are normalized into safe, internally consistent ranges when the plugin 
 
 ## Development
 
-The repository contains both maintainable runtime modules and Obsidian’s distributable `main.js`.
+The repository separates maintainable source from the distributable plugin bundle:
+
+- `src/main.js` is the application entry point and owns plugin lifecycle and integration orchestration.
+- `lib/` contains focused CommonJS runtime modules.
+- `main.js` is generated and committed as the self-contained Obsidian release artifact.
+- `manifest.json` and `styles.css` complete the three-file release.
+
+Use Node.js `20` or newer. There are currently no third-party npm dependencies, so a fresh clone can run the scripts immediately:
 
 ```bash
-npm test          # run the Node regression suite
-npm run build     # inline runtime modules into main.js
-npm run check     # verify the bundle, tests, and JavaScript syntax
+npm test
+npm run build
+npm run check
 ```
 
-Runtime modules live in `lib/`:
+The normal development workflow is:
+
+1. Edit `src/main.js` and the relevant module in `lib/`.
+2. Run `npm test` while iterating.
+3. Run `npm run build` to regenerate `main.js`.
+4. Run `npm run check` before committing.
+
+Do not edit generated `main.js` directly. If changes were made there accidentally, `npm run source:extract` can reconstruct `src/main.js` by replacing embedded module blocks with their source imports; review the resulting diff before keeping it.
+
+### Source modules
 
 - `tree-model.js` builds a deterministic, cycle-safe forest from Canvas data;
+- `canvas-api.js` owns Canvas selection, graph indexing, node and edge mutation, and camera helpers;
+- `node-operations.js` implements topic creation, deletion, branch flipping, and collision avoidance;
+- `layout.js` owns edge orientation, compact two-sided layout, and branch coloring;
+- `keyboard-navigation.js` owns command registration, editing behavior, spatial navigation, and history;
+- `freemind.js` parses FreeMind XML and lays imported trees out on Canvas;
 - `tree-drag.js` handles XMind-style node drag-and-drop reparenting and drop zone classification;
+- `drag-preview-controller.js` manages temporary reparenting previews and commit/rollback behavior;
+- `drag-attachment.js` contains attachment-distance calculations;
 - `mindmap-actions.js` manages branch separation, subtree collapse/expand, and branch coloring;
 - `live-sizing.js` owns text and media measurement plus render observers;
 - `markdown-order.js` preserves source slices while updating visual chronology;
+- `canvas-session.js` handles Canvas save flushing and complete-map reflow after movement;
 - `settings.js` defines and normalizes persisted configuration;
 - `media-drop.js` classifies dropped files and URLs and constructs native card specifications;
 - `export.js` owns export UI, image rasterization, and collision-free filenames.
 
-`scripts/inline-runtime-modules.js` embeds those modules into `main.js`, producing the three-file Obsidian release: `main.js`, `manifest.json`, and `styles.css`.
+The module registry in `scripts/runtime-modules.js` is the source of truth for bundling. When adding a runtime module, register its source import and generated declaration there. `scripts/inline-runtime-modules.js` then embeds the registered modules into `main.js`; `npm run build:check` fails when the committed bundle is stale.
 
-The tests cover Markdown sibling insertion, graph safety, deep-tree traversal, settings normalization, media sizing, export filenames, and bundle synchronization.
+The test suite covers Markdown synchronization, drag attachment and previews, Canvas lifecycle persistence, graph safety, deep-tree traversal, settings normalization, media sizing, export filenames, and bundle synchronization.
+
+### Release checklist
+
+1. Update the version in `manifest.json` and `package.json`.
+2. Run `npm run build`.
+3. Run `npm run check`.
+4. Package `main.js`, `manifest.json`, and `styles.css` from the same commit.
 
 ## Privacy
 

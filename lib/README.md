@@ -15,7 +15,7 @@ These files are the maintainable source modules for focused runtime services:
 - `settings.js` — immutable defaults plus persisted-settings normalization.
 - `export.js` — the export chooser, rasterization, and collision-free Downloads filenames.
 
-Modules receive their small external dependencies from `main.js`. This keeps Canvas internals, Markdown parsing, and UI lifecycle ownership explicit and avoids parallel implementations of the same behavior.
+Modules use explicit CommonJS imports for source development. The build replaces registered local module imports with references to the embedded runtime blocks, keeping the release bundle self-contained without maintaining a second implementation.
 
 Development commands:
 
@@ -25,6 +25,7 @@ npm run build
 npm run check
 ```
 
-`src/main.js` is the maintainable entry point. The build script embeds these
-modules into the generated `main.js`; Obsidian installations still use the
-standard `main.js`, `manifest.json`, and `styles.css` release files.
+Edit `src/main.js` and `lib/`; do not edit generated `main.js` directly.
+`scripts/runtime-modules.js` registers every embedded module, and
+`scripts/inline-runtime-modules.js` generates the bundle. Obsidian
+installations use only `main.js`, `manifest.json`, and `styles.css`.

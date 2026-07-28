@@ -195,6 +195,56 @@ test("balances wide roots in linear prefix-sum passes", () => {
   assert.equal(Math.abs(leftChildren.length - rightChildren.length), 0);
 });
 
+test("packs neighboring subtree cards with visual horizontal clearance", () => {
+  const engine = new LayoutEngine({ horizontalGap: 80, verticalGap: 20, animate: false });
+  const packed = engine.packSubtrees([
+    {
+      contour: new Map([[1, { top: 0, bottom: 60 }]]),
+      rectangles: [{ left: 0, right: 150, top: 0, bottom: 60 }]
+    },
+    {
+      contour: new Map([[1, { top: 0, bottom: 60 }]]),
+      rectangles: [{ left: 151, right: 301, top: 0, bottom: 60 }]
+    }
+  ]);
+  assert.deepEqual(Array.from(packed.yOffsets), [0, 80]);
+});
+
+test("preview direction puts every child opposite the incoming arrow", () => {
+  const makeNode = (id, x, y) => ({
+    id, x, y, width: 160, height: 60,
+    moveTo(pos) {
+      this.x = pos.x;
+      this.y = pos.y;
+    }
+  });
+  const dragged = makeNode("dragged", 500, 0);
+  const leftChild = makeNode("left-child", 260, -40);
+  const rightChild = makeNode("right-child", 740, 40);
+  const edge = (id, from, to) => ({
+    id,
+    from: { node: from, side: "right" },
+    to: { node: to, side: "left" }
+  });
+  const canvas = {
+    nodes: new Map([[dragged.id, dragged], [leftChild.id, leftChild], [rightChild.id, rightChild]]),
+    edges: new Map([
+      ["left-edge", edge("left-edge", dragged, leftChild)],
+      ["right-edge", edge("right-edge", dragged, rightChild)]
+    ]),
+    getData: () => ({ nodes: [], edges: [] }),
+    requestFrame() {},
+    requestSave() {}
+  };
+  const engine = new LayoutEngine({ horizontalGap: 80, verticalGap: 20, animate: false });
+
+  engine.layoutChildren(canvas, dragged.id, "left");
+
+  assert.equal(leftChild.x, 260);
+  assert.equal(rightChild.x, 260);
+  assert.ok(leftChild.y < rightChild.y);
+});
+
 test("preserves the dropped side of root branches during drag reflow", () => {
   const engine = new LayoutEngine({ nodeHeight: 60, verticalGap: 20 });
   const leftLeaf = {
@@ -345,6 +395,28 @@ test("exports Canvas file and media nodes as useful Markmap Markdown", () => {
       `${childId} should remain a direct child of the root after Markdown round-trip`
     );
   }
+});
+
+test("portable Markdown omits all Properties metadata while sync output keeps it", () => {
+  const data = {
+    nodes: [
+      { id: "root", type: "text", text: "Root", x: 0, y: 0, width: 220, height: 60 },
+      { id: "child", type: "text", text: "Child", x: 300, y: 0, width: 220, height: 60 }
+    ],
+    edges: [
+      { id: "edge", fromNode: "root", fromSide: "right", toNode: "child", toSide: "left" }
+    ],
+    mindmap: true
+  };
+  const file = { basename: "Portable", path: "Portable.canvas" };
+  const portable = canvasDataToMindMapMarkdown(data, file, { includeFrontmatter: false });
+  assert.equal(portable, "# Root\n\n## Child\n");
+  assert.doesNotMatch(portable, /^---/);
+  assert.doesNotMatch(portable, /tomindmap:/);
+
+  const synchronized = canvasDataToMindMapMarkdown(data, file);
+  assert.match(synchronized, /^---/);
+  assert.match(synchronized, /tomindmap:\n  version: 1/);
 });
 
 test("localized Markdown sync preserves newly added native media cards", () => {

@@ -69,6 +69,26 @@ test("live estimates carry the PDF height floor through both sizing passes", () 
   assert.ok(CARD_LAYOUT_VERSION >= 31);
 });
 
+test("reports settled only after the final layout pass", () => {
+  const calls = [];
+  const plugin = {
+    settings: DEFAULT_SETTINGS,
+    layoutEngine: { layout: () => calls.push("layout") },
+    updateGroupBounds: () => calls.push("groups")
+  };
+  const controller = new LiveSizingController(plugin, () => new Set());
+  const data = {};
+  const canvas = {
+    getData: () => data,
+    setData: () => {},
+    requestSave: () => calls.push("save")
+  };
+
+  controller.resizeNodesWhenRendered(canvas, [], () => calls.push("settled"));
+
+  assert.deepEqual(calls, ["save", "layout", "groups", "settled"]);
+});
+
 test("horizontal growth comes from rendered overflow", () => {
   const controller = new LiveSizingController(
     { settings: DEFAULT_SETTINGS },

@@ -44,7 +44,7 @@ function dragFixture({ withOriginalParent = true } = {}) {
     canvas,
     canvasApi,
     () => [],
-    (node) => node
+    (node) => node.id === "dragged" && withOriginalParent ? oldParent : node
   );
   return {
     activeEdges,
@@ -81,6 +81,7 @@ test("switches immediately when a different node is the closest candidate", () =
   const preview = fixture.controller.updatePreview(fixture.dragged);
   assert.equal(preview.state, "preview");
   assert.equal(preview.target.id, "new");
+  assert.equal(preview.incomingSide, "right");
   assert.equal(fixture.activeEdges.length, 1);
   assert.equal(fixture.activeEdges[0].from.node.id, "new");
 });
@@ -106,6 +107,7 @@ test("switches the visible arrow between prospective parents and commits only on
   const result = fixture.controller.commit(fixture.dragged);
   assert.equal(result.changed, true);
   assert.equal(result.state, "attached");
+  assert.equal(result.incomingSide, "right");
   assert.equal(fixture.activeEdges.length, 1);
   assert.equal(fixture.activeEdges[0].from.node.id, "other");
   assert.equal(fixture.activeEdges[0].__mindMapPreview, undefined);
@@ -124,6 +126,21 @@ test("detaches beyond the fixed nearest-node distance", () => {
   assert.equal(result.changed, true);
   assert.equal(result.state, "detached");
   assert.equal(fixture.activeEdges.length, 0);
+});
+
+test("keeps its parent when dragged across it to flip branch sides", () => {
+  const fixture = dragFixture();
+  fixture.controller.begin(fixture.dragged);
+  fixture.dragged.x = -300;
+
+  const preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "original");
+  assert.equal(preview.target.id, "old");
+  assert.equal(fixture.activeEdges.length, 1);
+
+  const result = fixture.controller.commit(fixture.dragged);
+  assert.equal(result.state, "original");
+  assert.equal(fixture.activeEdges[0].from.node.id, "old");
 });
 
 test("previews and attaches a standalone node moved inside the fixed distance", () => {

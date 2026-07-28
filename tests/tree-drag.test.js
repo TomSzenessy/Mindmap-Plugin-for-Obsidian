@@ -96,7 +96,7 @@ test("uses a fixed rectangle-to-rectangle distance for local attachment", () => 
   assert.equal(findNearestAttachableNode(dragged, [far]), null);
 });
 
-test("inherits connection sides from the parent branch, not the dragged position", () => {
+test("prospective connections inherit the target branch side", () => {
   const root = { id: "root", x: 500, y: 0, width: 200, height: 80 };
   const leftParent = { id: "left", x: 200, y: 0, width: 160, height: 60 };
   const rightParent = { id: "right", x: 840, y: 0, width: 160, height: 60 };

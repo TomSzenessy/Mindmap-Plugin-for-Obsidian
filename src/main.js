@@ -5421,6 +5421,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     let resizingNode = null;
     let previewFrame = null;
     let cachedDragForest = [];
+    let liveBranchDirection = null;
     const stableMediaPositions = new Map(
       Array.from(canvas.nodes.values()).map((node) => [
         node.id,
@@ -5496,7 +5497,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const onPointerMove = (event) => {
       if (!this.isMindmapCanvas(canvas))
         return;
-      if (!draggedNode || !dragStartPos || !isSingleCardDrag)
+      if (!draggedNode || !dragStartPos)
         return;
       if (Math.hypot(draggedNode.x - dragStartPos.x, draggedNode.y - dragStartPos.y) <= 10)
         return;
@@ -5505,7 +5506,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const view = wrapper.ownerDocument?.defaultView;
       const run = () => {
         previewFrame = null;
-        if (draggedNode)
+        if (!draggedNode)
+          return;
+        const parentNode = this.canvasApi.getParentNode(canvas, draggedNode);
+        if (parentNode) {
+          const parentCenterX = parentNode.x + parentNode.width / 2;
+          const direction = draggedNode.x + draggedNode.width / 2 >= parentCenterX
+            ? "right"
+            : "left";
+          if (direction !== liveBranchDirection) {
+            liveBranchDirection = direction;
+            this.layoutEngine.layoutChildren(canvas, draggedNode.id, direction);
+          }
+        }
+        if (isSingleCardDrag)
           dragAttachment.updatePreview(draggedNode);
       };
       previewFrame = typeof view?.requestAnimationFrame === "function"
@@ -5576,7 +5590,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         dragAttachment.updatePreview(selected);
         const result = dragAttachment.commit(selected);
         if (this.isMindmapCanvas(canvas)) {
-          this.layoutEngine.layout(canvas);
+          const parentCenterX = result.target
+            ? result.target.x + result.target.width / 2
+            : null;
+          const branchDirection = parentCenterX === null
+            ? null
+            : selected.x + selected.width / 2 >= parentCenterX
+              ? "right"
+              : "left";
+          this.layoutEngine.layout(canvas, {
+            preserveRootSides: true,
+            branchDirectionOverride: branchDirection
+              ? { nodeId: selected.id, direction: branchDirection }
+              : null
+          });
           this.updateGroupBounds(canvas);
         }
         if (this.settings.autoColor && this.isMindmapCanvas(canvas))
@@ -5611,7 +5638,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         // Mind-map positions are authoritative. Reflow even if the closest
         // parent stayed the same, so media cannot remain freely positioned.
         if (this.isMindmapCanvas(canvas)) {
-          this.layoutEngine.layout(canvas);
+          const parentCenterX = result.target
+            ? result.target.x + result.target.width / 2
+            : null;
+          const branchDirection = parentCenterX === null
+            ? null
+            : nodeToMove.x + nodeToMove.width / 2 >= parentCenterX
+              ? "right"
+              : "left";
+          this.layoutEngine.layout(canvas, {
+            preserveRootSides: true,
+            branchDirectionOverride: branchDirection
+              ? { nodeId: nodeToMove.id, direction: branchDirection }
+              : null
+          });
           this.updateGroupBounds(canvas);
         }
         if (this.settings.autoColor && this.isMindmapCanvas(canvas))
@@ -5633,19 +5673,38 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       isSingleCardDrag = false;
 
       const targetNode = findNodeFromEvent(canvas, event);
+      let hierarchyChanged = false;
+      let dropZone = null;
       if (targetNode && targetNode.id !== nodeToMove.id && !getGroupIds(canvas).has(targetNode.id)) {
         const dropPoint = canvas.posFromEvt(event);
-        const dropZone = TreeDrag.classifyDropZone(targetNode, dropPoint);
+        dropZone = TreeDrag.classifyDropZone(targetNode, dropPoint);
         if (TreeDrag.reparentSubtree(canvas, this.canvasApi, nodeToMove, targetNode, dropZone, forest)) {
-          if (this.isMindmapCanvas(canvas))
-            this.layoutEngine.layout(canvas);
-          if (this.settings.autoColor && this.isMindmapCanvas(canvas))
-            this.branchColors.applyColors(canvas);
+          hierarchyChanged = true;
           this.markMarkdownOrderDirty(canvas);
-          canvas.requestSave();
-          new import_obsidian5.Notice(dropZone === "child" ? "Re-parented as child topic" : "Re-parented as sibling topic");
         }
       }
+
+      const parentNode = this.canvasApi.getParentNode(canvas, nodeToMove);
+      if (this.isMindmapCanvas(canvas) && parentNode) {
+        const parentCenterX = parentNode.x + parentNode.width / 2;
+        const branchDirection = nodeToMove.x + nodeToMove.width / 2 >= parentCenterX
+          ? "right"
+          : "left";
+        this.layoutEngine.layout(canvas, {
+          preserveRootSides: true,
+          branchDirectionOverride: {
+            nodeId: nodeToMove.id,
+            direction: branchDirection
+          }
+        });
+        this.updateGroupBounds(canvas);
+      }
+      if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+        this.branchColors.applyColors(canvas);
+      canvas.requestSave();
+      void this.flushCanvasToMarkdown(canvas);
+      if (hierarchyChanged)
+        new import_obsidian5.Notice(dropZone === "child" ? "Re-parented as child topic" : "Re-parented as sibling topic");
     };
 
     const onPointerDown = (event) => {
@@ -5659,6 +5718,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         dragStartPos = { x: node.x, y: node.y };
         const selectionSize = canvas.selection ? canvas.selection.size : 1;
         isSingleCardDrag = selectionSize <= 1;
+        const parentNode = this.canvasApi.getParentNode(canvas, node);
+        liveBranchDirection = parentNode
+          ? node.x + node.width / 2 >= parentNode.x + parentNode.width / 2
+            ? "right"
+            : "left"
+          : null;
 
         if (isSingleCardDrag) {
           if (!resizingNode)
@@ -5673,6 +5738,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         draggedNode = null;
         dragStartPos = null;
         isSingleCardDrag = false;
+        liveBranchDirection = null;
       }
     };
 
@@ -5722,6 +5788,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       draggedNode = null;
       dragStartPos = null;
       isSingleCardDrag = false;
+      liveBranchDirection = null;
       resizingNode = null;
     };
   }

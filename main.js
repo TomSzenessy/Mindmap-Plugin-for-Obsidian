@@ -2245,18 +2245,35 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Each root's children are partitioned into left/right groups and
      * laid out independently, centered around their own root.
      */
-    layout(canvas) {
+    layout(canvas, options = {}) {
       const forest = buildForest(canvas);
       if (forest.length === 0)
         return;
+      const nestedDirections = new Map();
+      for (const root of forest) {
+        const stack = [...root.children];
+        while (stack.length > 0) {
+          const node = stack.pop();
+          if (node.parent?.parent) {
+            const nodeCenter = node.canvasNode.x + node.canvasNode.width / 2;
+            const parentCenter = node.parent.canvasNode.x + node.parent.canvasNode.width / 2;
+            nestedDirections.set(node.canvasNode.id, nodeCenter >= parentCenter ? "right" : "left");
+          }
+          stack.push(...node.children);
+        }
+      }
+      const layoutOptions = { ...options, nestedDirections };
       const positions = /* @__PURE__ */ new Map();
       for (const root of forest) {
         const rootX = root.canvasNode.x;
         const rootY = root.canvasNode.y;
         positions.set(root.canvasNode.id, { x: rootX, y: rootY });
-        const { rightChildren, leftChildren } = this.balanceRootChildren(root);
-        this.layoutGroup(root, rightChildren, "right", rootX, rootY, positions);
-        this.layoutGroup(root, leftChildren, "left", rootX, rootY, positions);
+        const { rightChildren, leftChildren } = this.balanceRootChildren(
+          root,
+          Boolean(options.preserveRootSides)
+        );
+        this.layoutGroup(root, rightChildren, "right", rootX, rootY, positions, layoutOptions);
+        this.layoutGroup(root, leftChildren, "left", rootX, rootY, positions, layoutOptions);
       }
       this.applyPositions(canvas, positions);
       updateAllEdgeSides(canvas);
@@ -2266,7 +2283,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * (and their subtrees). The parent stays in place; everything
      * outside this parent's subtree is untouched.
      */
-    layoutChildren(canvas, parentNodeId) {
+    layoutChildren(canvas, parentNodeId, directionOverride = null) {
       const forest = buildForest(canvas);
       if (forest.length === 0)
         return;
@@ -2283,7 +2300,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       } else {
         const px = parentTreeNode.canvasNode.x;
         const py = parentTreeNode.canvasNode.y;
-        const direction = parentTreeNode.direction || (parentTreeNode.canvasNode.x >= parentTreeNode.parent.canvasNode.x ? "right" : "left");
+        const direction = directionOverride || parentTreeNode.direction || (parentTreeNode.canvasNode.x >= parentTreeNode.parent.canvasNode.x ? "right" : "left");
         propagateDirection(parentTreeNode, direction);
         this.layoutGroup(parentTreeNode, parentTreeNode.children, direction, px, py, positions);
       }
@@ -2296,11 +2313,23 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * height. This permits unequal topic counts when a few tall branches occupy
      * the same visual height as several short ones.
      */
-    balanceRootChildren(root) {
+    balanceRootChildren(root, preserveExistingSides = false) {
       const rootCx = root.canvasNode.x + root.canvasNode.width / 2;
       const byPosition = (a, b) => a.canvasNode.y - b.canvasNode.y || a.canvasNode.x - b.canvasNode.x || String(a.canvasNode.id).localeCompare(String(b.canvasNode.id));
       const right = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 >= rootCx).sort(byPosition);
       const left = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 < rootCx).sort(byPosition);
+      if (preserveExistingSides) {
+        root.children = [...right, ...left];
+        for (const child of right) {
+          child.direction = "right";
+          propagateDirection(child, "right");
+        }
+        for (const child of left) {
+          child.direction = "left";
+          propagateDirection(child, "left");
+        }
+        return { rightChildren: right, leftChildren: left };
+      }
       const ordered = [...right, ...left];
       root.children = ordered;
       if (ordered.length === 0)
@@ -2370,7 +2399,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Layout a group of same-side children, vertically centered around root.
      * Uses contour-based packing for compact spacing.
      */
-    layoutGroup(root, children, direction, rootX, rootY, positions) {
+    layoutGroup(root, children, direction, rootX, rootY, positions, options = {}) {
       if (children.length === 0)
         return;
       const rootH = root.canvasNode.height || this.config.nodeHeight;
@@ -2378,16 +2407,22 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       const rootCenterY = rootY + rootH / 2;
       const subtrees = [];
       for (const child of children) {
+        const childDirection = options.branchDirectionOverride?.nodeId === child.canvasNode.id
+          ? options.branchDirectionOverride.direction
+          : direction;
+        const forceChildDirection = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
         const childW = child.canvasNode.width || this.config.nodeWidth;
-        const childX = direction === "right" ? rootX + rootW + this.config.horizontalGap : rootX - childW - this.config.horizontalGap;
+        const childX = childDirection === "right" ? rootX + rootW + this.config.horizontalGap : rootX - childW - this.config.horizontalGap;
         const tempPositions = /* @__PURE__ */ new Map();
         const layout = this.layoutSubtree(
           child,
           childX,
           0,
           0,
-          direction,
-          tempPositions
+          childDirection,
+          tempPositions,
+          options,
+          forceChildDirection
         );
         subtrees.push({ positions: tempPositions, contour: layout.contour, rectangles: layout.rectangles });
       }
@@ -2407,7 +2442,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Recursively lay out a node and all its descendants.
      * Returns the contour (vertical extent per depth column).
      */
-    layoutSubtree(node, nodeX, nodeY, depth, direction, positions) {
+    layoutSubtree(node, nodeX, nodeY, depth, direction, positions, options = {}, forcedDirection = false) {
       const nodeH = node.canvasNode.height || this.config.nodeHeight;
       const nodeW = node.canvasNode.width || this.config.nodeWidth;
       positions.set(node.canvasNode.id, { x: nodeX, y: nodeY });
@@ -2418,16 +2453,24 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         return { contour, rectangles: [ownRectangle] };
       const childSubtrees = [];
       for (const child of node.children) {
+        const isDirectionOverride = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
+        const childDirection = forcedDirection
+          ? direction
+          : isDirectionOverride
+            ? options.branchDirectionOverride.direction
+            : options.nestedDirections?.get(child.canvasNode.id) || direction;
         const childW = child.canvasNode.width || this.config.nodeWidth;
-        const childX = direction === "right" ? nodeX + nodeW + this.config.horizontalGap : nodeX - childW - this.config.horizontalGap;
+        const childX = childDirection === "right" ? nodeX + nodeW + this.config.horizontalGap : nodeX - childW - this.config.horizontalGap;
         const tempPositions = /* @__PURE__ */ new Map();
         const childLayout = this.layoutSubtree(
           child,
           childX,
           0,
           depth + 1,
-          direction,
-          tempPositions
+          childDirection,
+          tempPositions,
+          options,
+          forcedDirection || isDirectionOverride
         );
         childSubtrees.push({ positions: tempPositions, contour: childLayout.contour, rectangles: childLayout.rectangles });
       }
@@ -10957,6 +11000,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     let resizingNode = null;
     let previewFrame = null;
     let cachedDragForest = [];
+    let liveBranchDirection = null;
     const stableMediaPositions = new Map(
       Array.from(canvas.nodes.values()).map((node) => [
         node.id,
@@ -11032,7 +11076,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     const onPointerMove = (event) => {
       if (!this.isMindmapCanvas(canvas))
         return;
-      if (!draggedNode || !dragStartPos || !isSingleCardDrag)
+      if (!draggedNode || !dragStartPos)
         return;
       if (Math.hypot(draggedNode.x - dragStartPos.x, draggedNode.y - dragStartPos.y) <= 10)
         return;
@@ -11041,7 +11085,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const view = wrapper.ownerDocument?.defaultView;
       const run = () => {
         previewFrame = null;
-        if (draggedNode)
+        if (!draggedNode)
+          return;
+        const parentNode = this.canvasApi.getParentNode(canvas, draggedNode);
+        if (parentNode) {
+          const parentCenterX = parentNode.x + parentNode.width / 2;
+          const direction = draggedNode.x + draggedNode.width / 2 >= parentCenterX
+            ? "right"
+            : "left";
+          if (direction !== liveBranchDirection) {
+            liveBranchDirection = direction;
+            this.layoutEngine.layoutChildren(canvas, draggedNode.id, direction);
+          }
+        }
+        if (isSingleCardDrag)
           dragAttachment.updatePreview(draggedNode);
       };
       previewFrame = typeof view?.requestAnimationFrame === "function"
@@ -11112,7 +11169,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         dragAttachment.updatePreview(selected);
         const result = dragAttachment.commit(selected);
         if (this.isMindmapCanvas(canvas)) {
-          this.layoutEngine.layout(canvas);
+          const parentCenterX = result.target
+            ? result.target.x + result.target.width / 2
+            : null;
+          const branchDirection = parentCenterX === null
+            ? null
+            : selected.x + selected.width / 2 >= parentCenterX
+              ? "right"
+              : "left";
+          this.layoutEngine.layout(canvas, {
+            preserveRootSides: true,
+            branchDirectionOverride: branchDirection
+              ? { nodeId: selected.id, direction: branchDirection }
+              : null
+          });
           this.updateGroupBounds(canvas);
         }
         if (this.settings.autoColor && this.isMindmapCanvas(canvas))
@@ -11147,7 +11217,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         // Mind-map positions are authoritative. Reflow even if the closest
         // parent stayed the same, so media cannot remain freely positioned.
         if (this.isMindmapCanvas(canvas)) {
-          this.layoutEngine.layout(canvas);
+          const parentCenterX = result.target
+            ? result.target.x + result.target.width / 2
+            : null;
+          const branchDirection = parentCenterX === null
+            ? null
+            : nodeToMove.x + nodeToMove.width / 2 >= parentCenterX
+              ? "right"
+              : "left";
+          this.layoutEngine.layout(canvas, {
+            preserveRootSides: true,
+            branchDirectionOverride: branchDirection
+              ? { nodeId: nodeToMove.id, direction: branchDirection }
+              : null
+          });
           this.updateGroupBounds(canvas);
         }
         if (this.settings.autoColor && this.isMindmapCanvas(canvas))
@@ -11169,19 +11252,38 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       isSingleCardDrag = false;
 
       const targetNode = findNodeFromEvent(canvas, event);
+      let hierarchyChanged = false;
+      let dropZone = null;
       if (targetNode && targetNode.id !== nodeToMove.id && !getGroupIds(canvas).has(targetNode.id)) {
         const dropPoint = canvas.posFromEvt(event);
-        const dropZone = TreeDrag.classifyDropZone(targetNode, dropPoint);
+        dropZone = TreeDrag.classifyDropZone(targetNode, dropPoint);
         if (TreeDrag.reparentSubtree(canvas, this.canvasApi, nodeToMove, targetNode, dropZone, forest)) {
-          if (this.isMindmapCanvas(canvas))
-            this.layoutEngine.layout(canvas);
-          if (this.settings.autoColor && this.isMindmapCanvas(canvas))
-            this.branchColors.applyColors(canvas);
+          hierarchyChanged = true;
           this.markMarkdownOrderDirty(canvas);
-          canvas.requestSave();
-          new import_obsidian5.Notice(dropZone === "child" ? "Re-parented as child topic" : "Re-parented as sibling topic");
         }
       }
+
+      const parentNode = this.canvasApi.getParentNode(canvas, nodeToMove);
+      if (this.isMindmapCanvas(canvas) && parentNode) {
+        const parentCenterX = parentNode.x + parentNode.width / 2;
+        const branchDirection = nodeToMove.x + nodeToMove.width / 2 >= parentCenterX
+          ? "right"
+          : "left";
+        this.layoutEngine.layout(canvas, {
+          preserveRootSides: true,
+          branchDirectionOverride: {
+            nodeId: nodeToMove.id,
+            direction: branchDirection
+          }
+        });
+        this.updateGroupBounds(canvas);
+      }
+      if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+        this.branchColors.applyColors(canvas);
+      canvas.requestSave();
+      void this.flushCanvasToMarkdown(canvas);
+      if (hierarchyChanged)
+        new import_obsidian5.Notice(dropZone === "child" ? "Re-parented as child topic" : "Re-parented as sibling topic");
     };
 
     const onPointerDown = (event) => {
@@ -11195,6 +11297,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         dragStartPos = { x: node.x, y: node.y };
         const selectionSize = canvas.selection ? canvas.selection.size : 1;
         isSingleCardDrag = selectionSize <= 1;
+        const parentNode = this.canvasApi.getParentNode(canvas, node);
+        liveBranchDirection = parentNode
+          ? node.x + node.width / 2 >= parentNode.x + parentNode.width / 2
+            ? "right"
+            : "left"
+          : null;
 
         if (isSingleCardDrag) {
           if (!resizingNode)
@@ -11209,6 +11317,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         draggedNode = null;
         dragStartPos = null;
         isSingleCardDrag = false;
+        liveBranchDirection = null;
       }
     };
 
@@ -11258,6 +11367,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       draggedNode = null;
       dragStartPos = null;
       isSingleCardDrag = false;
+      liveBranchDirection = null;
       resizingNode = null;
     };
   }

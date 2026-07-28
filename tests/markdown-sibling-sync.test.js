@@ -195,6 +195,98 @@ test("balances wide roots in linear prefix-sum passes", () => {
   assert.equal(Math.abs(leftChildren.length - rightChildren.length), 0);
 });
 
+test("preserves the dropped side of root branches during drag reflow", () => {
+  const engine = new LayoutEngine({ nodeHeight: 60, verticalGap: 20 });
+  const leftLeaf = {
+    canvasNode: { id: "left-leaf", x: 0, y: 0, width: 120, height: 60 },
+    children: [],
+    direction: "right"
+  };
+  const leftBranch = {
+    canvasNode: { id: "left", x: 100, y: 0, width: 160, height: 60 },
+    children: [leftLeaf],
+    direction: "right"
+  };
+  const root = {
+    canvasNode: { id: "root", x: 500, y: 0, width: 200, height: 60 },
+    children: [leftBranch]
+  };
+
+  const { leftChildren, rightChildren } = engine.balanceRootChildren(root, true);
+
+  assert.deepEqual(leftChildren, [leftBranch]);
+  assert.deepEqual(rightChildren, []);
+  assert.equal(leftBranch.direction, "left");
+  assert.equal(leftLeaf.direction, "left");
+});
+
+test("flips a nested branch and all of its leaves across its parent", () => {
+  const engine = new LayoutEngine({
+    horizontalGap: 80,
+    nodeHeight: 60,
+    nodeWidth: 160
+  });
+  const leaf = {
+    canvasNode: { id: "leaf", width: 120, height: 60 },
+    children: []
+  };
+  const movedBranch = {
+    canvasNode: { id: "moved", width: 160, height: 60 },
+    children: [leaf]
+  };
+  const positions = new Map();
+
+  engine.layoutSubtree(
+    {
+      canvasNode: { id: "parent", width: 160, height: 60 },
+      children: [movedBranch]
+    },
+    500,
+    0,
+    0,
+    "right",
+    positions,
+    { branchDirectionOverride: { nodeId: "moved", direction: "left" } }
+  );
+
+  assert.equal(positions.get("moved").x, 260);
+  assert.equal(positions.get("leaf").x, 60);
+});
+
+test("keeps a nested branch flipped on later layout passes", () => {
+  const engine = new LayoutEngine({ horizontalGap: 80, nodeHeight: 60 });
+  const positions = new Map();
+  const leaf = {
+    canvasNode: { id: "leaf", width: 120, height: 60 },
+    children: []
+  };
+  const movedBranch = {
+    canvasNode: { id: "moved", width: 160, height: 60 },
+    children: [leaf]
+  };
+
+  engine.layoutSubtree(
+    {
+      canvasNode: { id: "parent", width: 160, height: 60 },
+      children: [movedBranch]
+    },
+    500,
+    0,
+    0,
+    "right",
+    positions,
+    {
+      nestedDirections: new Map([
+        ["moved", "left"],
+        ["leaf", "left"]
+      ])
+    }
+  );
+
+  assert.equal(positions.get("moved").x, 260);
+  assert.equal(positions.get("leaf").x, 60);
+});
+
 test("exports Canvas file and media nodes as useful Markmap Markdown", () => {
   const data = {
     nodes: [

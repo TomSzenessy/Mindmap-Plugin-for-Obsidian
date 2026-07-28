@@ -66,5 +66,69 @@ test("live estimates carry the PDF height floor through both sizing passes", () 
   assert.ok(estimate.width >= 640);
   assert.ok(estimate.height >= 480);
   assert.equal(estimate.floorHeight, 480);
-  assert.ok(CARD_LAYOUT_VERSION >= 18);
+  assert.ok(CARD_LAYOUT_VERSION >= 31);
+});
+
+test("horizontal growth comes from rendered overflow", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+  const table = { clientWidth: 240, scrollWidth: 413 };
+  const root = {
+    clientWidth: 260,
+    scrollWidth: 260,
+    querySelectorAll: () => [table]
+  };
+
+  assert.equal(controller.measureHorizontalOverflow(root), 173);
+});
+
+test("live iframe previews receive the clone geometry", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+  const declarations = new Map();
+  const previewDeclarations = new Map();
+  const sizer = {
+    style: { setProperty: (name, value) => declarations.set(name, value) },
+    firstElementChild: null,
+    lastElementChild: null,
+    closest: () => ({
+      style: { setProperty: (name, value) => previewDeclarations.set(name, value) }
+    }),
+    querySelectorAll: () => []
+  };
+
+  controller.applyPreviewGeometry(sizer);
+
+  assert.equal(declarations.get("padding"), "var(--size-4-1)");
+  assert.equal(declarations.get("box-sizing"), "border-box");
+  assert.equal(previewDeclarations.get("overflow"), "clip");
+});
+
+test("intrinsic height uses the complete rendered border box", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+
+  assert.equal(
+    controller.measureIntrinsicHeight({
+      getBoundingClientRect: () => ({ height: 681.25 })
+    }),
+    682
+  );
+});
+
+test("live vertical growth equals the actual clipped overflow", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+  const preview = { clientHeight: 180, scrollHeight: 287 };
+  const sizer = { closest: () => preview };
+
+  assert.equal(controller.measureLiveVerticalOverflow({}, sizer), 107);
 });

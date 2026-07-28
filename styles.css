@@ -56,6 +56,8 @@
 .mindvas-mindmap-mode .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer,
 .mindvas-measurement-host .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer {
 	flex: 0 0 auto;
+	box-sizing: border-box;
+	padding: var(--size-4-1);
 }
 
 /* Mind-map geometry is owned by automatic content sizing and layout. */

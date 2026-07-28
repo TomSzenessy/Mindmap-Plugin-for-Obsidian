@@ -4183,6 +4183,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       let settled = false;
       let observer = null;
       let interval = null;
+      let timeout = null;
       const finish = (node) => {
         if (settled)
           return;
@@ -4191,6 +4192,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           observer.disconnect();
         if (interval !== null)
           clearInterval(interval);
+        if (timeout !== null)
+          clearTimeout(timeout);
         resolve(node);
       };
       const check = () => {
@@ -4207,6 +4210,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
       }
       interval = setInterval(check, 80);
+      timeout = setTimeout(() => finish(null), 1200);
       check();
     });
     try {
@@ -4224,6 +4228,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const calibrationContent = calibrationCard.closest(".canvas-node-content") || calibrationNode.contentEl;
       if (!calibrationEmbedContent || !calibrationContent)
         return /* @__PURE__ */ new Map();
+      const calibrationChromeHeight = this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
       host = measurementDocument.createElement("div");
       host.className = "mindvas-measurement-host";
       Object.assign(host.style, {
@@ -4264,9 +4269,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             position: "relative",
             display: "block",
             width: `${targetWidth}px`,
-            height: `${initialHeight}px`
+            height: "auto",
+            minHeight: "0",
+            overflow: "visible"
           });
-          shell.style.setProperty("--canvas-node-height", `${initialHeight}px`);
           shell.style.setProperty("--canvas-node-width", `${targetWidth}px`);
           const content = calibrationContent.cloneNode(false);
           content.removeAttribute("id");
@@ -4274,29 +4280,41 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           content.classList.add("canvas-node-content", "markdown-embed");
           Object.assign(content.style, {
             width: "100%",
-            height: "100%",
-            overflow: "hidden",
+            height: "auto",
+            minHeight: "0",
+            overflow: "visible",
             position: "relative"
           });
           const embedContent = calibrationEmbedContent.cloneNode(false);
           embedContent.removeAttribute("id");
           embedContent.removeAttribute("style");
           embedContent.classList.add("markdown-embed-content");
-          embedContent.style.height = "100%";
+          embedContent.style.height = "auto";
+          embedContent.style.minHeight = "0";
+          embedContent.style.overflow = "visible";
           const card = calibrationCard ? calibrationCard.cloneNode(false) : measurementDocument.createElement("div");
           card.removeAttribute("id");
           card.removeAttribute("style");
           card.classList.add("markdown-preview-view", "markdown-rendered");
+          card.style.height = "auto";
+          card.style.minHeight = "0";
+          card.style.overflow = "visible";
           const sizer = calibrationSizer.cloneNode(false);
           sizer.removeAttribute("id");
           sizer.removeAttribute("style");
           sizer.classList.add("markdown-preview-sizer");
+          sizer.style.boxSizing = "border-box";
+          sizer.style.height = "auto";
+          sizer.style.minHeight = "0";
+          sizer.style.overflow = "visible";
+          sizer.style.padding = "var(--size-4-1)";
           card.appendChild(sizer);
           embedContent.appendChild(card);
           content.appendChild(embedContent);
           shell.appendChild(content);
           host.appendChild(shell);
           await MarkdownRenderer.renderMarkdown(String(node.text || ""), sizer, sourcePath, component);
+          this.liveSizing.applyPreviewGeometry(sizer);
           entries.push({
             node,
             shell,
@@ -4344,12 +4362,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             ]);
           }
         }
-        for (const element of Array.from(sizer.querySelectorAll("pre"))) {
-          probeStyle(element, [
-            ["width", "max-content"],
-            ["max-width", "none"]
-          ]);
-        }
       }
       if (probedStyles.length > 0)
         await nextFrame();
@@ -4362,7 +4374,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           const scrollWidth = Number(element.scrollWidth || 0);
           if (clientWidth > 0 && scrollWidth > clientWidth + 1)
             intrinsicWidth = Math.max(intrinsicWidth, entry.targetWidth + scrollWidth - clientWidth);
-          if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tagName))
+          if (/^(?:table|img|video|audio|iframe|embed|object)$/.test(tagName))
             intrinsicWidth = Math.max(
               intrinsicWidth,
               Number(element.scrollWidth || 0) + Math.max(0, entry.targetWidth - Number(card.clientWidth || 0)),
@@ -4386,7 +4398,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         await nextFrame();
         let grew = false;
         for (const entry of entries) {
-          const overflow = Math.max(0, Number(entry.card.scrollWidth || 0) - Number(entry.card.clientWidth || 0));
+          const overflow = this.liveSizing.measureHorizontalOverflow(entry.card);
           if (overflow <= 0 || entry.targetWidth >= maxWidth)
             continue;
           const nextWidth = Math.min(maxWidth, entry.targetWidth + Math.ceil(overflow));
@@ -4400,34 +4412,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         if (!grew)
           break;
       }
-      // Solve Canvas's height-dependent flex spacers from the smallest valid
-      // height. The configured default remains creation/fallback geometry, not
-      // an automatic minimum for non-empty cards.
-      for (let pass = 0; pass < 12; pass++) {
-        await nextFrame();
-        let grew = false;
-        for (const entry of entries) {
-          const viewportHeight = Number(entry.card.clientHeight || 0);
-          const requiredHeight = Number(entry.card.scrollHeight || 0);
-          const overflow = Math.max(0, requiredHeight - viewportHeight);
-          if (overflow <= 0 || entry.targetHeight >= maxHeight)
-            continue;
-          const nextHeight = Math.min(maxHeight, entry.targetHeight + Math.ceil(overflow));
-          if (nextHeight <= entry.targetHeight)
-            continue;
-          entry.targetHeight = nextHeight;
-          entry.shell.style.height = `${nextHeight}px`;
-          entry.shell.style.setProperty("--canvas-node-height", `${nextHeight}px`);
-          grew = true;
-        }
-        if (!grew)
-          break;
-      }
       await nextFrame();
       const result = /* @__PURE__ */ new Map();
-      for (const { node, estimated, targetWidth, targetHeight } of entries) {
+      for (const { node, estimated, targetWidth, sizer } of entries) {
         const width = Math.min(maxWidth, Math.max(minWidth, Math.round(targetWidth || estimated.width)));
-        const height = Math.min(maxHeight, Math.max(1, targetHeight || fallbackHeight));
+        const intrinsicHeight = this.liveSizing.measureIntrinsicHeight(sizer);
+        const height = Math.min(
+          maxHeight,
+          Math.max(
+            1,
+            intrinsicHeight || this.liveSizing.measureContentHeight(sizer) || fallbackHeight
+          )
+          + calibrationChromeHeight
+        );
         result.set(node.id, { width, height });
       }
       return result;

@@ -84,7 +84,7 @@ var { flushCanvasView, reflowCanvasAfterMove } = (() => {
 var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isResizableCanvasNode, isTextTopicCard } = (() => {
   const module = { exports: {} };
   const exports = module.exports;
-  const CARD_LAYOUT_VERSION = 18;
+  const CARD_LAYOUT_VERSION = 31;
 
   function isTextTopicCard(node, groupIds = new Set()) {
     if (!node) return false;
@@ -154,12 +154,83 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const iframe = node.contentEl?.querySelector("iframe");
       try {
         const inner = iframe?.contentDocument?.querySelector(".markdown-preview-sizer");
-        if (inner)
+        if (inner) {
+          this.applyPreviewGeometry(inner);
           return inner;
+        }
       } catch (_) {
         // Canvas media can contain cross-origin frames; those are not previews.
       }
-      return node.contentEl?.querySelector(".markdown-preview-sizer") || null;
+      const outer = node.contentEl?.querySelector(".markdown-preview-sizer") || null;
+      this.applyPreviewGeometry(outer);
+      return outer;
+    }
+
+    /** Keep live iframe previews geometrically identical to hidden clones. */
+    applyPreviewGeometry(sizer) {
+      if (!sizer?.style)
+        return;
+      sizer.style.setProperty("box-sizing", "border-box");
+      sizer.style.setProperty("padding", "var(--size-4-1)");
+      sizer.style.setProperty("flex", "0 0 auto");
+      sizer.firstElementChild?.style?.setProperty("margin-block-start", "0");
+      sizer.lastElementChild?.style?.setProperty("margin-block-end", "0");
+      const preview = sizer.closest?.(".markdown-preview-view");
+      preview?.style?.setProperty("overflow", "clip");
+      for (const pre of Array.from(sizer.querySelectorAll?.("pre") || [])) {
+        pre.style?.setProperty("white-space", "pre-wrap");
+        pre.style?.setProperty("overflow-wrap", "anywhere");
+        pre.style?.setProperty("overflow-x", "clip");
+      }
+    }
+
+    /** Measure overflow from rendered geometry, without any preset allowance. */
+    measureHorizontalOverflow(root) {
+      if (!root)
+        return 0;
+      let overflow = 0;
+      for (const element of [root, ...Array.from(root.querySelectorAll?.("*") || [])]) {
+        const clientWidth = Number(element.clientWidth || 0);
+        const scrollWidth = Number(element.scrollWidth || 0);
+        if (clientWidth > 0)
+          overflow = Math.max(overflow, scrollWidth - clientWidth);
+      }
+      return Math.max(0, Math.ceil(overflow));
+    }
+
+    /** Read an intrinsically auto-sized clone's complete border-box height. */
+    measureIntrinsicHeight(element) {
+      if (!element || typeof element.getBoundingClientRect !== "function")
+        return 0;
+      return Math.max(0, Math.ceil(Number(element.getBoundingClientRect().height || 0)));
+    }
+
+    /** Measure only the vertical content that is clipped in the live preview. */
+    measureLiveVerticalOverflow(node, sizer) {
+      const candidates = [];
+      const preview = sizer?.closest?.(".markdown-preview-view");
+      if (preview)
+        candidates.push(preview);
+      const iframe = node?.contentEl?.querySelector?.("iframe");
+      try {
+        if (iframe) {
+          candidates.push(iframe);
+          if (iframe.contentDocument?.documentElement)
+            candidates.push(iframe.contentDocument.documentElement);
+          if (iframe.contentDocument?.body)
+            candidates.push(iframe.contentDocument.body);
+        }
+      } catch (_) {
+        // Cross-origin media frames are not Markdown previews.
+      }
+      let overflow = 0;
+      for (const element of candidates) {
+        const clientHeight = Number(element.clientHeight || 0);
+        const scrollHeight = Number(element.scrollHeight || 0);
+        if (clientHeight > 0)
+          overflow = Math.max(overflow, scrollHeight - clientHeight);
+      }
+      return Math.max(0, Math.ceil(overflow));
     }
 
     /**
@@ -170,39 +241,32 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
     measureContentHeight(sizer) {
       if (!sizer)
         return 0;
-      const clientHeight = Number(sizer.clientHeight || 0);
-      const scrollHeight = Number(sizer.scrollHeight || 0);
       let contentHeight = 0;
       const sizerRect = typeof sizer.getBoundingClientRect === "function"
         ? sizer.getBoundingClientRect()
         : null;
       const view = sizer.ownerDocument?.defaultView || null;
+      let paddingTop = 0;
       let paddingBottom = 0;
       try {
-        paddingBottom = Number.parseFloat(view?.getComputedStyle(sizer)?.paddingBottom || "0") || 0;
+        const style = view?.getComputedStyle(sizer);
+        paddingTop = Number.parseFloat(style?.paddingTop || "0") || 0;
+        paddingBottom = Number.parseFloat(style?.paddingBottom || "0") || 0;
       } catch (_) {
         // Detached/test DOM nodes may not expose computed styles.
       }
       for (const child of Array.from(sizer.children || [])) {
-        let marginBottom = 0;
-        try {
-          marginBottom = Number.parseFloat(view?.getComputedStyle(child)?.marginBottom || "0") || 0;
-        } catch (_) {
-          // Keep the geometry-only measurement.
-        }
         if (sizerRect && typeof child.getBoundingClientRect === "function") {
           const childRect = child.getBoundingClientRect();
-          contentHeight = Math.max(contentHeight, childRect.bottom - sizerRect.top + marginBottom + paddingBottom);
+          contentHeight = Math.max(contentHeight, childRect.bottom - sizerRect.top);
         }
         const offsetTop = Number(child.offsetTop || 0);
         const offsetHeight = Number(child.offsetHeight || 0);
-        contentHeight = Math.max(contentHeight, offsetTop + offsetHeight + marginBottom + paddingBottom);
+        contentHeight = Math.max(contentHeight, offsetTop + offsetHeight);
       }
-      if (scrollHeight > clientHeight + 1)
-        contentHeight = Math.max(contentHeight, scrollHeight);
-      if (contentHeight <= 0 && scrollHeight > 0 && clientHeight <= 0)
-        contentHeight = scrollHeight;
-      return Math.max(0, Math.ceil(contentHeight));
+      const symmetricInset = Math.max(paddingTop, paddingBottom);
+      const contentStart = Math.min(paddingTop, contentHeight);
+      return Math.max(0, Math.ceil(Math.max(0, contentHeight - contentStart) + symmetricInset * 2));
     }
 
     /**
@@ -393,7 +457,15 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const renderedHeight = contentHeight > 0 && chromeHeight !== null
         ? Math.min(maxHeight, Math.max(1, Math.ceil(contentHeight + chromeHeight)))
         : Math.min(maxHeight, estimate.height);
-      const height = Math.min(maxHeight, Math.max(estimate.floorHeight || 0, renderedHeight));
+      const overflowHeight = this.measureLiveVerticalOverflow(node, sizer);
+      const height = Math.min(
+        maxHeight,
+        Math.max(
+          estimate.floorHeight || 0,
+          renderedHeight,
+          Number(node.height || 0) + overflowHeight
+        )
+      );
       return { width, height };
     }
 
@@ -500,6 +572,8 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
         this.plugin.layoutEngine.layout(canvas);
         this.plugin.updateGroupBounds(canvas);
         recordCompletedSizing(measurements.keys());
+        for (const delay of [120, 280, 600])
+          this.plugin.trackedTimeout(() => this.resizeNodesRetry(canvas, requested), delay);
         // Plain Markdown is now final and remains entirely cache-driven. Observe
         // only embeds whose intrinsic size can genuinely change after rendering.
         const asynchronousNodes = requested.filter((node) => hasAsyncRenderableContent(node.text));
@@ -9571,6 +9645,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       let settled = false;
       let observer = null;
       let interval = null;
+      let timeout = null;
       const finish = (node) => {
         if (settled)
           return;
@@ -9579,6 +9654,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           observer.disconnect();
         if (interval !== null)
           clearInterval(interval);
+        if (timeout !== null)
+          clearTimeout(timeout);
         resolve(node);
       };
       const check = () => {
@@ -9595,6 +9672,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
       }
       interval = setInterval(check, 80);
+      timeout = setTimeout(() => finish(null), 1200);
       check();
     });
     try {
@@ -9612,6 +9690,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       const calibrationContent = calibrationCard.closest(".canvas-node-content") || calibrationNode.contentEl;
       if (!calibrationEmbedContent || !calibrationContent)
         return /* @__PURE__ */ new Map();
+      const calibrationChromeHeight = this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
       host = measurementDocument.createElement("div");
       host.className = "mindvas-measurement-host";
       Object.assign(host.style, {
@@ -9652,9 +9731,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             position: "relative",
             display: "block",
             width: `${targetWidth}px`,
-            height: `${initialHeight}px`
+            height: "auto",
+            minHeight: "0",
+            overflow: "visible"
           });
-          shell.style.setProperty("--canvas-node-height", `${initialHeight}px`);
           shell.style.setProperty("--canvas-node-width", `${targetWidth}px`);
           const content = calibrationContent.cloneNode(false);
           content.removeAttribute("id");
@@ -9662,29 +9742,41 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           content.classList.add("canvas-node-content", "markdown-embed");
           Object.assign(content.style, {
             width: "100%",
-            height: "100%",
-            overflow: "hidden",
+            height: "auto",
+            minHeight: "0",
+            overflow: "visible",
             position: "relative"
           });
           const embedContent = calibrationEmbedContent.cloneNode(false);
           embedContent.removeAttribute("id");
           embedContent.removeAttribute("style");
           embedContent.classList.add("markdown-embed-content");
-          embedContent.style.height = "100%";
+          embedContent.style.height = "auto";
+          embedContent.style.minHeight = "0";
+          embedContent.style.overflow = "visible";
           const card = calibrationCard ? calibrationCard.cloneNode(false) : measurementDocument.createElement("div");
           card.removeAttribute("id");
           card.removeAttribute("style");
           card.classList.add("markdown-preview-view", "markdown-rendered");
+          card.style.height = "auto";
+          card.style.minHeight = "0";
+          card.style.overflow = "visible";
           const sizer = calibrationSizer.cloneNode(false);
           sizer.removeAttribute("id");
           sizer.removeAttribute("style");
           sizer.classList.add("markdown-preview-sizer");
+          sizer.style.boxSizing = "border-box";
+          sizer.style.height = "auto";
+          sizer.style.minHeight = "0";
+          sizer.style.overflow = "visible";
+          sizer.style.padding = "var(--size-4-1)";
           card.appendChild(sizer);
           embedContent.appendChild(card);
           content.appendChild(embedContent);
           shell.appendChild(content);
           host.appendChild(shell);
           await MarkdownRenderer.renderMarkdown(String(node.text || ""), sizer, sourcePath, component);
+          this.liveSizing.applyPreviewGeometry(sizer);
           entries.push({
             node,
             shell,
@@ -9732,12 +9824,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
             ]);
           }
         }
-        for (const element of Array.from(sizer.querySelectorAll("pre"))) {
-          probeStyle(element, [
-            ["width", "max-content"],
-            ["max-width", "none"]
-          ]);
-        }
       }
       if (probedStyles.length > 0)
         await nextFrame();
@@ -9750,7 +9836,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
           const scrollWidth = Number(element.scrollWidth || 0);
           if (clientWidth > 0 && scrollWidth > clientWidth + 1)
             intrinsicWidth = Math.max(intrinsicWidth, entry.targetWidth + scrollWidth - clientWidth);
-          if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tagName))
+          if (/^(?:table|img|video|audio|iframe|embed|object)$/.test(tagName))
             intrinsicWidth = Math.max(
               intrinsicWidth,
               Number(element.scrollWidth || 0) + Math.max(0, entry.targetWidth - Number(card.clientWidth || 0)),
@@ -9774,7 +9860,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         await nextFrame();
         let grew = false;
         for (const entry of entries) {
-          const overflow = Math.max(0, Number(entry.card.scrollWidth || 0) - Number(entry.card.clientWidth || 0));
+          const overflow = this.liveSizing.measureHorizontalOverflow(entry.card);
           if (overflow <= 0 || entry.targetWidth >= maxWidth)
             continue;
           const nextWidth = Math.min(maxWidth, entry.targetWidth + Math.ceil(overflow));
@@ -9788,34 +9874,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         if (!grew)
           break;
       }
-      // Solve Canvas's height-dependent flex spacers from the smallest valid
-      // height. The configured default remains creation/fallback geometry, not
-      // an automatic minimum for non-empty cards.
-      for (let pass = 0; pass < 12; pass++) {
-        await nextFrame();
-        let grew = false;
-        for (const entry of entries) {
-          const viewportHeight = Number(entry.card.clientHeight || 0);
-          const requiredHeight = Number(entry.card.scrollHeight || 0);
-          const overflow = Math.max(0, requiredHeight - viewportHeight);
-          if (overflow <= 0 || entry.targetHeight >= maxHeight)
-            continue;
-          const nextHeight = Math.min(maxHeight, entry.targetHeight + Math.ceil(overflow));
-          if (nextHeight <= entry.targetHeight)
-            continue;
-          entry.targetHeight = nextHeight;
-          entry.shell.style.height = `${nextHeight}px`;
-          entry.shell.style.setProperty("--canvas-node-height", `${nextHeight}px`);
-          grew = true;
-        }
-        if (!grew)
-          break;
-      }
       await nextFrame();
       const result = /* @__PURE__ */ new Map();
-      for (const { node, estimated, targetWidth, targetHeight } of entries) {
+      for (const { node, estimated, targetWidth, sizer } of entries) {
         const width = Math.min(maxWidth, Math.max(minWidth, Math.round(targetWidth || estimated.width)));
-        const height = Math.min(maxHeight, Math.max(1, targetHeight || fallbackHeight));
+        const intrinsicHeight = this.liveSizing.measureIntrinsicHeight(sizer);
+        const height = Math.min(
+          maxHeight,
+          Math.max(
+            1,
+            intrinsicHeight || this.liveSizing.measureContentHeight(sizer) || fallbackHeight
+          )
+          + calibrationChromeHeight
+        );
         result.set(node.id, { width, height });
       }
       return result;

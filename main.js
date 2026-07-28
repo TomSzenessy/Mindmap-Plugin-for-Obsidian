@@ -8300,6 +8300,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     this.cleanupMediaDropHandler = null;
     this.cleanupNodeDragReparentHandler = null;
     this.cleanupKeyboardHandler = null;
+    this.cleanupPreviewGeometryHandler = null;
     /** Pending timers/observers/RAFs to cancel on unload or canvas switch. */
     this.pendingTimers = /* @__PURE__ */ new Set();
     this.pendingRafs = /* @__PURE__ */ new Set();
@@ -8945,6 +8946,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.cleanupKeyboardHandler();
       this.cleanupKeyboardHandler = null;
     }
+    if (this.cleanupPreviewGeometryHandler) {
+      this.cleanupPreviewGeometryHandler();
+      this.cleanupPreviewGeometryHandler = null;
+    }
     if (this.cleanupNavHandler) {
       this.cleanupNavHandler();
       this.cleanupNavHandler = null;
@@ -9052,6 +9057,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     if (this.cleanupKeyboardHandler) {
       this.cleanupKeyboardHandler();
       this.cleanupKeyboardHandler = null;
+    }
+    if (this.cleanupPreviewGeometryHandler) {
+      this.cleanupPreviewGeometryHandler();
+      this.cleanupPreviewGeometryHandler = null;
     }
     if (this.cleanupNavHandler) {
       this.cleanupNavHandler();
@@ -9429,18 +9438,37 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     if (this.isMindmapCanvas(canvas)) {
       this.updateNodeTypeAttributes(canvas);
+      const refreshPreviewGeometry = () => {
+        const groupIds = getGroupIds(canvas);
+        for (const node of canvas.nodes.values()) {
+          if (isTextTopicCard(node, groupIds))
+            this.liveSizing.getPreviewSizer(node);
+        }
+      };
+      refreshPreviewGeometry();
+      if (typeof MutationObserver !== "undefined" && canvas.wrapperEl) {
+        const previewObserver = new MutationObserver(refreshPreviewGeometry);
+        previewObserver.observe(canvas.wrapperEl, { childList: true, subtree: true });
+        this.pendingObservers.add(previewObserver);
+        this.cleanupPreviewGeometryHandler = () => {
+          previewObserver.disconnect();
+          this.pendingObservers.delete(previewObserver);
+        };
+      }
       this.refreshOutline(canvas);
       this.trackedRaf(() => {
         if (this.canvasApi.getActiveCanvas() !== canvas || !this.isMindmapCanvas(canvas))
           return;
         this.updateNodeTypeAttributes(canvas);
+        refreshPreviewGeometry();
         const groupIds = getGroupIds(canvas);
         const topics = Array.from(canvas.nodes.values()).filter((node) => isTextTopicCard(node, groupIds));
         const topicsToResize = needsSizeMigration ? topics : topics.filter((node) => pendingResizeIds.has(node.id));
         if (topicsToResize.length > 0) {
           this.resizeNodesWhenRendered(canvas, topicsToResize);
         } else {
-          this.layoutEngine.layout(canvas);
+          // Canvas already persisted x/y/width/height. A clean view attach
+          // must not recompute geometry merely because the tab was reopened.
           this.updateGroupBounds(canvas);
         }
       });
@@ -9448,9 +9476,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
         this.trackedTimeout(() => {
           if (this.canvasApi.getActiveCanvas() !== canvas || !this.isMindmapCanvas(canvas))
             return;
+          // Virtualized cards can materialize after the first frame, so keep
+          // their interaction classes current without touching saved geometry.
           this.updateNodeTypeAttributes(canvas);
-          this.layoutEngine.layout(canvas);
-          this.updateGroupBounds(canvas);
+          refreshPreviewGeometry();
         }, delay);
       }
     } else {

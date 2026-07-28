@@ -11578,16 +11578,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       this.toggleMindmapMode(canvas);
     };
     const onTogglePointerDown = (event) => {
+      if (!event.target?.closest?.(".mindvas-toggle-btn"))
+        return;
       suppressClick = true;
       toggleFromEvent(event);
     };
     const onToggleClick = (event) => {
-      if (suppressClick) {
+      const isToggleClick = !!event.target?.closest?.(".mindvas-toggle-btn");
+      if (suppressClick && isToggleClick) {
         suppressClick = false;
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
+      if (!isToggleClick)
+        return;
       toggleFromEvent(event);
     };
     container.addEventListener("pointerdown", onTogglePointerDown, true);

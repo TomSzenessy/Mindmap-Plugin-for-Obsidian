@@ -12,13 +12,24 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function runtimeImportPattern(definition) {
+  const modulePath = `./${definition.source}`;
+  return new RegExp(
+    `^var\\s+(?:\\{[^;]*?\\}|[A-Za-z_$][\\w$]*)\\s*=\\s*require\\([\\'"]${escapeRegExp(modulePath)}[\\'"]\\);`,
+    "m"
+  );
+}
+
 function moduleBlock(definition) {
   let source = fs.readFileSync(path.join(root, definition.source), "utf8")
     .replace(/^["']use strict["'];\s*/, "")
     .trimEnd();
   for (const dependency of modules) {
     source = source.replace(
-      new RegExp(`^const ([^\\n]+) = require\\(["']\\.\\/${escapeRegExp(path.basename(dependency.source))}["']\\);\\n?`, "m"),
+      new RegExp(
+        `^const\\s+(?:\\{[^;]*?\\}|[A-Za-z_$][\\w$]*)\\s*=\\s*require\\(["']\\.\\/${escapeRegExp(path.basename(dependency.source))}["']\\);\\n?`,
+        "m"
+      ),
       ""
     );
   }
@@ -38,9 +49,14 @@ const original = fs.readFileSync(mainPath, "utf8");
 let main = fs.readFileSync(sourcePath, "utf8");
 for (const definition of modules) {
   const block = moduleBlock(definition);
-  if (!main.includes(definition.requireLine))
-    throw new Error(`Could not find runtime import for ${definition.name}`);
-  main = main.replace(definition.requireLine, block);
+  if (main.includes(definition.requireLine)) {
+    main = main.replace(definition.requireLine, block);
+  } else {
+    const importPattern = runtimeImportPattern(definition);
+    if (!importPattern.test(main))
+      throw new Error(`Could not find runtime import for ${definition.name}`);
+    main = main.replace(importPattern, block);
+  }
 }
 
 // Earlier releases kept pre-extraction implementations behind unreachable

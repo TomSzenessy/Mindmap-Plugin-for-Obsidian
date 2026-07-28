@@ -36,5105 +36,4351 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require('obsidian');
 // <tomindmap:module canvas-session>
 var { flushCanvasView, reflowCanvasAfterMove } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	/**
-	 * Finish native Canvas persistence before plugin handlers are detached.
-	 *
-	 * Canvas.requestSave() is debounced by Obsidian. Calling the view's save
-	 * method when it is available prevents a leaf change from discarding a
-	 * pending native save. The fallback remains compatible with Canvas versions
-	 * that expose only requestSave().
-	 */
-	async function flushCanvasView(canvas, vault = null) {
-		if (!canvas) return;
-		const file = canvas.view?.file;
-		const snapshot =
-			typeof canvas.getData === 'function'
-				? JSON.stringify(canvas.getData(), null, '\t')
-				: null;
-		canvas.requestSave?.();
-		const view = canvas.view;
-		if (typeof view?.save === 'function') await view.save();
-		if (snapshot !== null && file && typeof vault?.process === 'function')
-			await vault.process(file, (current) =>
-				current === snapshot ? current : snapshot
-			);
-	}
+  const module = { exports: {} };
+  const exports = module.exports;
+  /**
+   * Finish native Canvas persistence before plugin handlers are detached.
+   *
+   * Canvas.requestSave() is debounced by Obsidian. Calling the view's save
+   * method when it is available prevents a leaf change from discarding a
+   * pending native save. The fallback remains compatible with Canvas versions
+   * that expose only requestSave().
+   */
+  async function flushCanvasView(canvas, vault = null) {
+    if (!canvas)
+      return;
+    const file = canvas.view?.file;
+    const snapshot = typeof canvas.getData === "function"
+      ? JSON.stringify(canvas.getData(), null, "\t")
+      : null;
+    canvas.requestSave?.();
+    const view = canvas.view;
+    if (typeof view?.save === "function")
+      await view.save();
+    if (snapshot !== null && file && typeof vault?.process === "function")
+      await vault.process(file, (current) => current === snapshot ? current : snapshot);
+  }
 
-	/**
-	 * A manual topic move invalidates the contours of its complete mind map.
-	 * Reflow the canvas as one transaction so independent drag handlers do not
-	 * leave partially updated geometry behind.
-	 */
-	function reflowCanvasAfterMove(canvas, services) {
-		if (!canvas || !services?.isMindmap(canvas)) return false;
-		services.layout.layout(canvas);
-		services.updateGroups?.(canvas);
-		if (services.autoColor?.()) services.colors?.applyColors(canvas);
-		services.markOrderDirty?.(canvas);
-		canvas.requestSave?.();
-		return true;
-	}
+  /**
+   * A manual topic move invalidates the contours of its complete mind map.
+   * Reflow the canvas as one transaction so independent drag handlers do not
+   * leave partially updated geometry behind.
+   */
+  function reflowCanvasAfterMove(canvas, services) {
+    if (!canvas || !services?.isMindmap(canvas))
+      return false;
+    services.layout.layout(canvas);
+    services.updateGroups?.(canvas);
+    if (services.autoColor?.())
+      services.colors?.applyColors(canvas);
+    services.markOrderDirty?.(canvas);
+    canvas.requestSave?.();
+    return true;
+  }
 
-	module.exports = {
-		flushCanvasView,
-		reflowCanvasAfterMove
-	};
-	return module.exports;
+  module.exports = {
+    flushCanvasView,
+    reflowCanvasAfterMove
+  };
+  return module.exports;
 })();
 // </tomindmap:module canvas-session>
 // <tomindmap:module live-sizing>
-var {
-	CARD_LAYOUT_VERSION,
-	LiveSizingController,
-	hasAsyncRenderableContent,
-	isResizableCanvasNode,
-	isTextTopicCard
-} = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const CARD_LAYOUT_VERSION = 31;
+var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isResizableCanvasNode, isTextTopicCard } = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
+  const CARD_LAYOUT_VERSION = 31;
 
-	function isTextTopicCard(node, groupIds = new Set()) {
-		if (!node) return false;
-		if (
-			groupIds &&
-			typeof groupIds.has === 'function' &&
-			groupIds.has(node.id)
-		)
-			return false;
-		if (node.file || node.url) return false;
-		const type = node.unknownData?.type || node.type;
-		if (type === 'file' || type === 'link' || type === 'group')
-			return false;
-		return typeof node.text === 'string';
-	}
+  function isTextTopicCard(node, groupIds = new Set()) {
+    if (!node) return false;
+    if (groupIds && typeof groupIds.has === "function" && groupIds.has(node.id)) return false;
+    if (node.file || node.url) return false;
+    const type = node.unknownData?.type || node.type;
+    if (type === "file" || type === "link" || type === "group") return false;
+    return typeof node.text === "string";
+  }
 
-	function editorContent(node) {
-		const iframe = node.contentEl?.querySelector('iframe');
-		const document = iframe?.contentDocument;
-		return document?.querySelector('.cm-content') || null;
-	}
+  function editorContent(node) {
+    const iframe = node.contentEl?.querySelector("iframe");
+    const document = iframe?.contentDocument;
+    return document?.querySelector(".cm-content") || null;
+  }
 
-	function hasAsyncRenderableContent(text) {
-		return /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)|<(?:img|audio|video|source|iframe|object|embed)\b/i.test(
-			String(text || '')
-		);
-	}
+  function hasAsyncRenderableContent(text) {
+    return /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)|<(?:img|audio|video|source|iframe|object|embed)\b/i.test(String(text || ""));
+  }
 
-	function isResizableCanvasNode(node, groupIds = new Set()) {
-		if (!node) return false;
-		if (!isTextTopicCard(node, groupIds)) return true;
-		return hasAsyncRenderableContent(node.text);
-	}
+  function isResizableCanvasNode(node, groupIds = new Set()) {
+    if (!node)
+      return false;
+    if (!isTextTopicCard(node, groupIds))
+      return true;
+    return hasAsyncRenderableContent(node.text);
+  }
 
-	function embeddedContentFloor(text, settings) {
-		const source = String(text || '');
-		const minWidth = Math.max(80, Number(settings?.minNodeWidth) || 180);
-		const maxWidth = Math.max(
-			minWidth,
-			Number(settings?.maxNodeWidth) || 1200
-		);
-		const maxHeight = Math.max(20, Number(settings?.maxNodeHeight) || 2400);
-		const defaultWidth = Math.max(
-			minWidth,
-			Number(settings?.defaultNodeWidth) || 300
-		);
-		const defaultHeight = Math.max(
-			20,
-			Number(settings?.defaultNodeHeight) || 60
-		);
-		const fit = (kind, width, height) => ({
-			kind,
-			width: Math.min(maxWidth, Math.max(minWidth, width)),
-			height: Math.min(maxHeight, Math.max(defaultHeight, height))
-		});
-		const wikiTarget =
-			/!\[\[([^|\]#]+)(?:[|#][^\]]*)?\]\]/i.exec(source)?.[1] || '';
-		const markdownTarget = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))/i.exec(
-			source
-		);
-		const linkedTarget =
-			wikiTarget || markdownTarget?.[1] || markdownTarget?.[2] || '';
-		const htmlPdf =
-			/<(?:iframe|object|embed)\b[^>]*(?:src|data)=["'][^"']*\.pdf(?:[?#][^"']*)?["']/i.test(
-				source
-			);
-		if (/\.pdf(?:$|[?#])/i.test(linkedTarget) || htmlPdf)
-			return fit('document', Math.max(640, defaultWidth * 2), 480);
-		if (
-			/\.(?:mp4|m4v|mov|webm|ogv)(?:$|[?#])/i.test(linkedTarget) ||
-			/<video\b/i.test(source)
-		)
-			return fit('video', Math.max(480, defaultWidth * 1.6), 300);
-		if (
-			/\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(
-				linkedTarget
-			) ||
-			/<(?:img|picture)\b/i.test(source)
-		)
-			return fit('image', Math.max(360, defaultWidth * 1.2), 220);
-		if (
-			/\.(?:mp3|m4a|ogg|wav|flac)(?:$|[?#])/i.test(linkedTarget) ||
-			/<audio\b/i.test(source)
-		)
-			return fit('audio', Math.max(420, defaultWidth * 1.4), 96);
-		if (/<(?:iframe|object|embed)\b/i.test(source))
-			return fit('embed', Math.max(560, defaultWidth * 1.8), 360);
-		return { kind: 'text', width: minWidth, height: 0 };
-	}
+  function embeddedContentFloor(text, settings) {
+    const source = String(text || "");
+    const minWidth = Math.max(80, Number(settings?.minNodeWidth) || 180);
+    const maxWidth = Math.max(minWidth, Number(settings?.maxNodeWidth) || 1200);
+    const maxHeight = Math.max(20, Number(settings?.maxNodeHeight) || 2400);
+    const defaultWidth = Math.max(minWidth, Number(settings?.defaultNodeWidth) || 300);
+    const defaultHeight = Math.max(20, Number(settings?.defaultNodeHeight) || 60);
+    const fit = (kind, width, height) => ({
+      kind,
+      width: Math.min(maxWidth, Math.max(minWidth, width)),
+      height: Math.min(maxHeight, Math.max(defaultHeight, height))
+    });
+    const wikiTarget = /!\[\[([^|\]#]+)(?:[|#][^\]]*)?\]\]/i.exec(source)?.[1] || "";
+    const markdownTarget = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))/i.exec(source);
+    const linkedTarget = wikiTarget || markdownTarget?.[1] || markdownTarget?.[2] || "";
+    const htmlPdf = /<(?:iframe|object|embed)\b[^>]*(?:src|data)=["'][^"']*\.pdf(?:[?#][^"']*)?["']/i.test(source);
+    if (/\.pdf(?:$|[?#])/i.test(linkedTarget) || htmlPdf)
+      return fit("document", Math.max(640, defaultWidth * 2), 480);
+    if (/\.(?:mp4|m4v|mov|webm|ogv)(?:$|[?#])/i.test(linkedTarget) || /<video\b/i.test(source))
+      return fit("video", Math.max(480, defaultWidth * 1.6), 300);
+    if (/\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(linkedTarget) || /<(?:img|picture)\b/i.test(source))
+      return fit("image", Math.max(360, defaultWidth * 1.2), 220);
+    if (/\.(?:mp3|m4a|ogg|wav|flac)(?:$|[?#])/i.test(linkedTarget) || /<audio\b/i.test(source))
+      return fit("audio", Math.max(420, defaultWidth * 1.4), 96);
+    if (/<(?:iframe|object|embed)\b/i.test(source))
+      return fit("embed", Math.max(560, defaultWidth * 1.8), 360);
+    return { kind: "text", width: minWidth, height: 0 };
+  }
 
-	class LiveSizingController {
-		constructor(plugin, getGroupIds) {
-			this.plugin = plugin;
-			this.getGroupIds = getGroupIds;
-			this.queueCleanup = null;
-			this.watchCleanup = null;
-		}
+  class LiveSizingController {
+    constructor(plugin, getGroupIds) {
+      this.plugin = plugin;
+      this.getGroupIds = getGroupIds;
+      this.queueCleanup = null;
+      this.watchCleanup = null;
+    }
 
-		getPreviewSizer(node) {
-			const iframe = node.contentEl?.querySelector('iframe');
-			try {
-				const inner = iframe?.contentDocument?.querySelector(
-					'.markdown-preview-sizer'
-				);
-				if (inner) {
-					this.applyPreviewGeometry(inner);
-					return inner;
-				}
-			} catch (_) {
-				// Canvas media can contain cross-origin frames; those are not previews.
-			}
-			const outer =
-				node.contentEl?.querySelector('.markdown-preview-sizer') ||
-				null;
-			this.applyPreviewGeometry(outer);
-			return outer;
-		}
+    getPreviewSizer(node) {
+      const iframe = node.contentEl?.querySelector("iframe");
+      try {
+        const inner = iframe?.contentDocument?.querySelector(".markdown-preview-sizer");
+        if (inner) {
+          this.applyPreviewGeometry(inner);
+          return inner;
+        }
+      } catch (_) {
+        // Canvas media can contain cross-origin frames; those are not previews.
+      }
+      const outer = node.contentEl?.querySelector(".markdown-preview-sizer") || null;
+      this.applyPreviewGeometry(outer);
+      return outer;
+    }
 
-		/** Keep live iframe previews geometrically identical to hidden clones. */
-		applyPreviewGeometry(sizer) {
-			if (!sizer?.style) return;
-			sizer.style.setProperty('box-sizing', 'border-box');
-			sizer.style.setProperty('padding', 'var(--size-4-1)');
-			sizer.style.setProperty('flex', '0 0 auto');
-			sizer.firstElementChild?.style?.setProperty(
-				'margin-block-start',
-				'0'
-			);
-			sizer.lastElementChild?.style?.setProperty('margin-block-end', '0');
-			const preview = sizer.closest?.('.markdown-preview-view');
-			preview?.style?.setProperty('overflow', 'clip');
-			for (const pre of Array.from(
-				sizer.querySelectorAll?.('pre') || []
-			)) {
-				pre.style?.setProperty('white-space', 'pre-wrap');
-				pre.style?.setProperty('overflow-wrap', 'anywhere');
-				pre.style?.setProperty('overflow-x', 'clip');
-			}
-		}
+    /** Keep live iframe previews geometrically identical to hidden clones. */
+    applyPreviewGeometry(sizer) {
+      if (!sizer?.style)
+        return;
+      sizer.style.setProperty("box-sizing", "border-box");
+      sizer.style.setProperty("padding", "var(--size-4-1)");
+      sizer.style.setProperty("flex", "0 0 auto");
+      sizer.firstElementChild?.style?.setProperty("margin-block-start", "0");
+      sizer.lastElementChild?.style?.setProperty("margin-block-end", "0");
+      const preview = sizer.closest?.(".markdown-preview-view");
+      preview?.style?.setProperty("overflow", "clip");
+      for (const pre of Array.from(sizer.querySelectorAll?.("pre") || [])) {
+        pre.style?.setProperty("white-space", "pre-wrap");
+        pre.style?.setProperty("overflow-wrap", "anywhere");
+        pre.style?.setProperty("overflow-x", "clip");
+      }
+    }
 
-		/** Measure overflow from rendered geometry, without any preset allowance. */
-		measureHorizontalOverflow(root) {
-			if (!root) return 0;
-			let overflow = 0;
-			for (const element of [
-				root,
-				...Array.from(root.querySelectorAll?.('*') || [])
-			]) {
-				const clientWidth = Number(element.clientWidth || 0);
-				const scrollWidth = Number(element.scrollWidth || 0);
-				if (clientWidth > 0)
-					overflow = Math.max(overflow, scrollWidth - clientWidth);
-			}
-			return Math.max(0, Math.ceil(overflow));
-		}
+    /** Measure overflow from rendered geometry, without any preset allowance. */
+    measureHorizontalOverflow(root) {
+      if (!root)
+        return 0;
+      let overflow = 0;
+      for (const element of [root, ...Array.from(root.querySelectorAll?.("*") || [])]) {
+        const clientWidth = Number(element.clientWidth || 0);
+        const scrollWidth = Number(element.scrollWidth || 0);
+        if (clientWidth > 0)
+          overflow = Math.max(overflow, scrollWidth - clientWidth);
+      }
+      return Math.max(0, Math.ceil(overflow));
+    }
 
-		/** Read an intrinsically auto-sized clone's complete border-box height. */
-		measureIntrinsicHeight(element) {
-			if (!element || typeof element.getBoundingClientRect !== 'function')
-				return 0;
-			return Math.max(
-				0,
-				Math.ceil(Number(element.getBoundingClientRect().height || 0))
-			);
-		}
+    /** Read an intrinsically auto-sized clone's complete border-box height. */
+    measureIntrinsicHeight(element) {
+      if (!element || typeof element.getBoundingClientRect !== "function")
+        return 0;
+      return Math.max(0, Math.ceil(Number(element.getBoundingClientRect().height || 0)));
+    }
 
-		/** One rendered text line plus the preview's real vertical insets. */
-		minimumTextHeight(sizer) {
-			if (!sizer) return 1;
-			const view = sizer.ownerDocument?.defaultView;
-			let fontSize = 0;
-			let lineHeight = 0;
-			let paddingTop = 0;
-			let paddingBottom = 0;
-			try {
-				const style = view?.getComputedStyle(sizer);
-				fontSize = Number.parseFloat(style?.fontSize || '0') || 0;
-				lineHeight = Number.parseFloat(style?.lineHeight || '0') || 0;
-				paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
-				paddingBottom =
-					Number.parseFloat(style?.paddingBottom || '0') || 0;
-			} catch (_) {
-				// Detached/test DOM nodes may not expose computed styles.
-			}
-			if (lineHeight <= 0) lineHeight = fontSize > 0 ? fontSize * 1.2 : 1;
-			return Math.max(
-				1,
-				Math.ceil(lineHeight + paddingTop + paddingBottom)
-			);
-		}
+    /** One rendered text line plus the preview's real vertical insets. */
+    minimumTextHeight(sizer) {
+      if (!sizer)
+        return 1;
+      const view = sizer.ownerDocument?.defaultView;
+      let fontSize = 0;
+      let lineHeight = 0;
+      let paddingTop = 0;
+      let paddingBottom = 0;
+      try {
+        const style = view?.getComputedStyle(sizer);
+        fontSize = Number.parseFloat(style?.fontSize || "0") || 0;
+        lineHeight = Number.parseFloat(style?.lineHeight || "0") || 0;
+        paddingTop = Number.parseFloat(style?.paddingTop || "0") || 0;
+        paddingBottom = Number.parseFloat(style?.paddingBottom || "0") || 0;
+      } catch (_) {
+        // Detached/test DOM nodes may not expose computed styles.
+      }
+      if (lineHeight <= 0)
+        lineHeight = fontSize > 0 ? fontSize * 1.2 : 1;
+      return Math.max(1, Math.ceil(lineHeight + paddingTop + paddingBottom));
+    }
 
-		/** Measure only the vertical content that is clipped in the live preview. */
-		measureLiveVerticalOverflow(node, sizer) {
-			const candidates = [];
-			const preview = sizer?.closest?.('.markdown-preview-view');
-			if (preview) candidates.push(preview);
-			const iframe = node?.contentEl?.querySelector?.('iframe');
-			try {
-				if (iframe) {
-					candidates.push(iframe);
-					if (iframe.contentDocument?.documentElement)
-						candidates.push(iframe.contentDocument.documentElement);
-					if (iframe.contentDocument?.body)
-						candidates.push(iframe.contentDocument.body);
-				}
-			} catch (_) {
-				// Cross-origin media frames are not Markdown previews.
-			}
-			let overflow = 0;
-			for (const element of candidates) {
-				const clientHeight = Number(element.clientHeight || 0);
-				const scrollHeight = Number(element.scrollHeight || 0);
-				if (clientHeight > 0)
-					overflow = Math.max(overflow, scrollHeight - clientHeight);
-			}
-			return Math.max(0, Math.ceil(overflow));
-		}
+    /** Measure only the vertical content that is clipped in the live preview. */
+    measureLiveVerticalOverflow(node, sizer) {
+      const candidates = [];
+      const preview = sizer?.closest?.(".markdown-preview-view");
+      if (preview)
+        candidates.push(preview);
+      const iframe = node?.contentEl?.querySelector?.("iframe");
+      try {
+        if (iframe) {
+          candidates.push(iframe);
+          if (iframe.contentDocument?.documentElement)
+            candidates.push(iframe.contentDocument.documentElement);
+          if (iframe.contentDocument?.body)
+            candidates.push(iframe.contentDocument.body);
+        }
+      } catch (_) {
+        // Cross-origin media frames are not Markdown previews.
+      }
+      let overflow = 0;
+      for (const element of candidates) {
+        const clientHeight = Number(element.clientHeight || 0);
+        const scrollHeight = Number(element.scrollHeight || 0);
+        if (clientHeight > 0)
+          overflow = Math.max(overflow, scrollHeight - clientHeight);
+      }
+      return Math.max(0, Math.ceil(overflow));
+    }
 
-		/**
-		 * Measure the rendered block extent without treating the preview viewport's
-		 * min-height as content. Child offsets include inter-block margins, which a
-		 * sum of offsetHeight values misses.
-		 */
-		measureContentHeight(sizer) {
-			if (!sizer) return 0;
-			let contentHeight = 0;
-			const sizerRect =
-				typeof sizer.getBoundingClientRect === 'function'
-					? sizer.getBoundingClientRect()
-					: null;
-			const view = sizer.ownerDocument?.defaultView || null;
-			let paddingTop = 0;
-			let paddingBottom = 0;
-			try {
-				const style = view?.getComputedStyle(sizer);
-				paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
-				paddingBottom =
-					Number.parseFloat(style?.paddingBottom || '0') || 0;
-			} catch (_) {
-				// Detached/test DOM nodes may not expose computed styles.
-			}
-			for (const child of Array.from(sizer.children || [])) {
-				if (
-					sizerRect &&
-					typeof child.getBoundingClientRect === 'function'
-				) {
-					const childRect = child.getBoundingClientRect();
-					contentHeight = Math.max(
-						contentHeight,
-						childRect.bottom - sizerRect.top
-					);
-				}
-				const offsetTop = Number(child.offsetTop || 0);
-				const offsetHeight = Number(child.offsetHeight || 0);
-				contentHeight = Math.max(
-					contentHeight,
-					offsetTop + offsetHeight
-				);
-			}
-			const symmetricInset = Math.max(paddingTop, paddingBottom);
-			const contentStart = Math.min(paddingTop, contentHeight);
-			return Math.max(
-				0,
-				Math.ceil(
-					Math.max(0, contentHeight - contentStart) +
-						symmetricInset * 2
-				)
-			);
-		}
+    /**
+     * Measure the rendered block extent without treating the preview viewport's
+     * min-height as content. Child offsets include inter-block margins, which a
+     * sum of offsetHeight values misses.
+     */
+    measureContentHeight(sizer) {
+      if (!sizer)
+        return 0;
+      let contentHeight = 0;
+      const sizerRect = typeof sizer.getBoundingClientRect === "function"
+        ? sizer.getBoundingClientRect()
+        : null;
+      const view = sizer.ownerDocument?.defaultView || null;
+      let paddingTop = 0;
+      let paddingBottom = 0;
+      try {
+        const style = view?.getComputedStyle(sizer);
+        paddingTop = Number.parseFloat(style?.paddingTop || "0") || 0;
+        paddingBottom = Number.parseFloat(style?.paddingBottom || "0") || 0;
+      } catch (_) {
+        // Detached/test DOM nodes may not expose computed styles.
+      }
+      for (const child of Array.from(sizer.children || [])) {
+        if (sizerRect && typeof child.getBoundingClientRect === "function") {
+          const childRect = child.getBoundingClientRect();
+          contentHeight = Math.max(contentHeight, childRect.bottom - sizerRect.top);
+        }
+        const offsetTop = Number(child.offsetTop || 0);
+        const offsetHeight = Number(child.offsetHeight || 0);
+        contentHeight = Math.max(contentHeight, offsetTop + offsetHeight);
+      }
+      const symmetricInset = Math.max(paddingTop, paddingBottom);
+      const contentStart = Math.min(paddingTop, contentHeight);
+      return Math.max(0, Math.ceil(Math.max(0, contentHeight - contentStart) + symmetricInset * 2));
+    }
 
-		/**
-		 * Return only the Canvas shell outside its content element.
-		 *
-		 * The iframe is intrinsically sized to its Markdown in some Obsidian
-		 * versions. Subtracting it from the saved node height therefore includes
-		 * any existing empty space and makes that padding self-perpetuating.
-		 * The content element, by contrast, is the node's layout viewport.
-		 */
-		getPreviewChromeHeight(node) {
-			const nodeHeight = Number(node?.height || 0);
-			const contentHeight = Number(node?.contentEl?.clientHeight || 0);
-			if (contentHeight <= 0 || nodeHeight <= 0) return null;
-			return Math.max(0, nodeHeight - contentHeight);
-		}
+    /**
+     * Return only the Canvas shell outside its content element.
+     *
+     * The iframe is intrinsically sized to its Markdown in some Obsidian
+     * versions. Subtracting it from the saved node height therefore includes
+     * any existing empty space and makes that padding self-perpetuating.
+     * The content element, by contrast, is the node's layout viewport.
+     */
+    getPreviewChromeHeight(node) {
+      const nodeHeight = Number(node?.height || 0);
+      const contentHeight = Number(node?.contentEl?.clientHeight || 0);
+      if (contentHeight <= 0 || nodeHeight <= 0)
+        return null;
+      return Math.max(0, nodeHeight - contentHeight);
+    }
 
-		/** Return the live Canvas shell width around a rendered Markdown preview. */
-		getPreviewChromeWidth(node) {
-			const iframe = node?.contentEl?.querySelector('iframe');
-			const sizer = this.getPreviewSizer(node);
-			const viewportWidth = Number(
-				iframe?.clientWidth || sizer?.clientWidth || 0
-			);
-			const nodeWidth = Number(node?.width || 0);
-			if (viewportWidth <= 0 || nodeWidth <= 0) return null;
-			return Math.max(0, nodeWidth - viewportWidth);
-		}
+    /** Return the live Canvas shell width around a rendered Markdown preview. */
+    getPreviewChromeWidth(node) {
+      const iframe = node?.contentEl?.querySelector("iframe");
+      const sizer = this.getPreviewSizer(node);
+      const viewportWidth = Number(iframe?.clientWidth || sizer?.clientWidth || 0);
+      const nodeWidth = Number(node?.width || 0);
+      if (viewportWidth <= 0 || nodeWidth <= 0)
+        return null;
+      return Math.max(0, nodeWidth - viewportWidth);
+    }
 
-		waitForPreview(node, callback) {
-			if (this.getPreviewSizer(node) && !node.isEditing) {
-				callback();
-				return;
-			}
-			const contentEl = node.contentEl;
-			if (!contentEl || typeof MutationObserver === 'undefined') {
-				this.plugin.trackedTimeout(() => {
-					if (!node.isEditing) callback();
-				}, 100);
-				return;
-			}
-			let finished = false;
-			const finish = () => {
-				if (finished || node.isEditing || !this.getPreviewSizer(node))
-					return;
-				finished = true;
-				observer.disconnect();
-				this.plugin.pendingObservers.delete(observer);
-				callback();
-			};
-			const observer = new MutationObserver(() =>
-				this.plugin.trackedRaf(finish)
-			);
-			this.plugin.pendingObservers.add(observer);
-			observer.observe(contentEl, { childList: true, subtree: true });
-			for (const delay of [100, 250, 600, 1200])
-				this.plugin.trackedTimeout(finish, delay);
-		}
+    waitForPreview(node, callback) {
+      if (this.getPreviewSizer(node) && !node.isEditing) {
+        callback();
+        return;
+      }
+      const contentEl = node.contentEl;
+      if (!contentEl || typeof MutationObserver === "undefined") {
+        this.plugin.trackedTimeout(() => {
+          if (!node.isEditing)
+            callback();
+        }, 100);
+        return;
+      }
+      let finished = false;
+      const finish = () => {
+        if (finished || node.isEditing || !this.getPreviewSizer(node))
+          return;
+        finished = true;
+        observer.disconnect();
+        this.plugin.pendingObservers.delete(observer);
+        callback();
+      };
+      const observer = new MutationObserver(() => this.plugin.trackedRaf(finish));
+      this.plugin.pendingObservers.add(observer);
+      observer.observe(contentEl, { childList: true, subtree: true });
+      for (const delay of [100, 250, 600, 1200])
+        this.plugin.trackedTimeout(finish, delay);
+    }
 
-		estimate(text) {
-			const settings = this.plugin.settings;
-			const floor = embeddedContentFloor(text, settings);
-			const minWidth = Math.max(
-				80,
-				Math.min(settings.minNodeWidth, settings.maxNodeWidth)
-			);
-			const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
-			const softMaxWidth = Math.min(
-				maxWidth,
-				Math.max(720, settings.defaultNodeWidth * 2.4)
-			);
-			const minHeight = settings.defaultNodeHeight;
-			const lines = String(text || '')
-				.split('\n')
-				.map((line) =>
-					line
-						.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-						.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-						.replace(/<[^>]+>/g, ' ')
-						.replace(/^[\s>*#\-\d.)]+/, '')
-						.replace(/[*_`~[\]|]/g, ' ')
-						.replace(/\s+/g, ' ')
-						.trim()
-				);
-			const charWidth = 7.5;
-			const horizontalChrome = 44;
-			const lineHeight = 22;
-			const words = lines.flatMap((line) =>
-				line.split(/\s+/).filter(Boolean)
-			);
-			const longestWord = Math.max(
-				0,
-				...words.map((word) => word.length * charWidth)
-			);
-			const firstWidth = Math.min(
-				softMaxWidth,
-				Math.max(minWidth, longestWord + horizontalChrome)
-			);
-			const lineCount = (width) => {
-				const available = Math.max(40, width - horizontalChrome);
-				let count = 0;
-				for (const line of lines) {
-					const lineWords = line.split(/\s+/).filter(Boolean);
-					if (lineWords.length === 0) {
-						count++;
-						continue;
-					}
-					let used = 0;
-					for (const word of lineWords) {
-						const wordWidth = word.length * charWidth;
-						if (
-							used > 0 &&
-							used + charWidth + wordWidth > available
-						) {
-							count++;
-							used = wordWidth;
-						} else {
-							used += (used > 0 ? charWidth : 0) + wordWidth;
-						}
-					}
-					count++;
-				}
-				return Math.max(1, count);
-			};
-			let best = null;
-			for (
-				let width = Math.ceil(firstWidth / 10) * 10;
-				width <= softMaxWidth;
-				width += 20
-			) {
-				const height = Math.max(
-					minHeight,
-					28 + lineCount(width) * lineHeight
-				);
-				const aspect = width / Math.max(1, height);
-				const score =
-					width *
-					height *
-					(1 +
-						Math.max(0, 1.1 - aspect) * 0.45 +
-						Math.max(0, aspect - 5.5) * 0.08);
-				if (
-					!best ||
-					score < best.score ||
-					(score === best.score && height < best.height)
-				)
-					best = { width, height, score };
-			}
-			const result = best || { width: minWidth, height: minHeight };
-			return {
-				...result,
-				width: Math.max(result.width, floor.width),
-				height: Math.max(result.height, floor.height),
-				floorHeight: floor.height,
-				contentKind: floor.kind
-			};
-		}
+    estimate(text) {
+      const settings = this.plugin.settings;
+      const floor = embeddedContentFloor(text, settings);
+      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
+      const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
+      const softMaxWidth = Math.min(maxWidth, Math.max(720, settings.defaultNodeWidth * 2.4));
+      const minHeight = settings.defaultNodeHeight;
+      const lines = String(text || "").split("\n").map((line) => line
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/^[\s>*#\-\d.)]+/, "")
+        .replace(/[*_`~[\]|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim());
+      const charWidth = 7.5;
+      const horizontalChrome = 44;
+      const lineHeight = 22;
+      const words = lines.flatMap((line) => line.split(/\s+/).filter(Boolean));
+      const longestWord = Math.max(0, ...words.map((word) => word.length * charWidth));
+      const firstWidth = Math.min(softMaxWidth, Math.max(minWidth, longestWord + horizontalChrome));
+      const lineCount = (width) => {
+        const available = Math.max(40, width - horizontalChrome);
+        let count = 0;
+        for (const line of lines) {
+          const lineWords = line.split(/\s+/).filter(Boolean);
+          if (lineWords.length === 0) {
+            count++;
+            continue;
+          }
+          let used = 0;
+          for (const word of lineWords) {
+            const wordWidth = word.length * charWidth;
+            if (used > 0 && used + charWidth + wordWidth > available) {
+              count++;
+              used = wordWidth;
+            } else {
+              used += (used > 0 ? charWidth : 0) + wordWidth;
+            }
+          }
+          count++;
+        }
+        return Math.max(1, count);
+      };
+      let best = null;
+      for (let width = Math.ceil(firstWidth / 10) * 10; width <= softMaxWidth; width += 20) {
+        const height = Math.max(minHeight, 28 + lineCount(width) * lineHeight);
+        const aspect = width / Math.max(1, height);
+        const score = width * height * (1 + Math.max(0, 1.1 - aspect) * 0.45 + Math.max(0, aspect - 5.5) * 0.08);
+        if (!best || score < best.score || score === best.score && height < best.height)
+          best = { width, height, score };
+      }
+      const result = best || { width: minWidth, height: minHeight };
+      return {
+        ...result,
+        width: Math.max(result.width, floor.width),
+        height: Math.max(result.height, floor.height),
+        floorHeight: floor.height,
+        contentKind: floor.kind
+      };
+    }
 
-		measure(node) {
-			if (
-				!isTextTopicCard(
-					node,
-					typeof this.getGroupIds === 'function' &&
-						this.plugin?.interceptedCanvas
-						? this.getGroupIds(this.plugin.interceptedCanvas)
-						: null
-				)
-			)
-				return { width: node.width, height: node.height };
-			const settings = this.plugin.settings;
-			const minWidth = Math.max(
-				80,
-				Math.min(settings.minNodeWidth, settings.maxNodeWidth)
-			);
-			const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
-			const maxHeight = settings.maxNodeHeight;
-			const rawText = node.isEditing
-				? editorContent(node)?.innerText || node.text
-				: node.text;
-			const estimate = this.estimate(rawText);
-			const sizer = this.getPreviewSizer(node);
-			if (!sizer || node.isEditing) {
-				let intrinsicWidth = 0;
-				let overflowHeight = 0;
-				const elements =
-					typeof node.contentEl?.querySelectorAll === 'function'
-						? Array.from(node.contentEl.querySelectorAll('*'))
-						: [];
-				for (const element of elements) {
-					const clientWidth = Number(element.clientWidth || 0);
-					const scrollWidth = Number(element.scrollWidth || 0);
-					if (clientWidth > 0 && scrollWidth > clientWidth + 1)
-						intrinsicWidth = Math.max(
-							intrinsicWidth,
-							node.width + scrollWidth - clientWidth + 12
-						);
-					const clientHeight = Number(element.clientHeight || 0);
-					const scrollHeight = Number(element.scrollHeight || 0);
-					if (clientHeight > 0 && scrollHeight > clientHeight + 1)
-						overflowHeight = Math.max(
-							overflowHeight,
-							node.height + scrollHeight - clientHeight
-						);
-				}
-				return {
-					width: Math.min(
-						maxWidth,
-						Math.max(estimate.width, intrinsicWidth)
-					),
-					height: Math.min(
-						maxHeight,
-						Math.max(estimate.height, overflowHeight)
-					)
-				};
-			}
+    measure(node) {
+      if (!isTextTopicCard(node, typeof this.getGroupIds === "function" && this.plugin?.interceptedCanvas ? this.getGroupIds(this.plugin.interceptedCanvas) : null))
+        return { width: node.width, height: node.height };
+      const settings = this.plugin.settings;
+      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
+      const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
+      const maxHeight = settings.maxNodeHeight;
+      const rawText = node.isEditing ? editorContent(node)?.innerText || node.text : node.text;
+      const estimate = this.estimate(rawText);
+      const sizer = this.getPreviewSizer(node);
+      if (!sizer || node.isEditing) {
+        let intrinsicWidth = 0;
+        let overflowHeight = 0;
+        const elements = typeof node.contentEl?.querySelectorAll === "function"
+          ? Array.from(node.contentEl.querySelectorAll("*"))
+          : [];
+        for (const element of elements) {
+          const clientWidth = Number(element.clientWidth || 0);
+          const scrollWidth = Number(element.scrollWidth || 0);
+          if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+            intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 12);
+          const clientHeight = Number(element.clientHeight || 0);
+          const scrollHeight = Number(element.scrollHeight || 0);
+          if (clientHeight > 0 && scrollHeight > clientHeight + 1)
+            overflowHeight = Math.max(overflowHeight, node.height + scrollHeight - clientHeight);
+        }
+        return {
+          width: Math.min(maxWidth, Math.max(estimate.width, intrinsicWidth)),
+          height: Math.min(maxHeight, Math.max(estimate.height, overflowHeight))
+        };
+      }
 
-			const iframe = node.contentEl?.querySelector('iframe');
-			const chromeWidth = this.getPreviewChromeWidth(node) || 0;
-			let intrinsicWidth = 0;
-			const measurementElements = new Set([sizer]);
-			const addTree = (root) => {
-				if (!root) return;
-				measurementElements.add(root);
-				if (typeof root.querySelectorAll === 'function') {
-					for (const element of root.querySelectorAll('*'))
-						measurementElements.add(element);
-				}
-			};
-			addTree(sizer);
-			try {
-				addTree(iframe?.contentDocument?.documentElement);
-				addTree(iframe?.contentDocument?.body);
-			} catch (_) {
-				// Ignore cross-origin embedded media frames.
-			}
-			for (const element of measurementElements) {
-				const clientWidth = Number(element.clientWidth || 0);
-				const scrollWidth = Number(element.scrollWidth || 0);
-				if (clientWidth > 0 && scrollWidth > clientWidth + 1)
-					intrinsicWidth = Math.max(
-						intrinsicWidth,
-						node.width + scrollWidth - clientWidth + 8
-					);
-				const tag = String(element.tagName || '').toLowerCase();
-				if (
-					/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(
-						tag
-					)
-				)
-					intrinsicWidth = Math.max(
-						intrinsicWidth,
-						scrollWidth + chromeWidth,
-						Number(element.offsetWidth || 0) + chromeWidth
-					);
-			}
-			const width = Math.min(
-				maxWidth,
-				Math.max(
-					minWidth,
-					estimate.width,
-					Math.ceil(intrinsicWidth / 10) * 10 || 0
-				)
-			);
-			if (Math.abs(width - node.width) > 1)
-				return { width, height: Math.min(maxHeight, estimate.height) };
+      const iframe = node.contentEl?.querySelector("iframe");
+      const chromeWidth = this.getPreviewChromeWidth(node) || 0;
+      let intrinsicWidth = 0;
+      const measurementElements = new Set([sizer]);
+      const addTree = (root) => {
+        if (!root)
+          return;
+        measurementElements.add(root);
+        if (typeof root.querySelectorAll === "function") {
+          for (const element of root.querySelectorAll("*"))
+            measurementElements.add(element);
+        }
+      };
+      addTree(sizer);
+      try {
+        addTree(iframe?.contentDocument?.documentElement);
+        addTree(iframe?.contentDocument?.body);
+      } catch (_) {
+        // Ignore cross-origin embedded media frames.
+      }
+      for (const element of measurementElements) {
+        const clientWidth = Number(element.clientWidth || 0);
+        const scrollWidth = Number(element.scrollWidth || 0);
+        if (clientWidth > 0 && scrollWidth > clientWidth + 1)
+          intrinsicWidth = Math.max(intrinsicWidth, node.width + scrollWidth - clientWidth + 8);
+        const tag = String(element.tagName || "").toLowerCase();
+        if (/^(?:table|pre|img|video|audio|iframe|embed|object)$/.test(tag))
+          intrinsicWidth = Math.max(intrinsicWidth, scrollWidth + chromeWidth, Number(element.offsetWidth || 0) + chromeWidth);
+      }
+      const width = Math.min(maxWidth, Math.max(minWidth, estimate.width, Math.ceil(intrinsicWidth / 10) * 10 || 0));
+      if (Math.abs(width - node.width) > 1)
+        return { width, height: Math.min(maxHeight, estimate.height) };
 
-			const contentHeight = this.measureContentHeight(sizer);
-			const chromeHeight = this.getPreviewChromeHeight(node);
-			const renderedHeight =
-				contentHeight > 0 && chromeHeight !== null
-					? Math.min(
-							maxHeight,
-							Math.max(
-								this.minimumTextHeight(sizer),
-								Math.ceil(contentHeight)
-							) + chromeHeight
-						)
-					: Math.min(maxHeight, estimate.height);
-			const overflowHeight = this.measureLiveVerticalOverflow(
-				node,
-				sizer
-			);
-			const height = Math.min(
-				maxHeight,
-				Math.max(
-					estimate.floorHeight || 0,
-					renderedHeight,
-					Number(node.height || 0) + overflowHeight
-				)
-			);
-			return { width, height };
-		}
+      const contentHeight = this.measureContentHeight(sizer);
+      const chromeHeight = this.getPreviewChromeHeight(node);
+      const renderedHeight = contentHeight > 0 && chromeHeight !== null
+        ? Math.min(maxHeight, Math.max(this.minimumTextHeight(sizer), Math.ceil(contentHeight)) + chromeHeight)
+        : Math.min(maxHeight, estimate.height);
+      const overflowHeight = this.measureLiveVerticalOverflow(node, sizer);
+      const height = Math.min(
+        maxHeight,
+        Math.max(
+          estimate.floorHeight || 0,
+          renderedHeight,
+          Number(node.height || 0) + overflowHeight
+        )
+      );
+      return { width, height };
+    }
 
-		apply(canvas, nodes, relayout = false) {
-			const changed = [];
-			for (const node of nodes) {
-				if (!node || node.isEditing) continue;
-				const target = this.measure(node);
-				if (
-					Math.abs(target.width - node.width) <= 1 &&
-					Math.abs(target.height - node.height) <= 1
-				)
-					continue;
-				node.moveAndResize({
-					x: node.x,
-					y: node.y,
-					width: target.width,
-					height: target.height
-				});
-				changed.push(node);
-			}
-			if (changed.length > 0) {
-				canvas.requestSave();
-				if (relayout)
-					this.plugin.relayoutAffectedBranches(canvas, changed);
-			}
-			return changed;
-		}
+    apply(canvas, nodes, relayout = false) {
+      const changed = [];
+      for (const node of nodes) {
+        if (!node || node.isEditing)
+          continue;
+        const target = this.measure(node);
+        if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+          continue;
+        node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+        changed.push(node);
+      }
+      if (changed.length > 0) {
+        canvas.requestSave();
+        if (relayout)
+          this.plugin.relayoutAffectedBranches(canvas, changed);
+      }
+      return changed;
+    }
 
-		resizeNodes(canvas, nodes) {
-			const changed = this.apply(canvas, nodes, false);
-			if (changed.length === 0) return;
-			for (const delay of [120, 280, 600])
-				this.plugin.trackedTimeout(
-					() => this.resizeNodesRetry(canvas, nodes),
-					delay
-				);
-		}
+    resizeNodes(canvas, nodes) {
+      const changed = this.apply(canvas, nodes, false);
+      if (changed.length === 0)
+        return;
+      for (const delay of [120, 280, 600])
+        this.plugin.trackedTimeout(() => this.resizeNodesRetry(canvas, nodes), delay);
+    }
 
-		resizeNodesRetry(canvas, nodes) {
-			if (
-				!this.plugin.isAutoAdjustCanvas(canvas) ||
-				!this.plugin.isMindmapCanvas(canvas)
-			)
-				return;
-			this.apply(canvas, nodes, true);
-		}
+    resizeNodesRetry(canvas, nodes) {
+      if (!this.plugin.isAutoAdjustCanvas(canvas) || !this.plugin.isMindmapCanvas(canvas))
+        return;
+      this.apply(canvas, nodes, true);
+    }
 
-		resizeNodesWhenRendered(canvas, nodes, onSettled = null) {
-			this.cancelQueue();
-			this.stopWatchingCanvas();
-			const groupIds = this.getGroupIds(canvas);
-			const requested = nodes.filter((node) =>
-				isTextTopicCard(node, groupIds)
-			);
-			if (requested.length === 0) {
-				const data = canvas.getData();
-				data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
-				canvas.setData(data);
-				canvas.requestSave();
-				this.plugin.layoutEngine.layout(canvas);
-				this.plugin.updateGroupBounds(canvas);
-				onSettled?.();
-				return;
-			}
-			let stopped = false;
+    resizeNodesWhenRendered(canvas, nodes, onSettled = null) {
+      this.cancelQueue();
+      this.stopWatchingCanvas();
+      const groupIds = this.getGroupIds(canvas);
+      const requested = nodes.filter((node) => isTextTopicCard(node, groupIds));
+      if (requested.length === 0) {
+        const data = canvas.getData();
+        data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
+        canvas.setData(data);
+        canvas.requestSave();
+        this.plugin.layoutEngine.layout(canvas);
+        this.plugin.updateGroupBounds(canvas);
+        onSettled?.();
+        return;
+      }
+      let stopped = false;
 
-			const cleanup = () => {
-				if (stopped) return;
-				stopped = true;
-				if (this.queueCleanup === cleanup) this.queueCleanup = null;
-			};
-			this.queueCleanup = cleanup;
+      const cleanup = () => {
+        if (stopped)
+          return;
+        stopped = true;
+        if (this.queueCleanup === cleanup)
+          this.queueCleanup = null;
+      };
+      this.queueCleanup = cleanup;
 
-			const recordCompletedSizing = (measuredIds) => {
-				const data = canvas.getData();
-				const stored = new Set(
-					Array.isArray(data.mindmapPendingResize)
-						? data.mindmapPendingResize
-						: []
-				);
-				for (const id of measuredIds) stored.delete(id);
-				if (stored.size > 0)
-					data.mindmapPendingResize = Array.from(stored);
-				else delete data.mindmapPendingResize;
-				data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
-				canvas.setData(data);
-				canvas.requestSave();
-			};
+      const recordCompletedSizing = (measuredIds) => {
+        const data = canvas.getData();
+        const stored = new Set(Array.isArray(data.mindmapPendingResize) ? data.mindmapPendingResize : []);
+        for (const id of measuredIds)
+          stored.delete(id);
+        if (stored.size > 0)
+          data.mindmapPendingResize = Array.from(stored);
+        else
+          delete data.mindmapPendingResize;
+        data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
+        canvas.setData(data);
+        canvas.requestSave();
+      };
 
-			// Preserve the currently drawn graph until the exact pass is ready. This
-			// avoids showing a heuristic layout first and then replacing it.
-			// No live card is resized individually while this batch is pending.
-			void this.plugin
-				.measureMarkdownNodesOffscreen(
-					canvas,
-					requested,
-					() =>
-						!stopped &&
-						!this.plugin.unloaded &&
-						this.plugin.isMindmapCanvas(canvas)
-				)
-				.then((measurements) => {
-					if (stopped) return;
-					if (measurements.size === 0) {
-						this.plugin.layoutEngine.layout(canvas);
-						this.plugin.updateGroupBounds(canvas);
-						onSettled?.();
-						cleanup();
-						return;
-					}
-					const changed = [];
-					for (const [id, target] of measurements) {
-						const node = canvas.nodes.get(id);
-						if (!node || node.isEditing) continue;
-						if (
-							Math.abs(target.width - node.width) <= 1 &&
-							Math.abs(target.height - node.height) <= 1
-						)
-							continue;
-						node.moveAndResize({
-							x: node.x,
-							y: node.y,
-							width: target.width,
-							height: target.height
-						});
-						changed.push(node);
-					}
-					if (changed.length > 0) canvas.requestSave();
-					this.plugin.layoutEngine.layout(canvas);
-					this.plugin.updateGroupBounds(canvas);
-					recordCompletedSizing(measurements.keys());
-					for (const delay of [120, 280, 600])
-						this.plugin.trackedTimeout(
-							() => this.resizeNodesRetry(canvas, requested),
-							delay
-						);
-					if (onSettled) this.plugin.trackedTimeout(onSettled, 650);
-					// Plain Markdown is now final and remains entirely cache-driven. Observe
-					// only embeds whose intrinsic size can genuinely change after rendering.
-					const asynchronousNodes = requested.filter((node) =>
-						hasAsyncRenderableContent(node.text)
-					);
-					if (asynchronousNodes.length > 0)
-						this.watchCanvas(canvas, asynchronousNodes);
-					cleanup();
-				})
-				.catch((error) => {
-					console.error(
-						'ToMindMap: initial card measurement failed',
-						error
-					);
-					cleanup();
-				});
-		}
+      // Preserve the currently drawn graph until the exact pass is ready. This
+      // avoids showing a heuristic layout first and then replacing it.
+      // No live card is resized individually while this batch is pending.
+      void this.plugin.measureMarkdownNodesOffscreen(
+        canvas,
+        requested,
+        () => !stopped && !this.plugin.unloaded && this.plugin.isMindmapCanvas(canvas)
+      ).then((measurements) => {
+        if (stopped)
+          return;
+        if (measurements.size === 0) {
+          this.plugin.layoutEngine.layout(canvas);
+          this.plugin.updateGroupBounds(canvas);
+          onSettled?.();
+          cleanup();
+          return;
+        }
+        const changed = [];
+        for (const [id, target] of measurements) {
+          const node = canvas.nodes.get(id);
+          if (!node || node.isEditing)
+            continue;
+          if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+            continue;
+          node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+          changed.push(node);
+        }
+        if (changed.length > 0)
+          canvas.requestSave();
+        this.plugin.layoutEngine.layout(canvas);
+        this.plugin.updateGroupBounds(canvas);
+        recordCompletedSizing(measurements.keys());
+        for (const delay of [120, 280, 600])
+          this.plugin.trackedTimeout(() => this.resizeNodesRetry(canvas, requested), delay);
+        if (onSettled)
+          this.plugin.trackedTimeout(onSettled, 650);
+        // Plain Markdown is now final and remains entirely cache-driven. Observe
+        // only embeds whose intrinsic size can genuinely change after rendering.
+        const asynchronousNodes = requested.filter((node) => hasAsyncRenderableContent(node.text));
+        if (asynchronousNodes.length > 0)
+          this.watchCanvas(canvas, asynchronousNodes);
+        cleanup();
+      }).catch((error) => {
+        console.error("ToMindMap: initial card measurement failed", error);
+        cleanup();
+      });
+    }
 
-		/**
-		 * Track only cards with asynchronous embeds after their atomic text sizing
-		 * pass. Plain Markdown uses its persisted dimensions and is never resized
-		 * merely because Canvas virtualized or materialized it.
-		 */
-		watchCanvas(canvas, nodes) {
-			this.stopWatchingCanvas();
-			const wrapper = canvas?.wrapperEl;
-			if (!wrapper || typeof MutationObserver === 'undefined') return;
-			const targetIds = new Set(
-				(nodes || [])
-					.filter((node) => node && typeof node.text === 'string')
-					.map((node) => node.id)
-			);
-			if (targetIds.size === 0) return;
+    /**
+     * Track only cards with asynchronous embeds after their atomic text sizing
+     * pass. Plain Markdown uses its persisted dimensions and is never resized
+     * merely because Canvas virtualized or materialized it.
+     */
+    watchCanvas(canvas, nodes) {
+      this.stopWatchingCanvas();
+      const wrapper = canvas?.wrapperEl;
+      if (!wrapper || typeof MutationObserver === "undefined")
+        return;
+      const targetIds = new Set(
+        (nodes || [])
+          .filter((node) => node && typeof node.text === "string")
+          .map((node) => node.id)
+      );
+      if (targetIds.size === 0)
+        return;
 
-			let stopped = false;
-			let scanQueued = false;
-			let discoverAll = true;
-			let layoutTimer = null;
-			const dirtyIds = new Set();
-			const layoutIds = new Set();
-			const liveSizers = new Map();
-			const iframeRecords = new Map();
-			let outerMutationObserver = null;
-			let outerResizeObserver = null;
+      let stopped = false;
+      let scanQueued = false;
+      let discoverAll = true;
+      let layoutTimer = null;
+      const dirtyIds = new Set();
+      const layoutIds = new Set();
+      const liveSizers = new Map();
+      const iframeRecords = new Map();
+      let outerMutationObserver = null;
+      let outerResizeObserver = null;
 
-			const isCurrent = () =>
-				!stopped &&
-				!this.plugin.unloaded &&
-				this.plugin.isMindmapCanvas(canvas) &&
-				this.plugin.interceptedCanvas === canvas;
+      const isCurrent = () => !stopped
+        && !this.plugin.unloaded
+        && this.plugin.isMindmapCanvas(canvas)
+        && this.plugin.interceptedCanvas === canvas;
 
-			const forgetObserver = (observer) => {
-				observer?.disconnect();
-				if (observer) this.plugin.pendingObservers.delete(observer);
-			};
+      const forgetObserver = (observer) => {
+        observer?.disconnect();
+        if (observer)
+          this.plugin.pendingObservers.delete(observer);
+      };
 
-			const cleanupIframeRecord = (iframe, record) => {
-				record.mutationObserver?.disconnect();
-				record.resizeObserver?.disconnect();
-				if (record.mutationObserver)
-					this.plugin.pendingObservers.delete(
-						record.mutationObserver
-					);
-				if (record.resizeObserver)
-					this.plugin.pendingObservers.delete(record.resizeObserver);
-				record.document?.removeEventListener(
-					'load',
-					record.assetHandler,
-					true
-				);
-				iframe?.removeEventListener('load', record.frameHandler);
-				iframeRecords.delete(iframe);
-			};
+      const cleanupIframeRecord = (iframe, record) => {
+        record.mutationObserver?.disconnect();
+        record.resizeObserver?.disconnect();
+        if (record.mutationObserver)
+          this.plugin.pendingObservers.delete(record.mutationObserver);
+        if (record.resizeObserver)
+          this.plugin.pendingObservers.delete(record.resizeObserver);
+        record.document?.removeEventListener("load", record.assetHandler, true);
+        iframe?.removeEventListener("load", record.frameHandler);
+        iframeRecords.delete(iframe);
+      };
 
-			const scheduleLayout = () => {
-				if (layoutTimer !== null) {
-					clearTimeout(layoutTimer);
-					this.plugin.pendingTimers.delete(layoutTimer);
-				}
-				layoutTimer = setTimeout(() => {
-					this.plugin.pendingTimers.delete(layoutTimer);
-					layoutTimer = null;
-					if (!isCurrent()) return;
-					const changed = Array.from(layoutIds)
-						.map((id) => canvas.nodes.get(id))
-						.filter(Boolean);
-					layoutIds.clear();
-					if (changed.length === 0) return;
-					this.plugin.relayoutAffectedBranches(canvas, changed);
-					this.plugin.updateGroupBounds(canvas);
-				}, 100);
-				this.plugin.pendingTimers.add(layoutTimer);
-			};
+      const scheduleLayout = () => {
+        if (layoutTimer !== null) {
+          clearTimeout(layoutTimer);
+          this.plugin.pendingTimers.delete(layoutTimer);
+        }
+        layoutTimer = setTimeout(() => {
+          this.plugin.pendingTimers.delete(layoutTimer);
+          layoutTimer = null;
+          if (!isCurrent())
+            return;
+          const changed = Array.from(layoutIds)
+            .map((id) => canvas.nodes.get(id))
+            .filter(Boolean);
+          layoutIds.clear();
+          if (changed.length === 0)
+            return;
+          this.plugin.relayoutAffectedBranches(canvas, changed);
+          this.plugin.updateGroupBounds(canvas);
+        }, 100);
+        this.plugin.pendingTimers.add(layoutTimer);
+      };
 
-			const scan = () => {
-				scanQueued = false;
-				if (!isCurrent()) return;
-				const groupIds = this.getGroupIds(canvas);
-				if (discoverAll) {
-					discoverAll = false;
-					for (const id of targetIds) dirtyIds.add(id);
-				}
+      const scan = () => {
+        scanQueued = false;
+        if (!isCurrent())
+          return;
+        const groupIds = this.getGroupIds(canvas);
+        if (discoverAll) {
+          discoverAll = false;
+          for (const id of targetIds)
+            dirtyIds.add(id);
+        }
 
-				const changed = [];
-				const ids = Array.from(dirtyIds);
-				dirtyIds.clear();
-				for (const id of ids) {
-					const node = canvas.nodes.get(id);
-					if (
-						!node ||
-						node.isEditing ||
-						groupIds.has(id) ||
-						typeof node.text !== 'string'
-					)
-						continue;
-					const sizer = this.getPreviewSizer(node);
-					if (!sizer) {
-						observeNodeDocument(node);
-						continue;
-					}
-					observeNode(node, sizer);
-					const target = this.measure(node);
-					if (
-						Math.abs(target.width - node.width) <= 1 &&
-						Math.abs(target.height - node.height) <= 1
-					)
-						continue;
-					node.moveAndResize({
-						x: node.x,
-						y: node.y,
-						width: target.width,
-						height: target.height
-					});
-					changed.push(node);
-					layoutIds.add(id);
-					// Width changes alter Markdown wrapping. Remeasure from the next
-					// rendered frame instead of predicting the resulting height.
-					dirtyIds.add(id);
-				}
-				if (changed.length > 0) {
-					canvas.requestSave();
-					scheduleLayout();
-				}
-				if (dirtyIds.size > 0) queueScan();
-			};
+        const changed = [];
+        const ids = Array.from(dirtyIds);
+        dirtyIds.clear();
+        for (const id of ids) {
+          const node = canvas.nodes.get(id);
+          if (!node || node.isEditing || groupIds.has(id) || typeof node.text !== "string")
+            continue;
+          const sizer = this.getPreviewSizer(node);
+          if (!sizer) {
+            observeNodeDocument(node);
+            continue;
+          }
+          observeNode(node, sizer);
+          const target = this.measure(node);
+          if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
+            continue;
+          node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
+          changed.push(node);
+          layoutIds.add(id);
+          // Width changes alter Markdown wrapping. Remeasure from the next
+          // rendered frame instead of predicting the resulting height.
+          dirtyIds.add(id);
+        }
+        if (changed.length > 0) {
+          canvas.requestSave();
+          scheduleLayout();
+        }
+        if (dirtyIds.size > 0)
+          queueScan();
+      };
 
-			const queueScan = (nodeId, rediscover = false) => {
-				if (nodeId) dirtyIds.add(nodeId);
-				if (rediscover) discoverAll = true;
-				if (scanQueued || !isCurrent()) return;
-				scanQueued = true;
-				this.plugin.trackedRaf(scan);
-			};
+      const queueScan = (nodeId, rediscover = false) => {
+        if (nodeId)
+          dirtyIds.add(nodeId);
+        if (rediscover)
+          discoverAll = true;
+        if (scanQueued || !isCurrent())
+          return;
+        scanQueued = true;
+        this.plugin.trackedRaf(scan);
+      };
 
-			const createIframeRecord = (node, iframe, document) => {
-				const record = {
-					document,
-					nodeId: node.id,
-					observedSizers: new WeakSet(),
-					mutationObserver: null,
-					resizeObserver: null,
-					assetHandler: () => queueScan(record.nodeId),
-					frameHandler: () => queueScan(node.id, true)
-				};
-				iframe.addEventListener('load', record.frameHandler);
-				document?.addEventListener('load', record.assetHandler, true);
-				if (document?.documentElement) {
-					record.mutationObserver = new MutationObserver(() =>
-						queueScan(record.nodeId)
-					);
-					record.mutationObserver.observe(document.documentElement, {
-						childList: true,
-						subtree: true,
-						characterData: true
-					});
-					this.plugin.pendingObservers.add(record.mutationObserver);
-				}
-				// Deliberately do not observe preview size itself. A manual Canvas
-				// resize changes that box too, and observing it would immediately
-				// auto-size the media card back over the user's chosen dimensions.
-				// Asset load and DOM mutation listeners still handle async embeds.
-				const fontsReady = document?.fonts?.ready;
-				if (fontsReady && typeof fontsReady.then === 'function')
-					void fontsReady.then(() => queueScan(record.nodeId));
-				iframeRecords.set(iframe, record);
-				return record;
-			};
+      const createIframeRecord = (node, iframe, document) => {
+        const record = {
+          document,
+          nodeId: node.id,
+          observedSizers: new WeakSet(),
+          mutationObserver: null,
+          resizeObserver: null,
+          assetHandler: () => queueScan(record.nodeId),
+          frameHandler: () => queueScan(node.id, true)
+        };
+        iframe.addEventListener("load", record.frameHandler);
+        document?.addEventListener("load", record.assetHandler, true);
+        if (document?.documentElement) {
+          record.mutationObserver = new MutationObserver(() => queueScan(record.nodeId));
+          record.mutationObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            characterData: true
+          });
+          this.plugin.pendingObservers.add(record.mutationObserver);
+        }
+          // Deliberately do not observe preview size itself. A manual Canvas
+          // resize changes that box too, and observing it would immediately
+          // auto-size the media card back over the user's chosen dimensions.
+          // Asset load and DOM mutation listeners still handle async embeds.
+        const fontsReady = document?.fonts?.ready;
+        if (fontsReady && typeof fontsReady.then === "function")
+          void fontsReady.then(() => queueScan(record.nodeId));
+        iframeRecords.set(iframe, record);
+        return record;
+      };
 
-			const observeNodeDocument = (node) => {
-				const iframe = node.contentEl?.querySelector('iframe');
-				if (iframe) {
-					let record = iframeRecords.get(iframe);
-					if (
-						record &&
-						iframe.contentDocument &&
-						record.document !== iframe.contentDocument
-					) {
-						cleanupIframeRecord(iframe, record);
-						record = null;
-					}
-					record =
-						record ||
-						createIframeRecord(
-							node,
-							iframe,
-							iframe.contentDocument
-						);
-					record.nodeId = node.id;
-					return { iframe, record };
-				}
-				return null;
-			};
+      const observeNodeDocument = (node) => {
+        const iframe = node.contentEl?.querySelector("iframe");
+        if (iframe) {
+          let record = iframeRecords.get(iframe);
+          if (record && iframe.contentDocument && record.document !== iframe.contentDocument) {
+            cleanupIframeRecord(iframe, record);
+            record = null;
+          }
+          record = record || createIframeRecord(node, iframe, iframe.contentDocument);
+          record.nodeId = node.id;
+          return { iframe, record };
+        }
+        return null;
+      };
 
-			const observeNode = (node, sizer) => {
-				const previousSizer = liveSizers.get(node.id);
-				if (previousSizer !== sizer) liveSizers.set(node.id, sizer);
-				const iframeState = observeNodeDocument(node);
-				if (iframeState) {
-					const { record } = iframeState;
-					if (
-						record.resizeObserver &&
-						!record.observedSizers.has(sizer)
-					) {
-						try {
-							record.resizeObserver.observe(sizer);
-							record.observedSizers.add(sizer);
-						} catch (_) {
-							// The iframe mutation/load listeners still cover this preview.
-						}
-					}
-					return;
-				}
-				if (outerResizeObserver && previousSizer !== sizer) {
-					try {
-						outerResizeObserver.observe(sizer);
-					} catch (_) {
-						// Outer DOM mutations will rediscover and remeasure the card.
-					}
-				}
-			};
+      const observeNode = (node, sizer) => {
+        const previousSizer = liveSizers.get(node.id);
+        if (previousSizer !== sizer)
+          liveSizers.set(node.id, sizer);
+        const iframeState = observeNodeDocument(node);
+        if (iframeState) {
+          const { record } = iframeState;
+          if (record.resizeObserver && !record.observedSizers.has(sizer)) {
+            try {
+              record.resizeObserver.observe(sizer);
+              record.observedSizers.add(sizer);
+            } catch (_) {
+              // The iframe mutation/load listeners still cover this preview.
+            }
+          }
+          return;
+        }
+        if (outerResizeObserver && previousSizer !== sizer) {
+          try {
+            outerResizeObserver.observe(sizer);
+          } catch (_) {
+            // Outer DOM mutations will rediscover and remeasure the card.
+          }
+        }
+      };
 
-			outerMutationObserver = new MutationObserver(() =>
-				queueScan(null, true)
-			);
-			outerMutationObserver.observe(wrapper, {
-				childList: true,
-				subtree: true
-			});
-			this.plugin.pendingObservers.add(outerMutationObserver);
-			if (typeof ResizeObserver !== 'undefined') {
-				outerResizeObserver = new ResizeObserver((entries) => {
-					for (const entry of entries) {
-						for (const [id, sizer] of liveSizers) {
-							if (sizer === entry.target) dirtyIds.add(id);
-						}
-					}
-					queueScan();
-				});
-				this.plugin.pendingObservers.add(outerResizeObserver);
-			}
+      outerMutationObserver = new MutationObserver(() => queueScan(null, true));
+      outerMutationObserver.observe(wrapper, { childList: true, subtree: true });
+      this.plugin.pendingObservers.add(outerMutationObserver);
+      if (typeof ResizeObserver !== "undefined") {
+        outerResizeObserver = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            for (const [id, sizer] of liveSizers) {
+              if (sizer === entry.target)
+                dirtyIds.add(id);
+            }
+          }
+          queueScan();
+        });
+        this.plugin.pendingObservers.add(outerResizeObserver);
+      }
 
-			const cleanup = () => {
-				if (stopped) return;
-				stopped = true;
-				forgetObserver(outerMutationObserver);
-				forgetObserver(outerResizeObserver);
-				for (const [iframe, record] of Array.from(iframeRecords))
-					cleanupIframeRecord(iframe, record);
-				if (layoutTimer !== null) {
-					clearTimeout(layoutTimer);
-					this.plugin.pendingTimers.delete(layoutTimer);
-				}
-				dirtyIds.clear();
-				layoutIds.clear();
-				liveSizers.clear();
-				if (this.watchCleanup === cleanup) this.watchCleanup = null;
-			};
-			this.watchCleanup = cleanup;
-			queueScan(null, true);
-		}
+      const cleanup = () => {
+        if (stopped)
+          return;
+        stopped = true;
+        forgetObserver(outerMutationObserver);
+        forgetObserver(outerResizeObserver);
+        for (const [iframe, record] of Array.from(iframeRecords))
+          cleanupIframeRecord(iframe, record);
+        if (layoutTimer !== null) {
+          clearTimeout(layoutTimer);
+          this.plugin.pendingTimers.delete(layoutTimer);
+        }
+        dirtyIds.clear();
+        layoutIds.clear();
+        liveSizers.clear();
+        if (this.watchCleanup === cleanup)
+          this.watchCleanup = null;
+      };
+      this.watchCleanup = cleanup;
+      queueScan(null, true);
+    }
 
-		stopWatchingCanvas() {
-			if (this.watchCleanup) this.watchCleanup();
-		}
+    stopWatchingCanvas() {
+      if (this.watchCleanup)
+        this.watchCleanup();
+    }
 
-		cancelQueue() {
-			if (this.queueCleanup) this.queueCleanup();
-		}
-	}
+    cancelQueue() {
+      if (this.queueCleanup)
+        this.queueCleanup();
+    }
+  }
 
-	module.exports = {
-		CARD_LAYOUT_VERSION,
-		LiveSizingController,
-		embeddedContentFloor,
-		hasAsyncRenderableContent,
-		isResizableCanvasNode,
-		isTextTopicCard
-	};
-	return module.exports;
+  module.exports = {
+    CARD_LAYOUT_VERSION,
+    LiveSizingController,
+    embeddedContentFloor,
+    hasAsyncRenderableContent,
+    isResizableCanvasNode,
+    isTextTopicCard
+  };
+  return module.exports;
 })();
 // </tomindmap:module live-sizing>
 // <tomindmap:module markdown-order>
 var MarkdownOrder = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	function topicNode(value) {
-		return value?.canvasNode || value;
-	}
+  const module = { exports: {} };
+  const exports = module.exports;
+  function topicNode(value) {
+    return value?.canvasNode || value;
+  }
 
-	function topicText(value) {
-		const node = topicNode(value);
-		const text = node?.text ?? node?.unknownData?.text;
-		if (typeof text === 'string' && text.trim()) return text;
-		const file = node?.unknownData?.file ?? node?.file?.path ?? node?.file;
-		if (typeof file === 'string')
-			return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(file)
-				? `![](<${file}>)`
-				: file;
-		const url = node?.unknownData?.url ?? node?.url;
-		if (typeof url === 'string')
-			return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(url)
-				? `![](<${url}>)`
-				: url;
-		return '';
-	}
+  function topicText(value) {
+    const node = topicNode(value);
+    const text = node?.text ?? node?.unknownData?.text;
+    if (typeof text === "string" && text.trim())
+      return text;
+    const file = node?.unknownData?.file ?? node?.file?.path ?? node?.file;
+    if (typeof file === "string")
+      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(file)
+        ? `![](<${file}>)`
+        : file;
+    const url = node?.unknownData?.url ?? node?.url;
+    if (typeof url === "string")
+      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(url)
+        ? `![](<${url}>)`
+        : url;
+    return "";
+  }
 
-	function isStandaloneBlock(value) {
-		const text = String(topicText(value) || '').trim();
-		const lines = text.split('\n');
-		return (
-			/^(```|~~~|\$\$)/.test(text) ||
-			/^(?:-{3,}|_{3,}|\*(?:\s*\*){2,})$/.test(text) ||
-			/^>\s?/.test(text) ||
-			/^!\[[^\]]*\]\([^)]+\)\s*$/.test(text) ||
-			/^!\[\[[^\]]+\]\]\s*$/.test(text) ||
-			/^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(
-				text
-			) ||
-			(lines.length >= 2 &&
-				/^\s*\|.*\|\s*$/.test(lines[0]) &&
-				/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]))
-		);
-	}
+  function isStandaloneBlock(value) {
+    const text = String(topicText(value) || "").trim();
+    const lines = text.split("\n");
+    return /^(```|~~~|\$\$)/.test(text)
+      || /^(?:-{3,}|_{3,}|\*(?:\s*\*){2,})$/.test(text)
+      || /^>\s?/.test(text)
+      || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(text)
+      || /^!\[\[[^\]]+\]\]\s*$/.test(text)
+      || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(text)
+      || lines.length >= 2
+        && /^\s*\|.*\|\s*$/.test(lines[0])
+        && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
+  }
 
-	function compareTopToBottom(left, right) {
-		const a = topicNode(left);
-		const b = topicNode(right);
-		// A raw block must precede heading siblings at the same parent, otherwise
-		// Markdown would attach it to the last emitted heading and change the graph.
-		return (
-			Number(isStandaloneBlock(right)) -
-				Number(isStandaloneBlock(left)) ||
-			(Number(a?.y) || 0) - (Number(b?.y) || 0) ||
-			(Number(a?.x) || 0) - (Number(b?.x) || 0) ||
-			String(a?.id || '').localeCompare(String(b?.id || ''))
-		);
-	}
+  function compareTopToBottom(left, right) {
+    const a = topicNode(left);
+    const b = topicNode(right);
+    // A raw block must precede heading siblings at the same parent, otherwise
+    // Markdown would attach it to the last emitted heading and change the graph.
+    return Number(isStandaloneBlock(right)) - Number(isStandaloneBlock(left))
+      || (Number(a?.y) || 0) - (Number(b?.y) || 0)
+      || (Number(a?.x) || 0) - (Number(b?.x) || 0)
+      || String(a?.id || "").localeCompare(String(b?.id || ""));
+  }
 
-	/**
-	 * Return siblings in the chronology readers expect from a radial mind map.
-	 * Only a central topic splits its children into sides: right top-to-bottom,
-	 * followed by left top-to-bottom. Inside either branch, reading order is
-	 * simply top-to-bottom.
-	 */
-	function orderChildren(parent, children, splitRootSides = false) {
-		const values = [...children];
-		if (!splitRootSides) return values.sort(compareTopToBottom);
-		const parentNode = topicNode(parent);
-		const parentCenter =
-			(Number(parentNode?.x) || 0) + (Number(parentNode?.width) || 0) / 2;
-		const sideRank = (value) => {
-			const node = topicNode(value);
-			const center =
-				(Number(node?.x) || 0) + (Number(node?.width) || 0) / 2;
-			return center >= parentCenter ? 0 : 1;
-		};
-		return values.sort(
-			(left, right) =>
-				sideRank(left) - sideRank(right) ||
-				compareTopToBottom(left, right)
-		);
-	}
+  /**
+   * Return siblings in the chronology readers expect from a radial mind map.
+   * Only a central topic splits its children into sides: right top-to-bottom,
+   * followed by left top-to-bottom. Inside either branch, reading order is
+   * simply top-to-bottom.
+   */
+  function orderChildren(parent, children, splitRootSides = false) {
+    const values = [...children];
+    if (!splitRootSides)
+      return values.sort(compareTopToBottom);
+    const parentNode = topicNode(parent);
+    const parentCenter = (Number(parentNode?.x) || 0) + (Number(parentNode?.width) || 0) / 2;
+    const sideRank = (value) => {
+      const node = topicNode(value);
+      const center = (Number(node?.x) || 0) + (Number(node?.width) || 0) / 2;
+      return center >= parentCenter ? 0 : 1;
+    };
+    return values.sort((left, right) => sideRank(left) - sideRank(right) || compareTopToBottom(left, right));
+  }
 
-	function canvasTopicPreorder(canvas, getGroupIds) {
-		const groupIds = getGroupIds(canvas);
-		const nodeById = new Map(
-			Array.from(canvas.nodes.values())
-				.filter((node) => !groupIds.has(node.id))
-				.map((node) => [node.id, node])
-		);
-		const childrenById = new Map(
-			Array.from(nodeById.keys()).map((id) => [id, []])
-		);
-		const childIds = new Set();
-		for (const edge of canvas.getData().edges || []) {
-			if (!nodeById.has(edge.fromNode) || !nodeById.has(edge.toNode))
-				continue;
-			childrenById.get(edge.fromNode).push(edge.toNode);
-			childIds.add(edge.toNode);
-		}
-		const position = (id) => nodeById.get(id);
-		const roots = Array.from(nodeById.keys())
-			.filter((id) => !childIds.has(id))
-			.sort(
-				(a, b) =>
-					position(a).y - position(b).y ||
-					position(a).x - position(b).x
-			);
-		const result = [];
-		const visited = new Set();
-		const rootIds = new Set(roots);
-		const visit = (id) => {
-			if (visited.has(id)) return;
-			visited.add(id);
-			result.push(id);
-			const children = orderChildren(
-				position(id),
-				(childrenById.get(id) || []).map(position).filter(Boolean),
-				rootIds.has(id)
-			).map((child) => child.id);
-			for (const child of children) visit(child);
-		};
-		for (const root of roots) visit(root);
-		for (const id of nodeById.keys()) visit(id);
-		return result;
-	}
+  function canvasTopicPreorder(canvas, getGroupIds) {
+    const groupIds = getGroupIds(canvas);
+    const nodeById = new Map(
+      Array.from(canvas.nodes.values())
+        .filter((node) => !groupIds.has(node.id))
+        .map((node) => [node.id, node])
+    );
+    const childrenById = new Map(Array.from(nodeById.keys()).map((id) => [id, []]));
+    const childIds = new Set();
+    for (const edge of canvas.getData().edges || []) {
+      if (!nodeById.has(edge.fromNode) || !nodeById.has(edge.toNode))
+        continue;
+      childrenById.get(edge.fromNode).push(edge.toNode);
+      childIds.add(edge.toNode);
+    }
+    const position = (id) => nodeById.get(id);
+    const roots = Array.from(nodeById.keys())
+      .filter((id) => !childIds.has(id))
+      .sort((a, b) => position(a).y - position(b).y || position(a).x - position(b).x);
+    const result = [];
+    const visited = new Set();
+    const rootIds = new Set(roots);
+    const visit = (id) => {
+      if (visited.has(id))
+        return;
+      visited.add(id);
+      result.push(id);
+      const children = orderChildren(
+        position(id),
+        (childrenById.get(id) || []).map(position).filter(Boolean),
+        rootIds.has(id)
+      ).map((child) => child.id);
+      for (const child of children)
+        visit(child);
+    };
+    for (const root of roots)
+      visit(root);
+    for (const id of nodeById.keys())
+      visit(id);
+    return result;
+  }
 
-	function orderMatches(canvas, imported, getGroupIds) {
-		if (!imported) return false;
-		const liveOrder = canvasTopicPreorder(canvas, getGroupIds);
-		const liveIds = new Set(liveOrder);
-		const sources = Array.isArray(imported.topicSources)
-			? imported.topicSources.filter((record) => liveIds.has(record.id))
-			: [];
-		if (sources.length !== liveOrder.length) return false;
-		const desiredIndex = new Map(liveOrder.map((id, index) => [id, index]));
-		const children = new Map();
-		for (const record of sources) {
-			const key = record.parentId || '';
-			if (!children.has(key)) children.set(key, []);
-			children.get(key).push(record);
-		}
-		for (const records of children.values()) {
-			const desired = [...records].sort(
-				(left, right) =>
-					desiredIndex.get(left.id) - desiredIndex.get(right.id)
-			);
-			if (
-				records.every(
-					(record, index) => desired[index]?.id === record.id
-				)
-			)
-				continue;
-			if (canMoveSourceSiblings(records)) return false;
-		}
-		return true;
-	}
+  function orderMatches(canvas, imported, getGroupIds) {
+    if (!imported)
+      return false;
+    const liveOrder = canvasTopicPreorder(canvas, getGroupIds);
+    const liveIds = new Set(liveOrder);
+    const sources = Array.isArray(imported.topicSources) ? imported.topicSources.filter((record) => liveIds.has(record.id)) : [];
+    if (sources.length !== liveOrder.length)
+      return false;
+    const desiredIndex = new Map(liveOrder.map((id, index) => [id, index]));
+    const children = new Map();
+    for (const record of sources) {
+      const key = record.parentId || "";
+      if (!children.has(key))
+        children.set(key, []);
+      children.get(key).push(record);
+    }
+    for (const records of children.values()) {
+      const desired = [...records].sort((left, right) => desiredIndex.get(left.id) - desiredIndex.get(right.id));
+      if (records.every((record, index) => desired[index]?.id === record.id))
+        continue;
+      if (canMoveSourceSiblings(records))
+        return false;
+    }
+    return true;
+  }
 
-	function canMoveSourceSiblings(records) {
-		if (records.length < 2) return false;
-		if (records.every((record) => record.kind === 'heading')) {
-			const level = records[0].level;
-			return records.every((record) => record.level === level);
-		}
-		if (records.every((record) => record.kind === 'list')) {
-			const indent = records[0].indent || '';
-			return records.every((record) => (record.indent || '') === indent);
-		}
-		return false;
-	}
+  function canMoveSourceSiblings(records) {
+    if (records.length < 2)
+      return false;
+    if (records.every((record) => record.kind === "heading")) {
+      const level = records[0].level;
+      return records.every((record) => record.level === level);
+    }
+    if (records.every((record) => record.kind === "list")) {
+      const indent = records[0].indent || "";
+      return records.every((record) => (record.indent || "") === indent);
+    }
+    return false;
+  }
 
-	function reorderPreservingSource(markdown, canvas, dependencies) {
-		const {
-			getGroupIds,
-			parseDocument,
-			lineRecords,
-			withMetadata,
-			withoutLegacyComments,
-			identityKey,
-			identityLabel,
-			nodeText = (node) => node?.text || 'Untitled'
-		} = dependencies;
-		let result = String(markdown || '');
-		const desiredOrder = canvasTopicPreorder(canvas, getGroupIds);
-		const desiredIndex = new Map(
-			desiredOrder.map((id, index) => [id, index])
-		);
-		const desiredChildren = new Map();
-		const addDesired = (parentId, id) => {
-			const key = parentId || '';
-			if (!desiredChildren.has(key)) desiredChildren.set(key, []);
-			desiredChildren.get(key).push(id);
-		};
-		const groupIds = getGroupIds(canvas);
-		const liveIds = new Set(
-			Array.from(canvas.nodes.keys()).filter((id) => !groupIds.has(id))
-		);
-		const liveParents = new Map();
-		for (const edge of canvas.getData().edges || []) {
-			if (liveIds.has(edge.fromNode) && liveIds.has(edge.toNode))
-				liveParents.set(edge.toNode, edge.fromNode);
-		}
-		for (const id of desiredOrder) addDesired(liveParents.get(id), id);
+  function reorderPreservingSource(markdown, canvas, dependencies) {
+    const {
+      getGroupIds,
+      parseDocument,
+      lineRecords,
+      withMetadata,
+      withoutLegacyComments,
+      identityKey,
+      identityLabel,
+      nodeText = (node) => node?.text || "Untitled"
+    } = dependencies;
+    let result = String(markdown || "");
+    const desiredOrder = canvasTopicPreorder(canvas, getGroupIds);
+    const desiredIndex = new Map(desiredOrder.map((id, index) => [id, index]));
+    const desiredChildren = new Map();
+    const addDesired = (parentId, id) => {
+      const key = parentId || "";
+      if (!desiredChildren.has(key))
+        desiredChildren.set(key, []);
+      desiredChildren.get(key).push(id);
+    };
+    const groupIds = getGroupIds(canvas);
+    const liveIds = new Set(Array.from(canvas.nodes.keys()).filter((id) => !groupIds.has(id)));
+    const liveParents = new Map();
+    for (const edge of canvas.getData().edges || []) {
+      if (liveIds.has(edge.fromNode) && liveIds.has(edge.toNode))
+        liveParents.set(edge.toNode, edge.fromNode);
+    }
+    for (const id of desiredOrder)
+      addDesired(liveParents.get(id), id);
 
-		for (let pass = 0; pass < Math.max(1, desiredOrder.length); pass++) {
-			const parsed = parseDocument(result);
-			const sourceById = new Map(
-				parsed.topicSources.map((record) => [record.id, record])
-			);
-			const sourceChildren = new Map();
-			for (const record of parsed.topicSources) {
-				const key = record.parentId || '';
-				if (!sourceChildren.has(key)) sourceChildren.set(key, []);
-				sourceChildren.get(key).push(record.id);
-			}
-			const mismatches = [];
-			for (const [parentKey, wanted] of desiredChildren) {
-				const current = sourceChildren.get(parentKey) || [];
-				if (current.length !== wanted.length) continue;
-				const currentSet = new Set(current);
-				if (
-					wanted.some((id) => !currentSet.has(id)) ||
-					wanted.every((id, index) => current[index] === id)
-				)
-					continue;
-				const siblingRecords = current
-					.map((id) => sourceById.get(id))
-					.filter(Boolean);
-				if (
-					siblingRecords.length !== current.length ||
-					!canMoveSourceSiblings(siblingRecords)
-				)
-					continue;
-				let depth = 0;
-				let parent = parentKey || null;
-				const seen = new Set();
-				while (parent && !seen.has(parent)) {
-					seen.add(parent);
-					depth++;
-					parent = sourceById.get(parent)?.parentId || null;
-				}
-				mismatches.push({ parentKey, wanted, current, depth });
-			}
-			if (mismatches.length === 0) break;
-			mismatches.sort(
-				(a, b) =>
-					b.depth - a.depth ||
-					(desiredIndex.get(a.parentKey) || 0) -
-						(desiredIndex.get(b.parentKey) || 0)
-			);
-			const mismatch = mismatches[0];
-			const records = lineRecords(result);
-			const descendants = (id, found = new Set()) => {
-				if (found.has(id)) return found;
-				found.add(id);
-				for (const child of sourceChildren.get(id) || [])
-					descendants(child, found);
-				return found;
-			};
-			const ranges = new Map();
-			let valid = true;
-			for (const id of mismatch.current) {
-				const topics = Array.from(descendants(id))
-					.map((candidate) => sourceById.get(candidate))
-					.filter(Boolean);
-				const startLine = Math.min(
-					...topics.map((record) => record.startLine)
-				);
-				const endLine = Math.max(
-					...topics.map((record) => record.endLine)
-				);
-				const first = records[startLine];
-				const last = records[endLine - 1];
-				if (!first || !last) {
-					valid = false;
-					break;
-				}
-				ranges.set(id, { start: first.start, end: last.end });
-			}
-			const ordered = mismatch.current.map((id) => ranges.get(id));
-			if (!valid || ordered.some((range) => !range)) break;
-			if (
-				ordered.some(
-					(range, index) =>
-						index > 0 && ordered[index - 1].end > range.start
-				)
-			)
-				break;
-			const gaps = ordered
-				.slice(0, -1)
-				.map((range, index) =>
-					result.slice(range.end, ordered[index + 1].start)
-				);
-			const pieces = new Map(
-				mismatch.current.map((id) => {
-					const range = ranges.get(id);
-					return [id, result.slice(range.start, range.end)];
-				})
-			);
-			const replacement = mismatch.wanted
-				.map(
-					(id, index) =>
-						`${index > 0 ? gaps[index - 1] || '' : ''}${pieces.get(id) || ''}`
-				)
-				.join('');
-			const updated =
-				result.slice(0, ordered[0].start) +
-				replacement +
-				result.slice(ordered[ordered.length - 1].end);
-			if (updated === result) break;
-			result = updated;
-		}
+    for (let pass = 0; pass < Math.max(1, desiredOrder.length); pass++) {
+      const parsed = parseDocument(result);
+      const sourceById = new Map(parsed.topicSources.map((record) => [record.id, record]));
+      const sourceChildren = new Map();
+      for (const record of parsed.topicSources) {
+        const key = record.parentId || "";
+        if (!sourceChildren.has(key))
+          sourceChildren.set(key, []);
+        sourceChildren.get(key).push(record.id);
+      }
+      const mismatches = [];
+      for (const [parentKey, wanted] of desiredChildren) {
+        const current = sourceChildren.get(parentKey) || [];
+        if (current.length !== wanted.length)
+          continue;
+        const currentSet = new Set(current);
+        if (wanted.some((id) => !currentSet.has(id)) || wanted.every((id, index) => current[index] === id))
+          continue;
+        const siblingRecords = current.map((id) => sourceById.get(id)).filter(Boolean);
+        if (siblingRecords.length !== current.length || !canMoveSourceSiblings(siblingRecords))
+          continue;
+        let depth = 0;
+        let parent = parentKey || null;
+        const seen = new Set();
+        while (parent && !seen.has(parent)) {
+          seen.add(parent);
+          depth++;
+          parent = sourceById.get(parent)?.parentId || null;
+        }
+        mismatches.push({ parentKey, wanted, current, depth });
+      }
+      if (mismatches.length === 0)
+        break;
+      mismatches.sort((a, b) => b.depth - a.depth
+        || (desiredIndex.get(a.parentKey) || 0) - (desiredIndex.get(b.parentKey) || 0));
+      const mismatch = mismatches[0];
+      const records = lineRecords(result);
+      const descendants = (id, found = new Set()) => {
+        if (found.has(id))
+          return found;
+        found.add(id);
+        for (const child of sourceChildren.get(id) || [])
+          descendants(child, found);
+        return found;
+      };
+      const ranges = new Map();
+      let valid = true;
+      for (const id of mismatch.current) {
+        const topics = Array.from(descendants(id))
+          .map((candidate) => sourceById.get(candidate))
+          .filter(Boolean);
+        const startLine = Math.min(...topics.map((record) => record.startLine));
+        const endLine = Math.max(...topics.map((record) => record.endLine));
+        const first = records[startLine];
+        const last = records[endLine - 1];
+        if (!first || !last) {
+          valid = false;
+          break;
+        }
+        ranges.set(id, { start: first.start, end: last.end });
+      }
+      const ordered = mismatch.current.map((id) => ranges.get(id));
+      if (!valid || ordered.some((range) => !range))
+        break;
+      if (ordered.some((range, index) => index > 0 && ordered[index - 1].end > range.start))
+        break;
+      const gaps = ordered.slice(0, -1)
+        .map((range, index) => result.slice(range.end, ordered[index + 1].start));
+      const pieces = new Map(mismatch.current.map((id) => {
+        const range = ranges.get(id);
+        return [id, result.slice(range.start, range.end)];
+      }));
+      const replacement = mismatch.wanted
+        .map((id, index) => `${index > 0 ? gaps[index - 1] || "" : ""}${pieces.get(id) || ""}`)
+        .join("");
+      const updated = result.slice(0, ordered[0].start)
+        + replacement
+        + result.slice(ordered[ordered.length - 1].end);
+      if (updated === result)
+        break;
+      result = updated;
+    }
 
-		const liveById = new Map(
-			Array.from(canvas.nodes.values()).map((node) => [node.id, node])
-		);
-		return withMetadata(
-			withoutLegacyComments(result),
-			desiredOrder,
-			desiredOrder.map((id) => identityKey(nodeText(liveById.get(id)))),
-			desiredOrder.map((id) => identityLabel(nodeText(liveById.get(id))))
-		);
-	}
+    const liveById = new Map(Array.from(canvas.nodes.values()).map((node) => [node.id, node]));
+    return withMetadata(
+      withoutLegacyComments(result),
+      desiredOrder,
+      desiredOrder.map((id) => identityKey(nodeText(liveById.get(id)))),
+      desiredOrder.map((id) => identityLabel(nodeText(liveById.get(id))))
+    );
+  }
 
-	module.exports = {
-		compareTopToBottom,
-		orderChildren,
-		canvasTopicPreorder,
-		orderMatches,
-		reorderPreservingSource
-	};
-	return module.exports;
+  module.exports = {
+    compareTopToBottom,
+    orderChildren,
+    canvasTopicPreorder,
+    orderMatches,
+    reorderPreservingSource
+  };
+  return module.exports;
 })();
 // </tomindmap:module markdown-order>
 // <tomindmap:module clipboard-markdown>
 var { normalizeClipboardMarkdown } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	function hasMarkdownStructure(text) {
-		return /^(?:\uFEFF?---[\s\S]*?---\s*)?(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)/m.test(
-			text
-		);
-	}
+  const module = { exports: {} };
+  const exports = module.exports;
+  function hasMarkdownStructure(text) {
+    return /^(?:\uFEFF?---[\s\S]*?---\s*)?(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)/m.test(text);
+  }
 
-	/**
-	 * Convert unstructured clipboard text into the smallest useful Markdown tree.
-	 * One prose block remains one card; blank-line-separated blocks become sibling
-	 * cards. Existing headings/lists are left untouched for the full parser.
-	 */
-	function normalizeClipboardMarkdown(value) {
-		const text = String(value || '')
-			.replace(/\r\n?/g, '\n')
-			.trim();
-		if (!text || hasMarkdownStructure(text)) return text;
-		const blocks = text
-			.split(/\n[ \t]*\n+/)
-			.map((block) => block.trim())
-			.filter(Boolean);
-		if (blocks.length <= 1) return (blocks[0] || '').replace(/\n+/g, ' ');
-		return blocks
-			.map((block) => `- ${block.replace(/\n+/g, ' ')}`)
-			.join('\n');
-	}
+  /**
+   * Convert unstructured clipboard text into the smallest useful Markdown tree.
+   * One prose block remains one card; blank-line-separated blocks become sibling
+   * cards. Existing headings/lists are left untouched for the full parser.
+   */
+  function normalizeClipboardMarkdown(value) {
+    const text = String(value || "").replace(/\r\n?/g, "\n").trim();
+    if (!text || hasMarkdownStructure(text))
+      return text;
+    const blocks = text.split(/\n[ \t]*\n+/).map((block) => block.trim()).filter(Boolean);
+    if (blocks.length <= 1)
+      return (blocks[0] || "").replace(/\n+/g, " ");
+    return blocks.map((block) => `- ${block.replace(/\n+/g, " ")}`).join("\n");
+  }
 
-	module.exports = {
-		hasMarkdownStructure,
-		normalizeClipboardMarkdown
-	};
-	return module.exports;
+  module.exports = {
+    hasMarkdownStructure,
+    normalizeClipboardMarkdown
+  };
+  return module.exports;
 })();
 // </tomindmap:module clipboard-markdown>
 // <tomindmap:module export>
 var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	function createExportMindMapModal(Modal) {
-		return class ExportMindMapModal extends Modal {
-			constructor(app, selectionAvailable, onExport) {
-				super(app);
-				this.selectionAvailable = selectionAvailable;
-				this.onExport = onExport;
-			}
+  const module = { exports: {} };
+  const exports = module.exports;
+  function createExportMindMapModal(Modal) {
+  	return class ExportMindMapModal extends Modal {
+  		constructor(app, selectionAvailable, onExport) {
+  			super(app);
+  			this.selectionAvailable = selectionAvailable;
+  			this.onExport = onExport;
+  		}
 
-			onOpen() {
-				const { contentEl } = this;
-				contentEl.empty();
-				contentEl.createEl('h2', { text: 'Export mind map' });
-				contentEl.createEl('p', {
-					text: 'Choose a format and the part of the canvas to export.'
-				});
-				const form = contentEl.createDiv({
-					cls: 'tomindmap-export-form'
-				});
-				const formatLabel = form.createEl('label', { text: 'Format' });
-				const format = formatLabel.createEl('select');
-				for (const [value, label] of [
-					['pdf', 'PDF'],
-					['png', 'Image (PNG)'],
-					['svg', 'SVG'],
-					['markdown', 'Markdown file']
-				])
-					format.createEl('option', { value, text: label });
-				const scopeLabel = form.createEl('label', { text: 'Area' });
-				const scope = scopeLabel.createEl('select');
-				for (const [value, label] of [
-					['whole', 'Whole mind map'],
-					['viewport', 'Current viewport'],
-					['selection', 'Selection']
-				]) {
-					const option = scope.createEl('option', {
-						value,
-						text: label
-					});
-					if (value === 'selection' && !this.selectionAvailable)
-						option.disabled = true;
-				}
-				const hint = form.createDiv({
-					cls: 'setting-item-description'
-				});
-				const refresh = () => {
-					const markdown = format.value === 'markdown';
-					scope.disabled = markdown;
-					if (markdown) scope.value = 'whole';
-					hint.setText(
-						markdown
-							? 'Markdown exports the complete hierarchy without Canvas coordinates.'
-							: 'The exported file is saved to your Downloads folder.'
-					);
-				};
-				format.addEventListener('change', refresh);
-				refresh();
-				const actions = contentEl.createDiv({
-					cls: 'modal-button-container'
-				});
-				const cancel = actions.createEl('button', { text: 'Cancel' });
-				const submit = actions.createEl('button', {
-					text: 'Export',
-					cls: 'mod-cta'
-				});
-				cancel.addEventListener('click', () => this.close());
-				submit.addEventListener('click', () => {
-					const request = {
-						format: format.value,
-						scope: scope.value
-					};
-					this.close();
-					void this.onExport(request);
-				});
-			}
+  		onOpen() {
+  			const { contentEl } = this;
+  			contentEl.empty();
+  			contentEl.createEl('h2', { text: 'Export mind map' });
+  			contentEl.createEl('p', {
+  				text: 'Choose a format and the part of the canvas to export.'
+  			});
+  			const form = contentEl.createDiv({ cls: 'tomindmap-export-form' });
+  			const formatLabel = form.createEl('label', { text: 'Format' });
+  			const format = formatLabel.createEl('select');
+  			for (const [value, label] of [
+  				['pdf', 'PDF'],
+  				['png', 'Image (PNG)'],
+  				['svg', 'SVG'],
+  				['markdown', 'Markdown file']
+  			])
+  				format.createEl('option', { value, text: label });
+  			const scopeLabel = form.createEl('label', { text: 'Area' });
+  			const scope = scopeLabel.createEl('select');
+  			for (const [value, label] of [
+  				['whole', 'Whole mind map'],
+  				['viewport', 'Current viewport'],
+  				['selection', 'Selection']
+  			]) {
+  				const option = scope.createEl('option', { value, text: label });
+  				if (value === 'selection' && !this.selectionAvailable)
+  					option.disabled = true;
+  			}
+  			const hint = form.createDiv({ cls: 'setting-item-description' });
+  			const refresh = () => {
+  				const markdown = format.value === 'markdown';
+  				scope.disabled = markdown;
+  				if (markdown) scope.value = 'whole';
+  				hint.setText(
+  					markdown
+  						? 'Markdown exports the complete hierarchy without Canvas coordinates.'
+  						: 'The exported file is saved to your Downloads folder.'
+  				);
+  			};
+  			format.addEventListener('change', refresh);
+  			refresh();
+  			const actions = contentEl.createDiv({
+  				cls: 'modal-button-container'
+  			});
+  			const cancel = actions.createEl('button', { text: 'Cancel' });
+  			const submit = actions.createEl('button', {
+  				text: 'Export',
+  				cls: 'mod-cta'
+  			});
+  			cancel.addEventListener('click', () => this.close());
+  			submit.addEventListener('click', () => {
+  				const request = { format: format.value, scope: scope.value };
+  				this.close();
+  				void this.onExport(request);
+  			});
+  		}
 
-			onClose() {
-				this.contentEl.empty();
-			}
-		};
-	}
+  		onClose() {
+  			this.contentEl.empty();
+  		}
+  	};
+  }
 
-	async function rasterizeSvg(svgInfo, ownerDocument, type = 'image/png') {
-		const ownerWindow = ownerDocument.defaultView || window;
-		const maxDimension = 8192;
-		const scale = Math.min(
-			2,
-			maxDimension / Math.max(svgInfo.width, svgInfo.height)
-		);
-		const width = Math.max(1, Math.round(svgInfo.width * scale));
-		const height = Math.max(1, Math.round(svgInfo.height * scale));
-		const blob = new Blob([svgInfo.svg], {
-			type: 'image/svg+xml;charset=utf-8'
-		});
-		const url = ownerWindow.URL.createObjectURL(blob);
-		try {
-			const image = new ownerWindow.Image();
-			image.decoding = 'async';
-			await new Promise((resolve, reject) => {
-				image.onload = resolve;
-				image.onerror = () =>
-					reject(new Error('Could not render the SVG'));
-				image.src = url;
-			});
-			const bitmap = ownerDocument.createElement('canvas');
-			bitmap.width = width;
-			bitmap.height = height;
-			const context = bitmap.getContext('2d');
-			if (!context) throw new Error('Canvas rendering is unavailable');
-			context.fillStyle = '#ffffff';
-			context.fillRect(0, 0, width, height);
-			context.drawImage(image, 0, 0, width, height);
-			const encoded = await new Promise((resolve, reject) =>
-				bitmap.toBlob(
-					(value) =>
-						value
-							? resolve(value)
-							: reject(new Error('Could not encode the image')),
-					type,
-					type === 'image/jpeg' ? 0.94 : void 0
-				)
-			);
-			return new Uint8Array(await encoded.arrayBuffer());
-		} finally {
-			ownerWindow.URL.revokeObjectURL(url);
-		}
-	}
+  async function rasterizeSvg(svgInfo, ownerDocument, type = 'image/png') {
+  	const ownerWindow = ownerDocument.defaultView || window;
+  	const maxDimension = 8192;
+  	const scale = Math.min(
+  		2,
+  		maxDimension / Math.max(svgInfo.width, svgInfo.height)
+  	);
+  	const width = Math.max(1, Math.round(svgInfo.width * scale));
+  	const height = Math.max(1, Math.round(svgInfo.height * scale));
+  	const blob = new Blob([svgInfo.svg], {
+  		type: 'image/svg+xml;charset=utf-8'
+  	});
+  	const url = ownerWindow.URL.createObjectURL(blob);
+  	try {
+  		const image = new ownerWindow.Image();
+  		image.decoding = 'async';
+  		await new Promise((resolve, reject) => {
+  			image.onload = resolve;
+  			image.onerror = () => reject(new Error('Could not render the SVG'));
+  			image.src = url;
+  		});
+  		const bitmap = ownerDocument.createElement('canvas');
+  		bitmap.width = width;
+  		bitmap.height = height;
+  		const context = bitmap.getContext('2d');
+  		if (!context) throw new Error('Canvas rendering is unavailable');
+  		context.fillStyle = '#ffffff';
+  		context.fillRect(0, 0, width, height);
+  		context.drawImage(image, 0, 0, width, height);
+  		const encoded = await new Promise((resolve, reject) =>
+  			bitmap.toBlob(
+  				(value) =>
+  					value
+  						? resolve(value)
+  						: reject(new Error('Could not encode the image')),
+  				type,
+  				type === 'image/jpeg' ? 0.94 : void 0
+  			)
+  		);
+  		return new Uint8Array(await encoded.arrayBuffer());
+  	} finally {
+  		ownerWindow.URL.revokeObjectURL(url);
+  	}
+  }
 
-	function safeBaseName(value) {
-		return (
-			String(value || 'Mind map')
-				.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
-				.trim() || 'Mind map'
-		);
-	}
+  function safeBaseName(value) {
+  	return (
+  		String(value || 'Mind map')
+  			.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
+  			.trim() || 'Mind map'
+  	);
+  }
 
-	async function saveToDownloads(baseName, suffix, extension, content) {
-		const fs = require('fs');
-		const path = require('path');
-		const os = require('os');
-		const downloads = path.join(os.homedir(), 'Downloads');
-		await fs.promises.mkdir(downloads, { recursive: true });
-		const stem = `${safeBaseName(baseName)}${suffix ? ` - ${suffix}` : ''}`;
-		for (let counter = 1; ; counter++) {
-			const numberedStem = counter === 1 ? stem : `${stem} ${counter}`;
-			const output = path.join(downloads, `${numberedStem}.${extension}`);
-			try {
-				await fs.promises.writeFile(output, content, { flag: 'wx' });
-				return path.basename(output);
-			} catch (error) {
-				if (error?.code !== 'EEXIST') throw error;
-			}
-		}
-	}
+  async function saveToDownloads(baseName, suffix, extension, content) {
+  	const fs = require('fs');
+  	const path = require('path');
+  	const os = require('os');
+  	const downloads = path.join(os.homedir(), 'Downloads');
+  	await fs.promises.mkdir(downloads, { recursive: true });
+  	const stem = `${safeBaseName(baseName)}${suffix ? ` - ${suffix}` : ''}`;
+  	for (let counter = 1; ; counter++) {
+  		const numberedStem = counter === 1 ? stem : `${stem} ${counter}`;
+  		const output = path.join(downloads, `${numberedStem}.${extension}`);
+  		try {
+  			await fs.promises.writeFile(output, content, { flag: 'wx' });
+  			return path.basename(output);
+  		} catch (error) {
+  			if (error?.code !== 'EEXIST') throw error;
+  		}
+  	}
+  }
 
-	module.exports = {
-		createExportMindMapModal,
-		rasterizeSvg,
-		safeBaseName,
-		saveToDownloads
-	};
-	return module.exports;
+  module.exports = {
+  	createExportMindMapModal,
+  	rasterizeSvg,
+  	safeBaseName,
+  	saveToDownloads
+  };
+  return module.exports;
 })();
 // </tomindmap:module export>
 var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
 
 // <tomindmap:module canvas-api>
 var { CanvasAPI, findNodeFromEvent, genId } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const { ItemView } = require('obsidian');
-	function genId() {
-		const bytes = new Uint8Array(8);
-		if (
-			globalThis.crypto &&
-			typeof globalThis.crypto.getRandomValues === 'function'
-		) {
-			globalThis.crypto.getRandomValues(bytes);
-			return Array.from(bytes, (byte) =>
-				byte.toString(16).padStart(2, '0')
-			).join('');
-		}
-		return Array.from({ length: 16 }, () =>
-			Math.floor(Math.random() * 16).toString(16)
-		).join('');
-	}
-	function findNodeFromEvent(canvas, e) {
-		var _a;
-		const target = e.target;
-		if (!target) return null;
-		for (const node of canvas.nodes.values()) {
-			if ((_a = node.nodeEl) == null ? void 0 : _a.contains(target))
-				return node;
-		}
-		return null;
-	}
-	var CanvasAPI = class {
-		constructor(app) {
-			this.app = app;
-			this.edgeIndex = null;
-			this.indexedCanvas = null;
-			this.indexedEdgeCount = -1;
-			this.navigationRevealFrames = /* @__PURE__ */ new WeakMap();
-		}
-		/**
-		 * Get or rebuild the edge index for the given canvas.
-		 * Rebuilds if canvas changed or edge count changed (structural mutation).
-		 */
-		getEdgeIndex(canvas) {
-			if (
-				this.edgeIndex &&
-				this.indexedCanvas === canvas &&
-				this.edgeIdsMatch(canvas)
-			) {
-				return this.edgeIndex;
-			}
-			const incoming = /* @__PURE__ */ new Map();
-			const outgoing = /* @__PURE__ */ new Map();
-			for (const edge of canvas.edges.values()) {
-				const fromId = edge.from.node.id;
-				const toId = edge.to.node.id;
-				let out = outgoing.get(fromId);
-				if (!out) {
-					out = [];
-					outgoing.set(fromId, out);
-				}
-				out.push(edge);
-				let inc = incoming.get(toId);
-				if (!inc) {
-					inc = [];
-					incoming.set(toId, inc);
-				}
-				inc.push(edge);
-			}
-			this.edgeIndex = { incoming, outgoing };
-			this.indexedCanvas = canvas;
-			this.indexedEdgeCount = canvas.edges.size;
-			return this.edgeIndex;
-		}
-		/**
-		 * Structural Canvas methods are wrapped by the plugin and invalidate this
-		 * index. The count check also covers changes made before wrapping.
-		 */
-		edgeIdsMatch(canvas) {
-			return canvas.edges.size === this.indexedEdgeCount;
-		}
-		/**
-		 * Invalidate the edge index (call after adding/removing edges).
-		 */
-		invalidateEdgeIndex() {
-			this.edgeIndex = null;
-			this.indexedEdgeCount = -1;
-		}
-		/**
-		 * Get the active canvas if a canvas view is currently focused.
-		 */
-		getActiveCanvas() {
-			var _a;
-			const view = this.app.workspace.getActiveViewOfType(ItemView);
-			if (!view || view.getViewType() !== 'canvas') return null;
-			return (_a = view.canvas) != null ? _a : null;
-		}
-		/**
-		 * Get canvas from any open canvas leaf (first found).
-		 */
-		getAnyCanvas() {
-			var _a;
-			const leaves = this.app.workspace.getLeavesOfType('canvas');
-			if (leaves.length === 0) return null;
-			const view = leaves[0].view;
-			return (_a = view == null ? void 0 : view.canvas) != null
-				? _a
-				: null;
-		}
-		/**
-		 * Get the currently selected node (single selection).
-		 */
-		getSelectedNode(canvas) {
-			const selection = canvas.selection;
-			if (selection.size !== 1) return null;
-			const item = selection.values().next().value;
-			if (!item || !('nodeEl' in item)) return null;
-			return item;
-		}
-		/**
-		 * Create a text node at a given position.
-		 */
-		createTextNode(canvas, x, y, text = '', width = 260, height = 60) {
-			const node = canvas.createTextNode({
-				pos: { x, y },
-				size: { width, height },
-				text,
-				focus: false,
-				save: false
-			});
-			return node;
-		}
-		/**
-		 * Create an edge between two nodes using canvas.importData.
-		 */
-		createEdge(
-			canvas,
-			fromNode,
-			toNode,
-			fromSide = 'right',
-			toSide = 'left',
-			color
-		) {
-			let id = genId();
-			while (canvas.edges.has(id)) id = genId();
-			canvas.importData({
-				edges: [
-					{
-						id,
-						fromNode: fromNode.id,
-						fromSide,
-						fromEnd: 'none',
-						toNode: toNode.id,
-						toSide,
-						toEnd: 'arrow',
-						...(color ? { color } : {})
-					}
-				],
-				nodes: []
-			});
-			this.invalidateEdgeIndex();
-			return canvas.edges.get(id) || null;
-		}
-		/**
-		 * Remove an edge.
-		 */
-		removeEdge(canvas, edge) {
-			canvas.removeEdge(edge);
-			this.invalidateEdgeIndex();
-		}
-		/**
-		 * Remove a node and all its connected edges.
-		 */
-		removeNode(canvas, node) {
-			const connectedEdges = this.getConnectedEdges(canvas, node);
-			for (const edge of connectedEdges) {
-				canvas.removeEdge(edge);
-			}
-			canvas.removeNode(node);
-			this.invalidateEdgeIndex();
-		}
-		/**
-		 * Get all edges connected to a node (incoming + outgoing).
-		 */
-		getConnectedEdges(canvas, node) {
-			var _a, _b;
-			const idx = this.getEdgeIndex(canvas);
-			const inc = (_a = idx.incoming.get(node.id)) != null ? _a : [];
-			const out = (_b = idx.outgoing.get(node.id)) != null ? _b : [];
-			return [...inc, ...out];
-		}
-		/**
-		 * Get parent node (the node that has an edge pointing TO this node).
-		 */
-		getParentNode(canvas, node) {
-			const idx = this.getEdgeIndex(canvas);
-			const inc = idx.incoming.get(node.id);
-			return inc && inc.length > 0 ? inc[0].from.node : null;
-		}
-		/**
-		 * Get child nodes (nodes that this node has edges pointing TO).
-		 */
-		getChildNodes(canvas, node) {
-			var _a;
-			const idx = this.getEdgeIndex(canvas);
-			const out = (_a = idx.outgoing.get(node.id)) != null ? _a : [];
-			const children = out.map((e) => e.to.node);
-			children.sort((a, b) => a.y - b.y);
-			return children;
-		}
-		/**
-		 * Get outgoing edges from a node (for BFS traversal).
-		 */
-		getOutgoingEdges(canvas, nodeId) {
-			var _a;
-			const idx = this.getEdgeIndex(canvas);
-			return (_a = idx.outgoing.get(nodeId)) != null ? _a : [];
-		}
-		/**
-		 * Get incoming edges to a node.
-		 */
-		getIncomingEdges(canvas, node) {
-			const id = typeof node === 'string' ? node : node?.id;
-			if (!id) return [];
-			const idx = this.getEdgeIndex(canvas);
-			return idx.incoming.get(id) || [];
-		}
-		/**
-		 * Get sibling nodes (other children of the same parent).
-		 */
-		getSiblingNodes(canvas, node) {
-			const parent = this.getParentNode(canvas, node);
-			if (!parent) return [];
-			return this.getChildNodes(canvas, parent).filter(
-				(n) => n.id !== node.id
-			);
-		}
-		/**
-		 * Select a node and zoom to it with padding.
-		 */
-		selectAndZoom(canvas, node, zoomPadding) {
-			canvas.selectOnly(node);
-			if (zoomPadding > 0) {
-				const cx = node.x + node.width / 2;
-				const cy = node.y + node.height / 2;
-				canvas.zoomToBbox({
-					minX: cx - zoomPadding,
-					minY: cy - zoomPadding,
-					maxX: cx + zoomPadding,
-					maxY: cy + zoomPadding
-				});
-			} else {
-				canvas.zoomToSelection();
-			}
-		}
-		/**
-		 * Select a node and keep the camera still while it remains comfortably
-		 * visible. If navigation leaves the viewport, reveal it with the same
-		 * contextual padding used for newly created topics.
-		 */
-		selectForNavigation(canvas, node, zoomPadding = 0) {
-			for (const candidate of canvas.nodes.values()) {
-				var _a;
-				(_a = candidate.nodeEl) == null
-					? void 0
-					: _a.removeClass('tomindmap-navigation-selected');
-			}
-			canvas.selectOnly(node);
-			if (node.nodeEl) {
-				node.nodeEl.addClass('tomindmap-navigation-selected');
-			}
-			canvas.requestFrame();
-			if (
-				canvas.wrapperEl &&
-				typeof canvas.wrapperEl.focus === 'function'
-			) {
-				canvas.wrapperEl.focus({ preventScroll: true });
-			}
-			this.revealNavigationTarget(canvas, node, zoomPadding);
-		}
-		revealNavigationTarget(canvas, node, zoomPadding) {
-			var _a;
-			const wrapper = canvas.wrapperEl;
-			const nodeEl = node.nodeEl;
-			if (
-				!wrapper ||
-				!nodeEl ||
-				typeof wrapper.getBoundingClientRect !== 'function' ||
-				typeof nodeEl.getBoundingClientRect !== 'function'
-			)
-				return;
-			const ownerWindow =
-				(_a = wrapper.ownerDocument) == null ? void 0 : _a.defaultView;
-			const frameWindow = ownerWindow || window;
-			const previousFrame = this.navigationRevealFrames.get(canvas);
-			if (previousFrame !== void 0)
-				frameWindow.cancelAnimationFrame(previousFrame);
-			const frame = frameWindow.requestAnimationFrame(() => {
-				this.navigationRevealFrames.delete(canvas);
-				if (canvas.selection && !canvas.selection.has(node)) return;
-				const viewport = wrapper.getBoundingClientRect();
-				const target = nodeEl.getBoundingClientRect();
-				const margin = Math.min(
-					48,
-					Math.max(
-						20,
-						Math.min(viewport.width, viewport.height) * 0.05
-					)
-				);
-				const comfortablyVisible =
-					target.left >= viewport.left + margin &&
-					target.right <= viewport.right - margin &&
-					target.top >= viewport.top + margin &&
-					target.bottom <= viewport.bottom - margin;
-				if (comfortablyVisible) return;
-				if (
-					zoomPadding > 0 &&
-					typeof canvas.zoomToBbox === 'function'
-				) {
-					const cx = node.x + node.width / 2;
-					const cy = node.y + node.height / 2;
-					const paddingX = Math.max(
-						zoomPadding,
-						node.width / 2 + margin
-					);
-					const paddingY = Math.max(
-						zoomPadding,
-						node.height / 2 + margin
-					);
-					canvas.zoomToBbox({
-						minX: cx - paddingX,
-						minY: cy - paddingY,
-						maxX: cx + paddingX,
-						maxY: cy + paddingY
-					});
-				} else if (typeof canvas.zoomToSelection === 'function') {
-					canvas.zoomToSelection();
-				}
-			});
-			this.navigationRevealFrames.set(canvas, frame);
-		}
-		selectAndEdit(canvas, node, zoomPadding = 0) {
-			for (const candidate of canvas.nodes.values()) {
-				var _a;
-				(_a = candidate.nodeEl) == null
-					? void 0
-					: _a.removeClass('tomindmap-navigation-selected');
-			}
-			this.selectAndZoom(canvas, node, zoomPadding);
-			setTimeout(() => {
-				if (node.nodeEl)
-					node.nodeEl.removeClass('tomindmap-navigation-selected');
-				node.startEditing();
-			}, 50);
-		}
-	};
+  const module = { exports: {} };
+  const exports = module.exports;
+  const { ItemView } = require('obsidian');
+  function genId() {
+  	const bytes = new Uint8Array(8);
+  	if (
+  		globalThis.crypto &&
+  		typeof globalThis.crypto.getRandomValues === 'function'
+  	) {
+  		globalThis.crypto.getRandomValues(bytes);
+  		return Array.from(bytes, (byte) =>
+  			byte.toString(16).padStart(2, '0')
+  		).join('');
+  	}
+  	return Array.from({ length: 16 }, () =>
+  		Math.floor(Math.random() * 16).toString(16)
+  	).join('');
+  }
+  function findNodeFromEvent(canvas, e) {
+  	var _a;
+  	const target = e.target;
+  	if (!target) return null;
+  	for (const node of canvas.nodes.values()) {
+  		if ((_a = node.nodeEl) == null ? void 0 : _a.contains(target))
+  			return node;
+  	}
+  	return null;
+  }
+  var CanvasAPI = class {
+  	constructor(app) {
+  		this.app = app;
+  		this.edgeIndex = null;
+  		this.indexedCanvas = null;
+  		this.indexedEdgeCount = -1;
+  		this.navigationRevealFrames = /* @__PURE__ */ new WeakMap();
+  	}
+  	/**
+  	 * Get or rebuild the edge index for the given canvas.
+  	 * Rebuilds if canvas changed or edge count changed (structural mutation).
+  	 */
+  	getEdgeIndex(canvas) {
+  		if (
+  			this.edgeIndex &&
+  			this.indexedCanvas === canvas &&
+  			this.edgeIdsMatch(canvas)
+  		) {
+  			return this.edgeIndex;
+  		}
+  		const incoming = /* @__PURE__ */ new Map();
+  		const outgoing = /* @__PURE__ */ new Map();
+  		for (const edge of canvas.edges.values()) {
+  			const fromId = edge.from.node.id;
+  			const toId = edge.to.node.id;
+  			let out = outgoing.get(fromId);
+  			if (!out) {
+  				out = [];
+  				outgoing.set(fromId, out);
+  			}
+  			out.push(edge);
+  			let inc = incoming.get(toId);
+  			if (!inc) {
+  				inc = [];
+  				incoming.set(toId, inc);
+  			}
+  			inc.push(edge);
+  		}
+  		this.edgeIndex = { incoming, outgoing };
+  		this.indexedCanvas = canvas;
+  		this.indexedEdgeCount = canvas.edges.size;
+  		return this.edgeIndex;
+  	}
+  	/**
+  	 * Structural Canvas methods are wrapped by the plugin and invalidate this
+  	 * index. The count check also covers changes made before wrapping.
+  	 */
+  	edgeIdsMatch(canvas) {
+  		return canvas.edges.size === this.indexedEdgeCount;
+  	}
+  	/**
+  	 * Invalidate the edge index (call after adding/removing edges).
+  	 */
+  	invalidateEdgeIndex() {
+  		this.edgeIndex = null;
+  		this.indexedEdgeCount = -1;
+  	}
+  	/**
+  	 * Get the active canvas if a canvas view is currently focused.
+  	 */
+  	getActiveCanvas() {
+  		var _a;
+  		const view = this.app.workspace.getActiveViewOfType(ItemView);
+  		if (!view || view.getViewType() !== 'canvas') return null;
+  		return (_a = view.canvas) != null ? _a : null;
+  	}
+  	/**
+  	 * Get canvas from any open canvas leaf (first found).
+  	 */
+  	getAnyCanvas() {
+  		var _a;
+  		const leaves = this.app.workspace.getLeavesOfType('canvas');
+  		if (leaves.length === 0) return null;
+  		const view = leaves[0].view;
+  		return (_a = view == null ? void 0 : view.canvas) != null ? _a : null;
+  	}
+  	/**
+  	 * Get the currently selected node (single selection).
+  	 */
+  	getSelectedNode(canvas) {
+  		const selection = canvas.selection;
+  		if (selection.size !== 1) return null;
+  		const item = selection.values().next().value;
+  		if (!item || !('nodeEl' in item)) return null;
+  		return item;
+  	}
+  	/**
+  	 * Create a text node at a given position.
+  	 */
+  	createTextNode(canvas, x, y, text = '', width = 260, height = 60) {
+  		const node = canvas.createTextNode({
+  			pos: { x, y },
+  			size: { width, height },
+  			text,
+  			focus: false,
+  			save: false
+  		});
+  		return node;
+  	}
+  	/**
+  	 * Create an edge between two nodes using canvas.importData.
+  	 */
+  	createEdge(
+  		canvas,
+  		fromNode,
+  		toNode,
+  		fromSide = 'right',
+  		toSide = 'left',
+  		color
+  	) {
+  		let id = genId();
+  		while (canvas.edges.has(id)) id = genId();
+  		canvas.importData({
+  			edges: [
+  				{
+  					id,
+  					fromNode: fromNode.id,
+  					fromSide,
+  					fromEnd: 'none',
+  					toNode: toNode.id,
+  					toSide,
+  					toEnd: 'arrow',
+  					...(color ? { color } : {})
+  				}
+  			],
+  			nodes: []
+  		});
+  		this.invalidateEdgeIndex();
+  		return canvas.edges.get(id) || null;
+  	}
+  	/**
+  	 * Remove an edge.
+  	 */
+  	removeEdge(canvas, edge) {
+  		canvas.removeEdge(edge);
+  		this.invalidateEdgeIndex();
+  	}
+  	/**
+  	 * Remove a node and all its connected edges.
+  	 */
+  	removeNode(canvas, node) {
+  		const connectedEdges = this.getConnectedEdges(canvas, node);
+  		for (const edge of connectedEdges) {
+  			canvas.removeEdge(edge);
+  		}
+  		canvas.removeNode(node);
+  		this.invalidateEdgeIndex();
+  	}
+  	/**
+  	 * Get all edges connected to a node (incoming + outgoing).
+  	 */
+  	getConnectedEdges(canvas, node) {
+  		var _a, _b;
+  		const idx = this.getEdgeIndex(canvas);
+  		const inc = (_a = idx.incoming.get(node.id)) != null ? _a : [];
+  		const out = (_b = idx.outgoing.get(node.id)) != null ? _b : [];
+  		return [...inc, ...out];
+  	}
+  	/**
+  	 * Get parent node (the node that has an edge pointing TO this node).
+  	 */
+  	getParentNode(canvas, node) {
+  		const idx = this.getEdgeIndex(canvas);
+  		const inc = idx.incoming.get(node.id);
+  		return inc && inc.length > 0 ? inc[0].from.node : null;
+  	}
+  	/**
+  	 * Get child nodes (nodes that this node has edges pointing TO).
+  	 */
+  	getChildNodes(canvas, node) {
+  		var _a;
+  		const idx = this.getEdgeIndex(canvas);
+  		const out = (_a = idx.outgoing.get(node.id)) != null ? _a : [];
+  		const children = out.map((e) => e.to.node);
+  		children.sort((a, b) => a.y - b.y);
+  		return children;
+  	}
+  	/**
+  	 * Get outgoing edges from a node (for BFS traversal).
+  	 */
+  	getOutgoingEdges(canvas, nodeId) {
+  		var _a;
+  		const idx = this.getEdgeIndex(canvas);
+  		return (_a = idx.outgoing.get(nodeId)) != null ? _a : [];
+  	}
+  	/**
+  	 * Get incoming edges to a node.
+  	 */
+  	getIncomingEdges(canvas, node) {
+  		const id = typeof node === 'string' ? node : node?.id;
+  		if (!id) return [];
+  		const idx = this.getEdgeIndex(canvas);
+  		return idx.incoming.get(id) || [];
+  	}
+  	/**
+  	 * Get sibling nodes (other children of the same parent).
+  	 */
+  	getSiblingNodes(canvas, node) {
+  		const parent = this.getParentNode(canvas, node);
+  		if (!parent) return [];
+  		return this.getChildNodes(canvas, parent).filter(
+  			(n) => n.id !== node.id
+  		);
+  	}
+  	/**
+  	 * Select a node and zoom to it with padding.
+  	 */
+  	selectAndZoom(canvas, node, zoomPadding) {
+  		canvas.selectOnly(node);
+  		if (zoomPadding > 0) {
+  			const cx = node.x + node.width / 2;
+  			const cy = node.y + node.height / 2;
+  			canvas.zoomToBbox({
+  				minX: cx - zoomPadding,
+  				minY: cy - zoomPadding,
+  				maxX: cx + zoomPadding,
+  				maxY: cy + zoomPadding
+  			});
+  		} else {
+  			canvas.zoomToSelection();
+  		}
+  	}
+  	/**
+  	 * Select a node and keep the camera still while it remains comfortably
+  	 * visible. If navigation leaves the viewport, reveal it with the same
+  	 * contextual padding used for newly created topics.
+  	 */
+  	selectForNavigation(canvas, node, zoomPadding = 0) {
+  		for (const candidate of canvas.nodes.values()) {
+  			var _a;
+  			(_a = candidate.nodeEl) == null
+  				? void 0
+  				: _a.removeClass('tomindmap-navigation-selected');
+  		}
+  		canvas.selectOnly(node);
+  		if (node.nodeEl) {
+  			node.nodeEl.addClass('tomindmap-navigation-selected');
+  		}
+  		canvas.requestFrame();
+  		if (canvas.wrapperEl && typeof canvas.wrapperEl.focus === 'function') {
+  			canvas.wrapperEl.focus({ preventScroll: true });
+  		}
+  		this.revealNavigationTarget(canvas, node, zoomPadding);
+  	}
+  	revealNavigationTarget(canvas, node, zoomPadding) {
+  		var _a;
+  		const wrapper = canvas.wrapperEl;
+  		const nodeEl = node.nodeEl;
+  		if (
+  			!wrapper ||
+  			!nodeEl ||
+  			typeof wrapper.getBoundingClientRect !== 'function' ||
+  			typeof nodeEl.getBoundingClientRect !== 'function'
+  		)
+  			return;
+  		const ownerWindow =
+  			(_a = wrapper.ownerDocument) == null ? void 0 : _a.defaultView;
+  		const frameWindow = ownerWindow || window;
+  		const previousFrame = this.navigationRevealFrames.get(canvas);
+  		if (previousFrame !== void 0)
+  			frameWindow.cancelAnimationFrame(previousFrame);
+  		const frame = frameWindow.requestAnimationFrame(() => {
+  			this.navigationRevealFrames.delete(canvas);
+  			if (canvas.selection && !canvas.selection.has(node)) return;
+  			const viewport = wrapper.getBoundingClientRect();
+  			const target = nodeEl.getBoundingClientRect();
+  			const margin = Math.min(
+  				48,
+  				Math.max(20, Math.min(viewport.width, viewport.height) * 0.05)
+  			);
+  			const comfortablyVisible =
+  				target.left >= viewport.left + margin &&
+  				target.right <= viewport.right - margin &&
+  				target.top >= viewport.top + margin &&
+  				target.bottom <= viewport.bottom - margin;
+  			if (comfortablyVisible) return;
+  			if (zoomPadding > 0 && typeof canvas.zoomToBbox === 'function') {
+  				const cx = node.x + node.width / 2;
+  				const cy = node.y + node.height / 2;
+  				const paddingX = Math.max(zoomPadding, node.width / 2 + margin);
+  				const paddingY = Math.max(
+  					zoomPadding,
+  					node.height / 2 + margin
+  				);
+  				canvas.zoomToBbox({
+  					minX: cx - paddingX,
+  					minY: cy - paddingY,
+  					maxX: cx + paddingX,
+  					maxY: cy + paddingY
+  				});
+  			} else if (typeof canvas.zoomToSelection === 'function') {
+  				canvas.zoomToSelection();
+  			}
+  		});
+  		this.navigationRevealFrames.set(canvas, frame);
+  	}
+  	selectAndEdit(canvas, node, zoomPadding = 0) {
+  		for (const candidate of canvas.nodes.values()) {
+  			var _a;
+  			(_a = candidate.nodeEl) == null
+  				? void 0
+  				: _a.removeClass('tomindmap-navigation-selected');
+  		}
+  		this.selectAndZoom(canvas, node, zoomPadding);
+  		setTimeout(() => {
+  			if (node.nodeEl)
+  				node.nodeEl.removeClass('tomindmap-navigation-selected');
+  			node.startEditing();
+  		}, 50);
+  	}
+  };
 
-	module.exports = { CanvasAPI, findNodeFromEvent, genId };
-	return module.exports;
+  module.exports = { CanvasAPI, findNodeFromEvent, genId };
+  return module.exports;
 })();
 // </tomindmap:module canvas-api>
 
 // src/mindmap/tree-model.ts
 // <tomindmap:module tree-model>
 var {
-	buildForest,
-	getGroupIds,
-	findTreeForNode,
-	countReachable,
-	setDepths,
-	findTreeNode,
-	getDescendants,
-	assignDirections,
-	propagateDirection,
-	countChildrenPerSide
+  buildForest,
+  getGroupIds,
+  findTreeForNode,
+  countReachable,
+  setDepths,
+  findTreeNode,
+  getDescendants,
+  assignDirections,
+  propagateDirection,
+  countChildrenPerSide
 } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	function getGroupIds(canvas) {
-		const ids = new Set();
-		for (const node of canvas.getData().nodes || []) {
-			if (node.type === 'group') ids.add(node.id);
-		}
-		return ids;
-	}
+  const module = { exports: {} };
+  const exports = module.exports;
+  function getGroupIds(canvas) {
+    const ids = new Set();
+    for (const node of canvas.getData().nodes || []) {
+      if (node.type === "group")
+        ids.add(node.id);
+    }
+    return ids;
+  }
 
-	function walk(root, callback) {
-		if (!root) return null;
-		const stack = [root];
-		const visited = new Set();
-		while (stack.length > 0) {
-			const node = stack.pop();
-			if (!node || visited.has(node)) continue;
-			visited.add(node);
-			const result = callback(node);
-			if (result !== undefined) return result;
-			for (let index = node.children.length - 1; index >= 0; index--)
-				stack.push(node.children[index]);
-		}
-		return null;
-	}
+  function walk(root, callback) {
+    if (!root)
+      return null;
+    const stack = [root];
+    const visited = new Set();
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || visited.has(node))
+        continue;
+      visited.add(node);
+      const result = callback(node);
+      if (result !== undefined)
+        return result;
+      for (let index = node.children.length - 1; index >= 0; index--)
+        stack.push(node.children[index]);
+    }
+    return null;
+  }
 
-	/**
-	 * Convert the free-form Canvas graph into a deterministic forest.
-	 *
-	 * Mind maps require one parent per topic and cannot contain directed cycles.
-	 * Canvas itself permits both, so malformed surplus edges are ignored in their
-	 * stable insertion order instead of making layout recurse forever.
-	 */
-	function buildForest(canvas) {
-		const groupIds = getGroupIds(canvas);
-		const nodeMap = new Map();
-		for (const canvasNode of canvas.nodes.values()) {
-			if (groupIds.has(canvasNode.id)) continue;
-			nodeMap.set(canvasNode.id, {
-				canvasNode,
-				parent: null,
-				children: [],
-				depth: 0,
-				siblingIndex: 0,
-				direction: null
-			});
-		}
+  /**
+   * Convert the free-form Canvas graph into a deterministic forest.
+   *
+   * Mind maps require one parent per topic and cannot contain directed cycles.
+   * Canvas itself permits both, so malformed surplus edges are ignored in their
+   * stable insertion order instead of making layout recurse forever.
+   */
+  function buildForest(canvas) {
+    const groupIds = getGroupIds(canvas);
+    const nodeMap = new Map();
+    for (const canvasNode of canvas.nodes.values()) {
+      if (groupIds.has(canvasNode.id))
+        continue;
+      nodeMap.set(canvasNode.id, {
+        canvasNode,
+        parent: null,
+        children: [],
+        depth: 0,
+        siblingIndex: 0,
+        direction: null
+      });
+    }
 
-		const componentParents = new Map(
-			Array.from(nodeMap.keys(), (id) => [id, id])
-		);
-		const findComponent = (id) => {
-			let root = id;
-			while (componentParents.get(root) !== root)
-				root = componentParents.get(root);
-			while (componentParents.get(id) !== id) {
-				const parent = componentParents.get(id);
-				componentParents.set(id, root);
-				id = parent;
-			}
-			return root;
-		};
-		const joinComponents = (left, right) => {
-			const leftRoot = findComponent(left);
-			const rightRoot = findComponent(right);
-			if (leftRoot === rightRoot) return false;
-			componentParents.set(rightRoot, leftRoot);
-			return true;
-		};
+    const componentParents = new Map(Array.from(nodeMap.keys(), (id) => [id, id]));
+    const findComponent = (id) => {
+      let root = id;
+      while (componentParents.get(root) !== root)
+        root = componentParents.get(root);
+      while (componentParents.get(id) !== id) {
+        const parent = componentParents.get(id);
+        componentParents.set(id, root);
+        id = parent;
+      }
+      return root;
+    };
+    const joinComponents = (left, right) => {
+      const leftRoot = findComponent(left);
+      const rightRoot = findComponent(right);
+      if (leftRoot === rightRoot)
+        return false;
+      componentParents.set(rightRoot, leftRoot);
+      return true;
+    };
 
-		for (const edge of canvas.edges.values()) {
-			if (edge?.__mindMapPreview) continue;
-			const parent = nodeMap.get(edge.from?.node?.id);
-			const child = nodeMap.get(edge.to?.node?.id);
-			if (!parent || !child || parent === child || child.parent) continue;
-			if (!joinComponents(parent.canvasNode.id, child.canvasNode.id))
-				continue;
-			child.parent = parent;
-			parent.children.push(child);
-		}
+    for (const edge of canvas.edges.values()) {
+      if (edge?.__mindMapPreview)
+        continue;
+      const parent = nodeMap.get(edge.from?.node?.id);
+      const child = nodeMap.get(edge.to?.node?.id);
+      if (!parent || !child || parent === child || child.parent)
+        continue;
+      if (!joinComponents(parent.canvasNode.id, child.canvasNode.id))
+        continue;
+      child.parent = parent;
+      parent.children.push(child);
+    }
 
-		for (const treeNode of nodeMap.values()) {
-			treeNode.children.sort(
-				(left, right) =>
-					(Number(left.canvasNode.y) || 0) -
-						(Number(right.canvasNode.y) || 0) ||
-					(Number(left.canvasNode.x) || 0) -
-						(Number(right.canvasNode.x) || 0) ||
-					String(left.canvasNode.id).localeCompare(
-						String(right.canvasNode.id)
-					)
-			);
-			treeNode.children.forEach((child, index) => {
-				child.siblingIndex = index;
-			});
-		}
+    for (const treeNode of nodeMap.values()) {
+      treeNode.children.sort((left, right) =>
+        (Number(left.canvasNode.y) || 0) - (Number(right.canvasNode.y) || 0)
+        || (Number(left.canvasNode.x) || 0) - (Number(right.canvasNode.x) || 0)
+        || String(left.canvasNode.id).localeCompare(String(right.canvasNode.id))
+      );
+      treeNode.children.forEach((child, index) => {
+        child.siblingIndex = index;
+      });
+    }
 
-		const roots = Array.from(nodeMap.values()).filter(
-			(node) => !node.parent
-		);
-		for (const root of roots) {
-			setDepths(root, 0);
-			assignDirections(root);
-		}
-		roots.sort(
-			(left, right) =>
-				countReachable(right) - countReachable(left) ||
-				(Number(left.canvasNode.y) || 0) -
-					(Number(right.canvasNode.y) || 0) ||
-				(Number(left.canvasNode.x) || 0) -
-					(Number(right.canvasNode.x) || 0) ||
-				String(left.canvasNode.id).localeCompare(
-					String(right.canvasNode.id)
-				)
-		);
-		return roots;
-	}
+    const roots = Array.from(nodeMap.values()).filter((node) => !node.parent);
+    for (const root of roots) {
+      setDepths(root, 0);
+      assignDirections(root);
+    }
+    roots.sort((left, right) =>
+      countReachable(right) - countReachable(left)
+      || (Number(left.canvasNode.y) || 0) - (Number(right.canvasNode.y) || 0)
+      || (Number(left.canvasNode.x) || 0) - (Number(right.canvasNode.x) || 0)
+      || String(left.canvasNode.id).localeCompare(String(right.canvasNode.id))
+    );
+    return roots;
+  }
 
-	function findTreeForNode(forest, nodeId) {
-		for (const root of forest) {
-			const found = findTreeNode(root, nodeId);
-			if (found) return found;
-		}
-		return null;
-	}
+  function findTreeForNode(forest, nodeId) {
+    for (const root of forest) {
+      const found = findTreeNode(root, nodeId);
+      if (found)
+        return found;
+    }
+    return null;
+  }
 
-	function countReachable(root) {
-		let count = 0;
-		walk(root, () => {
-			count++;
-		});
-		return count;
-	}
+  function countReachable(root) {
+    let count = 0;
+    walk(root, () => {
+      count++;
+    });
+    return count;
+  }
 
-	function setDepths(root, depth) {
-		const stack = [{ node: root, depth }];
-		const visited = new Set();
-		while (stack.length > 0) {
-			const current = stack.pop();
-			if (!current.node || visited.has(current.node)) continue;
-			visited.add(current.node);
-			current.node.depth = current.depth;
-			for (
-				let index = current.node.children.length - 1;
-				index >= 0;
-				index--
-			) {
-				stack.push({
-					node: current.node.children[index],
-					depth: current.depth + 1
-				});
-			}
-		}
-	}
+  function setDepths(root, depth) {
+    const stack = [{ node: root, depth }];
+    const visited = new Set();
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current.node || visited.has(current.node))
+        continue;
+      visited.add(current.node);
+      current.node.depth = current.depth;
+      for (let index = current.node.children.length - 1; index >= 0; index--) {
+        stack.push({ node: current.node.children[index], depth: current.depth + 1 });
+      }
+    }
+  }
 
-	function findTreeNode(root, nodeId) {
-		return walk(root, (node) =>
-			node.canvasNode.id === nodeId ? node : undefined
-		);
-	}
+  function findTreeNode(root, nodeId) {
+    return walk(root, (node) => node.canvasNode.id === nodeId ? node : undefined);
+  }
 
-	function getDescendants(root) {
-		const result = [];
-		const stack = [...root.children].reverse();
-		const visited = new Set([root]);
-		while (stack.length > 0) {
-			const node = stack.pop();
-			if (!node || visited.has(node)) continue;
-			visited.add(node);
-			result.push(node);
-			for (let index = node.children.length - 1; index >= 0; index--)
-				stack.push(node.children[index]);
-		}
-		return result;
-	}
+  function getDescendants(root) {
+    const result = [];
+    const stack = [...root.children].reverse();
+    const visited = new Set([root]);
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || visited.has(node))
+        continue;
+      visited.add(node);
+      result.push(node);
+      for (let index = node.children.length - 1; index >= 0; index--)
+        stack.push(node.children[index]);
+    }
+    return result;
+  }
 
-	function assignDirections(root) {
-		const rootCenter =
-			(Number(root.canvasNode.x) || 0) +
-			(Number(root.canvasNode.width) || 0) / 2;
-		for (const child of root.children) {
-			const childCenter =
-				(Number(child.canvasNode.x) || 0) +
-				(Number(child.canvasNode.width) || 0) / 2;
-			child.direction = childCenter >= rootCenter ? 'right' : 'left';
-			propagateDirection(child, child.direction);
-		}
-	}
+  function assignDirections(root) {
+    const rootCenter = (Number(root.canvasNode.x) || 0) + (Number(root.canvasNode.width) || 0) / 2;
+    for (const child of root.children) {
+      const childCenter = (Number(child.canvasNode.x) || 0) + (Number(child.canvasNode.width) || 0) / 2;
+      child.direction = childCenter >= rootCenter ? "right" : "left";
+      propagateDirection(child, child.direction);
+    }
+  }
 
-	function propagateDirection(root, direction) {
-		const stack = [...root.children];
-		const visited = new Set([root]);
-		while (stack.length > 0) {
-			const node = stack.pop();
-			if (!node || visited.has(node)) continue;
-			visited.add(node);
-			node.direction = direction;
-			stack.push(...node.children);
-		}
-	}
+  function propagateDirection(root, direction) {
+    const stack = [...root.children];
+    const visited = new Set([root]);
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || visited.has(node))
+        continue;
+      visited.add(node);
+      node.direction = direction;
+      stack.push(...node.children);
+    }
+  }
 
-	function countChildrenPerSide(root) {
-		let left = 0;
-		let right = 0;
-		for (const child of root.children) {
-			if (child.direction === 'left') left++;
-			else right++;
-		}
-		return { left, right };
-	}
+  function countChildrenPerSide(root) {
+    let left = 0;
+    let right = 0;
+    for (const child of root.children) {
+      if (child.direction === "left")
+        left++;
+      else
+        right++;
+    }
+    return { left, right };
+  }
 
-	module.exports = {
-		buildForest,
-		getGroupIds,
-		findTreeForNode,
-		countReachable,
-		setDepths,
-		findTreeNode,
-		getDescendants,
-		assignDirections,
-		propagateDirection,
-		countChildrenPerSide
-	};
-	return module.exports;
+  module.exports = {
+    buildForest,
+    getGroupIds,
+    findTreeForNode,
+    countReachable,
+    setDepths,
+    findTreeNode,
+    getDescendants,
+    assignDirections,
+    propagateDirection,
+    countChildrenPerSide
+  };
+  return module.exports;
 })();
 // </tomindmap:module tree-model>
 
 // <tomindmap:module node-operations>
 var { NodeOperations } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
+  const module = { exports: {} };
+  const exports = module.exports;
 
-	var NodeOperations = class {
-		constructor(canvasApi, config) {
-			this.canvasApi = canvasApi;
-			this.config = config;
-		}
-		/**
-		 * Add a child node to the selected node.
-		 * If parent is root, places on the side with fewer children (ties go right).
-		 * If parent is non-root, inherits direction from its branch.
-		 * Returns the new node so the caller can start editing it.
-		 */
-		addChild(canvas, parentNode) {
-			const forest = buildForest(canvas);
-			const parentTreeNode = findTreeForNode(forest, parentNode.id);
-			const isRoot = parentTreeNode && !parentTreeNode.parent;
-			let direction;
-			if (isRoot && parentTreeNode) {
-				if (
-					typeof this.config.isAutoAdjust === 'function' &&
-					this.config.isAutoAdjust(canvas)
-				) {
-					direction =
-						parentTreeNode.children.length === 0 ? 'right' : 'left';
-				} else {
-					const counts = countChildrenPerSide(parentTreeNode);
-					direction = counts.left < counts.right ? 'left' : 'right';
-				}
-			} else {
-				direction = this.detectDirection(canvas, parentNode);
-			}
-			const existingChildren = this.canvasApi.getChildNodes(
-				canvas,
-				parentNode
-			);
-			let x;
-			if (direction === 'right') {
-				x = parentNode.x + parentNode.width + this.config.horizontalGap;
-			} else {
-				x =
-					parentNode.x -
-					this.config.nodeWidth -
-					this.config.horizontalGap;
-			}
-			let y;
-			if (existingChildren.length > 0) {
-				const sameSideChildren = existingChildren.filter((c) => {
-					const childCx = c.x + c.width / 2;
-					const parentCx = parentNode.x + parentNode.width / 2;
-					return direction === 'right'
-						? childCx > parentCx
-						: childCx < parentCx;
-				});
-				if (sameSideChildren.length > 0) {
-					const lastChild =
-						sameSideChildren[sameSideChildren.length - 1];
-					y =
-						lastChild.y +
-						lastChild.height +
-						this.config.verticalGap;
-				} else {
-					y =
-						parentNode.y +
-						(parentNode.height - this.config.nodeHeight) / 2;
-				}
-			} else {
-				y =
-					parentNode.y +
-					(parentNode.height - this.config.nodeHeight) / 2;
-			}
-			({ x, y } = this.findAvailablePosition(
-				canvas,
-				x,
-				y,
-				this.config.nodeWidth,
-				this.config.nodeHeight,
-				'down'
-			));
-			const newNode = this.canvasApi.createTextNode(
-				canvas,
-				x,
-				y,
-				'',
-				this.config.nodeWidth,
-				this.config.nodeHeight
-			);
-			if (parentNode.color) newNode.setColor(parentNode.color);
-			if (direction === 'right') {
-				this.canvasApi.createEdge(
-					canvas,
-					parentNode,
-					newNode,
-					'right',
-					'left',
-					parentNode.color || void 0
-				);
-			} else {
-				this.canvasApi.createEdge(
-					canvas,
-					parentNode,
-					newNode,
-					'left',
-					'right',
-					parentNode.color || void 0
-				);
-			}
-			canvas.requestSave();
-			return newNode;
-		}
-		/**
-		 * Add a sibling node below the selected node (same parent).
-		 * Inherits the branch direction from the current node.
-		 * Returns the new node.
-		 */
-		addSibling(canvas, currentNode, before = false) {
-			const parent = this.canvasApi.getParentNode(canvas, currentNode);
-			if (!parent) {
-				return this.addChild(canvas, currentNode);
-			}
-			const direction = this.detectDirection(canvas, currentNode);
-			let x = currentNode.x;
-			const parentCenter = parent.x + parent.width / 2;
-			const sameSideSiblings = this.canvasApi
-				.getChildNodes(canvas, parent)
-				.filter((sibling) => {
-					const siblingCenter = sibling.x + sibling.width / 2;
-					return direction === 'left'
-						? siblingCenter < parentCenter
-						: siblingCenter >= parentCenter;
-				})
-				.sort(
-					(a, b) =>
-						a.y - b.y ||
-						a.x - b.x ||
-						String(a.id).localeCompare(String(b.id))
-				);
-			const currentIndex = sameSideSiblings.findIndex(
-				(sibling) => sibling.id === currentNode.id
-			);
-			const adjacent = before
-				? sameSideSiblings[currentIndex - 1]
-				: sameSideSiblings[currentIndex + 1];
-			let y;
-			if (
-				adjacent &&
-				typeof this.config.isAutoAdjust === 'function' &&
-				this.config.isAutoAdjust(canvas)
-			) {
-				// The layout engine derives sibling chronology from Y. A midpoint is an
-				// order hint that places the new topic next to the current one before the
-				// synchronous re-layout removes the temporary overlap.
-				y = (currentNode.y + adjacent.y) / 2;
-			} else {
-				y = before
-					? currentNode.y -
-						this.config.nodeHeight -
-						this.config.verticalGap
-					: currentNode.y +
-						currentNode.height +
-						this.config.verticalGap;
-				({ x, y } = this.findAvailablePosition(
-					canvas,
-					x,
-					y,
-					this.config.nodeWidth,
-					this.config.nodeHeight,
-					before ? 'up' : 'down'
-				));
-			}
-			const newNode = this.canvasApi.createTextNode(
-				canvas,
-				x,
-				y,
-				'',
-				this.config.nodeWidth,
-				this.config.nodeHeight
-			);
-			if (currentNode.color) newNode.setColor(currentNode.color);
-			if (direction === 'right') {
-				this.canvasApi.createEdge(
-					canvas,
-					parent,
-					newNode,
-					'right',
-					'left',
-					currentNode.color || void 0
-				);
-			} else {
-				this.canvasApi.createEdge(
-					canvas,
-					parent,
-					newNode,
-					'left',
-					'right',
-					currentNode.color || void 0
-				);
-			}
-			canvas.requestSave();
-			return newNode;
-		}
-		/**
-		 * Insert a new topic between the current topic and its parent.
-		 * For a central topic this creates a new root immediately to its left.
-		 */
-		addParent(canvas, currentNode) {
-			const parent = this.canvasApi.getParentNode(canvas, currentNode);
-			const direction = parent
-				? this.detectDirection(canvas, currentNode)
-				: 'right';
-			let x = parent
-				? (parent.x +
-						parent.width / 2 +
-						currentNode.x +
-						currentNode.width / 2) /
-						2 -
-					this.config.nodeWidth / 2
-				: currentNode.x -
-					this.config.nodeWidth -
-					this.config.horizontalGap;
-			let y =
-				currentNode.y +
-				(currentNode.height - this.config.nodeHeight) / 2;
-			({ x, y } = this.findAvailablePosition(
-				canvas,
-				x,
-				y,
-				this.config.nodeWidth,
-				this.config.nodeHeight,
-				'nearest'
-			));
-			const newNode = this.canvasApi.createTextNode(
-				canvas,
-				x,
-				y,
-				'',
-				this.config.nodeWidth,
-				this.config.nodeHeight
-			);
-			if (currentNode.color) newNode.setColor(currentNode.color);
-			if (parent) {
-				const edge = this.canvasApi
-					.getOutgoingEdges(canvas, parent.id)
-					.find(
-						(candidate) => candidate.to.node.id === currentNode.id
-					);
-				if (edge) {
-					const fromSide = edge.from.side;
-					const toSide = edge.to.side;
-					canvas.removeEdge(edge);
-					this.canvasApi.invalidateEdgeIndex();
-					this.canvasApi.createEdge(
-						canvas,
-						parent,
-						newNode,
-						fromSide,
-						toSide,
-						currentNode.color || void 0
-					);
-					this.canvasApi.createEdge(
-						canvas,
-						newNode,
-						currentNode,
-						fromSide,
-						toSide,
-						currentNode.color || void 0
-					);
-				} else {
-					this.canvasApi.removeNode(canvas, newNode);
-					return null;
-				}
-			} else {
-				this.canvasApi.createEdge(
-					canvas,
-					newNode,
-					currentNode,
-					'right',
-					'left',
-					currentNode.color || void 0
-				);
-			}
-			canvas.requestSave();
-			return newNode;
-		}
-		/**
-		 * Find a collision-free slot for a newly created topic without moving any
-		 * existing topic. Search stays on the intended branch column.
-		 */
-		findAvailablePosition(
-			canvas,
-			x,
-			y,
-			width,
-			height,
-			preference = 'down'
-		) {
-			const groupIds = getGroupIds(canvas);
-			const existing = Array.from(canvas.nodes.values()).filter(
-				(node) => !groupIds.has(node.id)
-			);
-			const padding = Math.max(8, this.config.verticalGap / 2);
-			const step = height + this.config.verticalGap;
-			const isFree = (candidateY) =>
-				existing.every((node) => {
-					return (
-						x + width + padding <= node.x ||
-						x >= node.x + node.width + padding ||
-						candidateY + height + padding <= node.y ||
-						candidateY >= node.y + node.height + padding
-					);
-				});
-			if (isFree(y)) return { x, y };
-			for (let index = 1; index <= 200; index++) {
-				const offsets =
-					preference === 'up'
-						? [-index]
-						: preference === 'down'
-							? [index]
-							: [index, -index];
-				for (const offset of offsets) {
-					const candidateY = y + offset * step;
-					if (isFree(candidateY)) return { x, y: candidateY };
-				}
-			}
-			return { x, y };
-		}
-		/**
-		 * Delete a topic and its complete branch, returning its parent for focus.
-		 * Central topics are valid targets too; deleting one removes that complete tree.
-		 */
-		deleteSubtree(canvas, currentNode) {
-			const parent = this.canvasApi.getParentNode(canvas, currentNode);
-			const descendants = [];
-			const visited = /* @__PURE__ */ new Set([currentNode.id]);
-			const queue = [currentNode.id];
-			for (let cursor = 0; cursor < queue.length; cursor++) {
-				const id = queue[cursor];
-				for (const edge of this.canvasApi.getOutgoingEdges(
-					canvas,
-					id
-				)) {
-					const child = edge.to.node;
-					if (!visited.has(child.id)) {
-						visited.add(child.id);
-						descendants.push(child);
-						queue.push(child.id);
-					}
-				}
-			}
-			for (let i = descendants.length - 1; i >= 0; i--) {
-				this.canvasApi.removeNode(canvas, descendants[i]);
-			}
-			this.canvasApi.removeNode(canvas, currentNode);
-			canvas.requestSave();
-			return parent;
-		}
-		/**
-		 * Delete the current node and return the best node to focus.
-		 * Children of the deleted node get reconnected to the parent
-		 * with edge sides matching their branch direction. When deleting a root,
-		 * its children become independent roots and the top-left child gets focus.
-		 */
-		deleteAndFocusParent(canvas, currentNode) {
-			const parent = this.canvasApi.getParentNode(canvas, currentNode);
-			const direction = this.detectDirection(canvas, currentNode);
-			const orphans = this.canvasApi.getChildNodes(canvas, currentNode);
-			if (parent) {
-				for (const orphan of orphans) {
-					if (direction === 'right') {
-						this.canvasApi.createEdge(
-							canvas,
-							parent,
-							orphan,
-							'right',
-							'left'
-						);
-					} else {
-						this.canvasApi.createEdge(
-							canvas,
-							parent,
-							orphan,
-							'left',
-							'right'
-						);
-					}
-				}
-			}
-			this.canvasApi.removeNode(canvas, currentNode);
-			canvas.requestSave();
-			if (parent) return parent;
-			return (
-				[...orphans].sort(
-					(a, b) =>
-						a.y - b.y ||
-						a.x - b.x ||
-						String(a.id).localeCompare(String(b.id))
-				)[0] || null
-			);
-		}
-		/**
-		 * Flip a branch to the other side of its parent.
-		 * Mirrors the node and all descendants horizontally around the parent's center X.
-		 * Returns the parent node (for caller to trigger restack/layout).
-		 */
-		flipBranch(canvas, node) {
-			const parent = this.canvasApi.getParentNode(canvas, node);
-			if (!parent) return null;
-			const parentCx = parent.x + parent.width / 2;
-			const allNodes = [node];
-			const visited = /* @__PURE__ */ new Set([node.id]);
-			const queue = [node.id];
-			for (let cursor = 0; cursor < queue.length; cursor++) {
-				const id = queue[cursor];
-				for (const edge of this.canvasApi.getOutgoingEdges(
-					canvas,
-					id
-				)) {
-					const childId = edge.to.node.id;
-					if (!visited.has(childId)) {
-						visited.add(childId);
-						allNodes.push(edge.to.node);
-						queue.push(childId);
-					}
-				}
-			}
-			for (const n of allNodes) {
-				const newX = 2 * parentCx - n.x - n.width;
-				n.moveTo({ x: newX, y: n.y });
-			}
-			return parent;
-		}
-		/**
-		 * Detect the branch direction of a node based on actual positions.
-		 * If node has children, uses their position. Otherwise, uses parent position.
-		 */
-		detectDirection(canvas, node) {
-			const nodeCx = node.x + node.width / 2;
-			const existingChildren = this.canvasApi.getChildNodes(canvas, node);
-			if (existingChildren.length > 0) {
-				const firstChildCx =
-					existingChildren[0].x + existingChildren[0].width / 2;
-				return firstChildCx < nodeCx ? 'left' : 'right';
-			}
-			const parent = this.canvasApi.getParentNode(canvas, node);
-			if (parent) {
-				const parentCx = parent.x + parent.width / 2;
-				return nodeCx < parentCx ? 'left' : 'right';
-			}
-			return 'right';
-		}
-	};
+  var NodeOperations = class {
+    constructor(canvasApi, config) {
+      this.canvasApi = canvasApi;
+      this.config = config;
+    }
+    /**
+     * Add a child node to the selected node.
+     * If parent is root, places on the side with fewer children (ties go right).
+     * If parent is non-root, inherits direction from its branch.
+     * Returns the new node so the caller can start editing it.
+     */
+    addChild(canvas, parentNode) {
+      const forest = buildForest(canvas);
+      const parentTreeNode = findTreeForNode(forest, parentNode.id);
+      const isRoot = parentTreeNode && !parentTreeNode.parent;
+      let direction;
+      if (isRoot && parentTreeNode) {
+        if (typeof this.config.isAutoAdjust === "function" && this.config.isAutoAdjust(canvas)) {
+          direction = parentTreeNode.children.length === 0 ? "right" : "left";
+        } else {
+          const counts = countChildrenPerSide(parentTreeNode);
+          direction = counts.left < counts.right ? "left" : "right";
+        }
+      } else {
+        direction = this.detectDirection(canvas, parentNode);
+      }
+      const existingChildren = this.canvasApi.getChildNodes(canvas, parentNode);
+      let x;
+      if (direction === "right") {
+        x = parentNode.x + parentNode.width + this.config.horizontalGap;
+      } else {
+        x = parentNode.x - this.config.nodeWidth - this.config.horizontalGap;
+      }
+      let y;
+      if (existingChildren.length > 0) {
+        const sameSideChildren = existingChildren.filter((c) => {
+          const childCx = c.x + c.width / 2;
+          const parentCx = parentNode.x + parentNode.width / 2;
+          return direction === "right" ? childCx > parentCx : childCx < parentCx;
+        });
+        if (sameSideChildren.length > 0) {
+          const lastChild = sameSideChildren[sameSideChildren.length - 1];
+          y = lastChild.y + lastChild.height + this.config.verticalGap;
+        } else {
+          y = parentNode.y + (parentNode.height - this.config.nodeHeight) / 2;
+        }
+      } else {
+        y = parentNode.y + (parentNode.height - this.config.nodeHeight) / 2;
+      }
+      ({ x, y } = this.findAvailablePosition(
+        canvas,
+        x,
+        y,
+        this.config.nodeWidth,
+        this.config.nodeHeight,
+        "down"
+      ));
+      const newNode = this.canvasApi.createTextNode(
+        canvas,
+        x,
+        y,
+        "",
+        this.config.nodeWidth,
+        this.config.nodeHeight
+      );
+      if (parentNode.color)
+        newNode.setColor(parentNode.color);
+      if (direction === "right") {
+        this.canvasApi.createEdge(canvas, parentNode, newNode, "right", "left", parentNode.color || void 0);
+      } else {
+        this.canvasApi.createEdge(canvas, parentNode, newNode, "left", "right", parentNode.color || void 0);
+      }
+      canvas.requestSave();
+      return newNode;
+    }
+    /**
+     * Add a sibling node below the selected node (same parent).
+     * Inherits the branch direction from the current node.
+     * Returns the new node.
+     */
+    addSibling(canvas, currentNode, before = false) {
+      const parent = this.canvasApi.getParentNode(canvas, currentNode);
+      if (!parent) {
+        return this.addChild(canvas, currentNode);
+      }
+      const direction = this.detectDirection(canvas, currentNode);
+      let x = currentNode.x;
+      const parentCenter = parent.x + parent.width / 2;
+      const sameSideSiblings = this.canvasApi.getChildNodes(canvas, parent).filter((sibling) => {
+        const siblingCenter = sibling.x + sibling.width / 2;
+        return direction === "left" ? siblingCenter < parentCenter : siblingCenter >= parentCenter;
+      }).sort((a, b) => a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id)));
+      const currentIndex = sameSideSiblings.findIndex((sibling) => sibling.id === currentNode.id);
+      const adjacent = before ? sameSideSiblings[currentIndex - 1] : sameSideSiblings[currentIndex + 1];
+      let y;
+      if (adjacent && typeof this.config.isAutoAdjust === "function" && this.config.isAutoAdjust(canvas)) {
+        // The layout engine derives sibling chronology from Y. A midpoint is an
+        // order hint that places the new topic next to the current one before the
+        // synchronous re-layout removes the temporary overlap.
+        y = (currentNode.y + adjacent.y) / 2;
+      } else {
+        y = before ? currentNode.y - this.config.nodeHeight - this.config.verticalGap : currentNode.y + currentNode.height + this.config.verticalGap;
+        ({ x, y } = this.findAvailablePosition(
+          canvas,
+          x,
+          y,
+          this.config.nodeWidth,
+          this.config.nodeHeight,
+          before ? "up" : "down"
+        ));
+      }
+      const newNode = this.canvasApi.createTextNode(
+        canvas,
+        x,
+        y,
+        "",
+        this.config.nodeWidth,
+        this.config.nodeHeight
+      );
+      if (currentNode.color)
+        newNode.setColor(currentNode.color);
+      if (direction === "right") {
+        this.canvasApi.createEdge(canvas, parent, newNode, "right", "left", currentNode.color || void 0);
+      } else {
+        this.canvasApi.createEdge(canvas, parent, newNode, "left", "right", currentNode.color || void 0);
+      }
+      canvas.requestSave();
+      return newNode;
+    }
+    /**
+     * Insert a new topic between the current topic and its parent.
+     * For a central topic this creates a new root immediately to its left.
+     */
+    addParent(canvas, currentNode) {
+      const parent = this.canvasApi.getParentNode(canvas, currentNode);
+      const direction = parent ? this.detectDirection(canvas, currentNode) : "right";
+      let x = parent ? (parent.x + parent.width / 2 + currentNode.x + currentNode.width / 2) / 2 - this.config.nodeWidth / 2 : currentNode.x - this.config.nodeWidth - this.config.horizontalGap;
+      let y = currentNode.y + (currentNode.height - this.config.nodeHeight) / 2;
+      ({ x, y } = this.findAvailablePosition(
+        canvas,
+        x,
+        y,
+        this.config.nodeWidth,
+        this.config.nodeHeight,
+        "nearest"
+      ));
+      const newNode = this.canvasApi.createTextNode(
+        canvas,
+        x,
+        y,
+        "",
+        this.config.nodeWidth,
+        this.config.nodeHeight
+      );
+      if (currentNode.color)
+        newNode.setColor(currentNode.color);
+      if (parent) {
+        const edge = this.canvasApi.getOutgoingEdges(canvas, parent.id).find(
+          (candidate) => candidate.to.node.id === currentNode.id
+        );
+        if (edge) {
+          const fromSide = edge.from.side;
+          const toSide = edge.to.side;
+          canvas.removeEdge(edge);
+          this.canvasApi.invalidateEdgeIndex();
+          this.canvasApi.createEdge(canvas, parent, newNode, fromSide, toSide, currentNode.color || void 0);
+          this.canvasApi.createEdge(canvas, newNode, currentNode, fromSide, toSide, currentNode.color || void 0);
+        } else {
+          this.canvasApi.removeNode(canvas, newNode);
+          return null;
+        }
+      } else {
+        this.canvasApi.createEdge(canvas, newNode, currentNode, "right", "left", currentNode.color || void 0);
+      }
+      canvas.requestSave();
+      return newNode;
+    }
+    /**
+     * Find a collision-free slot for a newly created topic without moving any
+     * existing topic. Search stays on the intended branch column.
+     */
+    findAvailablePosition(canvas, x, y, width, height, preference = "down") {
+      const groupIds = getGroupIds(canvas);
+      const existing = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+      const padding = Math.max(8, this.config.verticalGap / 2);
+      const step = height + this.config.verticalGap;
+      const isFree = (candidateY) => existing.every((node) => {
+        return x + width + padding <= node.x || x >= node.x + node.width + padding || candidateY + height + padding <= node.y || candidateY >= node.y + node.height + padding;
+      });
+      if (isFree(y))
+        return { x, y };
+      for (let index = 1; index <= 200; index++) {
+        const offsets = preference === "up" ? [-index] : preference === "down" ? [index] : [index, -index];
+        for (const offset of offsets) {
+          const candidateY = y + offset * step;
+          if (isFree(candidateY))
+            return { x, y: candidateY };
+        }
+      }
+      return { x, y };
+    }
+    /**
+     * Delete a topic and its complete branch, returning its parent for focus.
+     * Central topics are valid targets too; deleting one removes that complete tree.
+     */
+    deleteSubtree(canvas, currentNode) {
+      const parent = this.canvasApi.getParentNode(canvas, currentNode);
+      const descendants = [];
+      const visited = /* @__PURE__ */ new Set([currentNode.id]);
+      const queue = [currentNode.id];
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        const id = queue[cursor];
+        for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
+          const child = edge.to.node;
+          if (!visited.has(child.id)) {
+            visited.add(child.id);
+            descendants.push(child);
+            queue.push(child.id);
+          }
+        }
+      }
+      for (let i = descendants.length - 1; i >= 0; i--) {
+        this.canvasApi.removeNode(canvas, descendants[i]);
+      }
+      this.canvasApi.removeNode(canvas, currentNode);
+      canvas.requestSave();
+      return parent;
+    }
+    /**
+     * Delete the current node and return the best node to focus.
+     * Children of the deleted node get reconnected to the parent
+     * with edge sides matching their branch direction. When deleting a root,
+     * its children become independent roots and the top-left child gets focus.
+     */
+    deleteAndFocusParent(canvas, currentNode) {
+      const parent = this.canvasApi.getParentNode(canvas, currentNode);
+      const direction = this.detectDirection(canvas, currentNode);
+      const orphans = this.canvasApi.getChildNodes(canvas, currentNode);
+      if (parent) {
+        for (const orphan of orphans) {
+          if (direction === "right") {
+            this.canvasApi.createEdge(canvas, parent, orphan, "right", "left");
+          } else {
+            this.canvasApi.createEdge(canvas, parent, orphan, "left", "right");
+          }
+        }
+      }
+      this.canvasApi.removeNode(canvas, currentNode);
+      canvas.requestSave();
+      if (parent)
+        return parent;
+      return [...orphans].sort((a, b) => a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id)))[0] || null;
+    }
+    /**
+     * Flip a branch to the other side of its parent.
+     * Mirrors the node and all descendants horizontally around the parent's center X.
+     * Returns the parent node (for caller to trigger restack/layout).
+     */
+    flipBranch(canvas, node) {
+      const parent = this.canvasApi.getParentNode(canvas, node);
+      if (!parent)
+        return null;
+      const parentCx = parent.x + parent.width / 2;
+      const allNodes = [node];
+      const visited = /* @__PURE__ */ new Set([node.id]);
+      const queue = [node.id];
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        const id = queue[cursor];
+        for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
+          const childId = edge.to.node.id;
+          if (!visited.has(childId)) {
+            visited.add(childId);
+            allNodes.push(edge.to.node);
+            queue.push(childId);
+          }
+        }
+      }
+      for (const n of allNodes) {
+        const newX = 2 * parentCx - n.x - n.width;
+        n.moveTo({ x: newX, y: n.y });
+      }
+      return parent;
+    }
+    /**
+     * Detect the branch direction of a node based on actual positions.
+     * If node has children, uses their position. Otherwise, uses parent position.
+     */
+    detectDirection(canvas, node) {
+      const nodeCx = node.x + node.width / 2;
+      const existingChildren = this.canvasApi.getChildNodes(canvas, node);
+      if (existingChildren.length > 0) {
+        const firstChildCx = existingChildren[0].x + existingChildren[0].width / 2;
+        return firstChildCx < nodeCx ? "left" : "right";
+      }
+      const parent = this.canvasApi.getParentNode(canvas, node);
+      if (parent) {
+        const parentCx = parent.x + parent.width / 2;
+        return nodeCx < parentCx ? "left" : "right";
+      }
+      return "right";
+    }
+  };
 
-	module.exports = { NodeOperations };
-	return module.exports;
+  module.exports = { NodeOperations };
+  return module.exports;
 })();
 // </tomindmap:module node-operations>
 
 // <tomindmap:module layout>
-var {
-	LayoutEngine,
-	BranchColors,
-	computeEdgeSides,
-	registerDragEndHandler,
-	updateAllEdgeSides
-} = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
+var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, updateAllEdgeSides } = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
 
-	function getCenter(node) {
-		return {
-			cx: node.x + node.width / 2,
-			cy: node.y + node.height / 2
-		};
-	}
-	function computeEdgeSides(fromNode, toNode) {
-		const fromCenter = getCenter(fromNode);
-		const toCenter = getCenter(toNode);
-		const dx = toCenter.cx - fromCenter.cx;
-		if (dx >= 0) {
-			return { fromSide: 'right', toSide: 'left' };
-		} else {
-			return { fromSide: 'left', toSide: 'right' };
-		}
-	}
-	function updateAllEdgeSides(canvas, persist = true) {
-		let changed = false;
-		for (const edge of canvas.edges.values()) {
-			if (edge.__mindMapPreview) continue;
-			const fromNode = edge.from.node;
-			const toNode = edge.to.node;
-			if (!fromNode || !toNode) continue;
-			const { fromSide, toSide } = computeEdgeSides(fromNode, toNode);
-			if (edge.from.side !== fromSide || edge.to.side !== toSide) {
-				edge.from.side = fromSide;
-				edge.to.side = toSide;
-				changed = true;
-			}
-		}
-		if (changed) {
-			canvas.requestFrame();
-			if (persist) canvas.requestSave();
-		}
-	}
-	function registerDragEndHandler(canvas, enabled = () => true) {
-		var _a, _b;
-		let lastMoveUpdate = 0;
-		const THROTTLE_MS = 40;
-		const moveHandler = (e) => {
-			if (!enabled()) return;
-			if (e.buttons === 0) return;
-			const now = Date.now();
-			if (now - lastMoveUpdate < THROTTLE_MS) return;
-			lastMoveUpdate = now;
-			updateAllEdgeSides(canvas);
-		};
-		const upHandler = () => {
-			if (!enabled()) return;
-			updateAllEdgeSides(canvas);
-		};
-		(_a = canvas.wrapperEl) == null
-			? void 0
-			: _a.addEventListener('pointermove', moveHandler);
-		(_b = canvas.wrapperEl) == null
-			? void 0
-			: _b.addEventListener('pointerup', upHandler);
-		return () => {
-			var _a2, _b2;
-			(_a2 = canvas.wrapperEl) == null
-				? void 0
-				: _a2.removeEventListener('pointermove', moveHandler);
-			(_b2 = canvas.wrapperEl) == null
-				? void 0
-				: _b2.removeEventListener('pointerup', upHandler);
-		};
-	}
+  function getCenter(node) {
+    return {
+      cx: node.x + node.width / 2,
+      cy: node.y + node.height / 2
+    };
+  }
+  function computeEdgeSides(fromNode, toNode) {
+    const fromCenter = getCenter(fromNode);
+    const toCenter = getCenter(toNode);
+    const dx = toCenter.cx - fromCenter.cx;
+    if (dx >= 0) {
+      return { fromSide: "right", toSide: "left" };
+    } else {
+      return { fromSide: "left", toSide: "right" };
+    }
+  }
+  function updateAllEdgeSides(canvas, persist = true) {
+    let changed = false;
+    for (const edge of canvas.edges.values()) {
+      if (edge.__mindMapPreview)
+        continue;
+      const fromNode = edge.from.node;
+      const toNode = edge.to.node;
+      if (!fromNode || !toNode)
+        continue;
+      const { fromSide, toSide } = computeEdgeSides(fromNode, toNode);
+      if (edge.from.side !== fromSide || edge.to.side !== toSide) {
+        edge.from.side = fromSide;
+        edge.to.side = toSide;
+        changed = true;
+      }
+    }
+    if (changed) {
+      canvas.requestFrame();
+      if (persist)
+        canvas.requestSave();
+    }
+  }
+  function registerDragEndHandler(canvas, enabled = () => true) {
+    var _a, _b;
+    let lastMoveUpdate = 0;
+    const THROTTLE_MS = 40;
+    const moveHandler = (e) => {
+      if (!enabled())
+        return;
+      if (e.buttons === 0)
+        return;
+      const now = Date.now();
+      if (now - lastMoveUpdate < THROTTLE_MS)
+        return;
+      lastMoveUpdate = now;
+      updateAllEdgeSides(canvas);
+    };
+    const upHandler = () => {
+      if (!enabled())
+        return;
+      updateAllEdgeSides(canvas);
+    };
+    (_a = canvas.wrapperEl) == null ? void 0 : _a.addEventListener("pointermove", moveHandler);
+    (_b = canvas.wrapperEl) == null ? void 0 : _b.addEventListener("pointerup", upHandler);
+    return () => {
+      var _a2, _b2;
+      (_a2 = canvas.wrapperEl) == null ? void 0 : _a2.removeEventListener("pointermove", moveHandler);
+      (_b2 = canvas.wrapperEl) == null ? void 0 : _b2.removeEventListener("pointerup", upHandler);
+    };
+  }
 
-	// src/mindmap/layout-engine.ts
-	var DEFAULT_CONFIG = {
-		horizontalGap: 80,
-		verticalGap: 20,
-		nodeWidth: 300,
-		nodeHeight: 60,
-		animate: true
-	};
-	var LayoutEngine = class {
-		constructor(config) {
-			this.config = { ...DEFAULT_CONFIG, ...config };
-		}
-		/**
-		 * Recalculate and apply layout to all trees in the canvas.
-		 * Each root's children are partitioned into left/right groups and
-		 * laid out independently, centered around their own root.
-		 */
-		layout(canvas, options = {}) {
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			const nestedDirections = new Map();
-			for (const root of forest) {
-				const stack = [...root.children];
-				while (stack.length > 0) {
-					const node = stack.pop();
-					if (node.parent?.parent) {
-						const nodeCenter =
-							node.canvasNode.x + node.canvasNode.width / 2;
-						const parentCenter =
-							node.parent.canvasNode.x +
-							node.parent.canvasNode.width / 2;
-						nestedDirections.set(
-							node.canvasNode.id,
-							nodeCenter >= parentCenter ? 'right' : 'left'
-						);
-					}
-					stack.push(...node.children);
-				}
-			}
-			const layoutOptions = { ...options, nestedDirections };
-			const positions = /* @__PURE__ */ new Map();
-			for (const root of forest) {
-				const rootX = root.canvasNode.x;
-				const rootY = root.canvasNode.y;
-				positions.set(root.canvasNode.id, { x: rootX, y: rootY });
-				const { rightChildren, leftChildren } =
-					this.balanceRootChildren(
-						root,
-						Boolean(options.preserveRootSides)
-					);
-				this.layoutGroup(
-					root,
-					rightChildren,
-					'right',
-					rootX,
-					rootY,
-					positions,
-					layoutOptions
-				);
-				this.layoutGroup(
-					root,
-					leftChildren,
-					'left',
-					rootX,
-					rootY,
-					positions,
-					layoutOptions
-				);
-			}
-			this.applyPositions(canvas, positions);
-			updateAllEdgeSides(canvas);
-			const override = options.branchDirectionOverride;
-			if (override?.nodeId && override.direction) {
-				const branch = findTreeForNode(forest, override.nodeId);
-				if (branch)
-					this.enforceSubtreeDirection(
-						canvas,
-						branch,
-						override.direction
-					);
-			}
-		}
-		/**
-		 * Partially re-layout only the children of a specific parent node
-		 * (and their subtrees). The parent stays in place; everything
-		 * outside this parent's subtree is untouched.
-		 */
-		layoutChildren(
-			canvas,
-			parentNodeId,
-			directionOverride = null,
-			options = {}
-		) {
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			const parentTreeNode = findTreeForNode(forest, parentNodeId);
-			if (!parentTreeNode || parentTreeNode.children.length === 0) return;
-			const positions = /* @__PURE__ */ new Map();
-			if (!parentTreeNode.parent) {
-				const rootX = parentTreeNode.canvasNode.x;
-				const rootY = parentTreeNode.canvasNode.y;
-				if (directionOverride) {
-					propagateDirection(parentTreeNode, directionOverride);
-					this.layoutGroup(
-						parentTreeNode,
-						parentTreeNode.children,
-						directionOverride,
-						rootX,
-						rootY,
-						positions
-					);
-				} else {
-					const { rightChildren, leftChildren } =
-						this.balanceRootChildren(parentTreeNode);
-					this.layoutGroup(
-						parentTreeNode,
-						rightChildren,
-						'right',
-						rootX,
-						rootY,
-						positions
-					);
-					this.layoutGroup(
-						parentTreeNode,
-						leftChildren,
-						'left',
-						rootX,
-						rootY,
-						positions
-					);
-				}
-			} else {
-				const px = parentTreeNode.canvasNode.x;
-				const py = parentTreeNode.canvasNode.y;
-				const direction =
-					directionOverride ||
-					parentTreeNode.direction ||
-					(parentTreeNode.canvasNode.x >=
-					parentTreeNode.parent.canvasNode.x
-						? 'right'
-						: 'left');
-				propagateDirection(parentTreeNode, direction);
-				this.layoutGroup(
-					parentTreeNode,
-					parentTreeNode.children,
-					direction,
-					px,
-					py,
-					positions
-				);
-			}
-			this.applyPositions(canvas, positions, options);
-			updateAllEdgeSides(canvas, options.persist !== false);
-			if (directionOverride)
-				this.enforceSubtreeDirection(
-					canvas,
-					parentTreeNode,
-					directionOverride
-				);
-		}
-		/**
-		 * Attached branches have one non-negotiable orientation: their outgoing
-		 * edges leave opposite the branch root's incoming arrow. Apply this after
-		 * geometry-based edge updates so coordinates cannot contradict topology.
-		 */
-		enforceSubtreeDirection(canvas, root, direction) {
-			const fromSide = direction === 'left' ? 'left' : 'right';
-			const toSide = fromSide === 'left' ? 'right' : 'left';
-			const stack = [root];
-			let changed = false;
-			while (stack.length > 0) {
-				const parent = stack.pop();
-				for (const child of parent.children || []) {
-					for (const edge of canvas.edges.values()) {
-						if (
-							!edge.__mindMapPreview &&
-							edge.from?.node?.id === parent.canvasNode.id &&
-							edge.to?.node?.id === child.canvasNode.id
-						) {
-							if (
-								edge.from.side !== fromSide ||
-								edge.to.side !== toSide
-							) {
-								edge.from.side = fromSide;
-								edge.to.side = toSide;
-								changed = true;
-							}
-							break;
-						}
-					}
-					stack.push(child);
-				}
-			}
-			if (changed) canvas.requestFrame();
-		}
-		/**
-		 * Preserve the visible branch order (right top-to-bottom, then left
-		 * top-to-bottom) and choose the split that best balances rendered subtree
-		 * height. This permits unequal topic counts when a few tall branches occupy
-		 * the same visual height as several short ones.
-		 */
-		balanceRootChildren(root, preserveExistingSides = false) {
-			const rootCx = root.canvasNode.x + root.canvasNode.width / 2;
-			const byPosition = (a, b) =>
-				a.canvasNode.y - b.canvasNode.y ||
-				a.canvasNode.x - b.canvasNode.x ||
-				String(a.canvasNode.id).localeCompare(String(b.canvasNode.id));
-			const right = root.children
-				.filter(
-					(child) =>
-						child.canvasNode.x + child.canvasNode.width / 2 >=
-						rootCx
-				)
-				.sort(byPosition);
-			const left = root.children
-				.filter(
-					(child) =>
-						child.canvasNode.x + child.canvasNode.width / 2 < rootCx
-				)
-				.sort(byPosition);
-			if (preserveExistingSides) {
-				root.children = [...right, ...left];
-				for (const child of right) {
-					child.direction = 'right';
-					propagateDirection(child, 'right');
-				}
-				for (const child of left) {
-					child.direction = 'left';
-					propagateDirection(child, 'left');
-				}
-				return { rightChildren: right, leftChildren: left };
-			}
-			const ordered = [...right, ...left];
-			root.children = ordered;
-			if (ordered.length === 0)
-				return { rightChildren: [], leftChildren: [] };
-			const heights = ordered.map((child) =>
-				this.measureSubtreeHeight(child)
-			);
-			const heightPrefix = [0];
-			for (const height of heights)
-				heightPrefix.push(
-					heightPrefix[heightPrefix.length - 1] + height
-				);
-			const groupHeight = (start, end) => {
-				const count = end - start;
-				if (count <= 0) return 0;
-				return (
-					heightPrefix[end] -
-					heightPrefix[start] +
-					this.config.verticalGap * (count - 1)
-				);
-			};
-			let split =
-				ordered.length === 1 ? 1 : Math.ceil(ordered.length / 2);
-			if (ordered.length > 1) {
-				let best = null;
-				for (
-					let candidate = 1;
-					candidate < ordered.length;
-					candidate++
-				) {
-					const rightHeight = groupHeight(0, candidate);
-					const leftHeight = groupHeight(candidate, ordered.length);
-					const score = {
-						difference: Math.abs(rightHeight - leftHeight),
-						countDifference: Math.abs(
-							candidate - (ordered.length - candidate)
-						),
-						rightPreference: Math.abs(
-							candidate - Math.ceil(ordered.length / 2)
-						)
-					};
-					if (
-						!best ||
-						score.difference < best.score.difference ||
-						(score.difference === best.score.difference &&
-							(score.countDifference <
-								best.score.countDifference ||
-								(score.countDifference ===
-									best.score.countDifference &&
-									score.rightPreference <
-										best.score.rightPreference)))
-					) {
-						best = { candidate, score };
-					}
-				}
-				split = best.candidate;
-			}
-			const rightChildren = ordered.slice(0, split);
-			const leftChildren = ordered.slice(split);
-			for (const child of rightChildren) {
-				child.direction = 'right';
-				propagateDirection(child, 'right');
-			}
-			for (const child of leftChildren) {
-				child.direction = 'left';
-				propagateDirection(child, 'left');
-			}
-			return { rightChildren, leftChildren };
-		}
-		measureSubtreeHeight(node) {
-			const heights = /* @__PURE__ */ new Map();
-			const stack = [{ node, expanded: false }];
-			while (stack.length > 0) {
-				const current = stack.pop();
-				if (!current.expanded) {
-					stack.push({ node: current.node, expanded: true });
-					for (
-						let index = current.node.children.length - 1;
-						index >= 0;
-						index--
-					)
-						stack.push({
-							node: current.node.children[index],
-							expanded: false
-						});
-					continue;
-				}
-				const ownHeight =
-					current.node.canvasNode.height || this.config.nodeHeight;
-				let childHeight = 0;
-				for (
-					let index = 0;
-					index < current.node.children.length;
-					index++
-				) {
-					if (index > 0) childHeight += this.config.verticalGap;
-					childHeight +=
-						heights.get(current.node.children[index]) || 0;
-				}
-				heights.set(current.node, Math.max(ownHeight, childHeight));
-			}
-			return heights.get(node) || this.config.nodeHeight;
-		}
-		/**
-		 * Layout a group of same-side children, vertically centered around root.
-		 * Uses contour-based packing for compact spacing.
-		 */
-		layoutGroup(
-			root,
-			children,
-			direction,
-			rootX,
-			rootY,
-			positions,
-			options = {}
-		) {
-			if (children.length === 0) return;
-			const rootH = root.canvasNode.height || this.config.nodeHeight;
-			const rootW = root.canvasNode.width || this.config.nodeWidth;
-			const rootCenterY = rootY + rootH / 2;
-			const subtrees = [];
-			for (const child of children) {
-				const childDirection =
-					options.branchDirectionOverride?.nodeId ===
-					child.canvasNode.id
-						? options.branchDirectionOverride.direction
-						: direction;
-				const forceChildDirection =
-					options.branchDirectionOverride?.nodeId ===
-					child.canvasNode.id;
-				const childW = child.canvasNode.width || this.config.nodeWidth;
-				const childX =
-					childDirection === 'right'
-						? rootX + rootW + this.config.horizontalGap
-						: rootX - childW - this.config.horizontalGap;
-				const tempPositions = /* @__PURE__ */ new Map();
-				const layout = this.layoutSubtree(
-					child,
-					childX,
-					0,
-					0,
-					childDirection,
-					tempPositions,
-					options,
-					forceChildDirection
-				);
-				subtrees.push({
-					positions: tempPositions,
-					contour: layout.contour,
-					rectangles: layout.rectangles
-				});
-			}
-			const { yOffsets, combinedContour } = this.packSubtrees(subtrees);
-			const contourExtents = Array.from(combinedContour.values());
-			const blockTop = Math.min(
-				...contourExtents.map((extent) => extent.top)
-			);
-			const blockBottom = Math.max(
-				...contourExtents.map((extent) => extent.bottom)
-			);
-			const globalShift = rootCenterY - (blockTop + blockBottom) / 2;
-			for (let i = 0; i < subtrees.length; i++) {
-				const yShift = yOffsets[i] + globalShift;
-				for (const [id, pos] of subtrees[i].positions) {
-					positions.set(id, { x: pos.x, y: pos.y + yShift });
-				}
-			}
-		}
-		/**
-		 * Recursively lay out a node and all its descendants.
-		 * Returns the contour (vertical extent per depth column).
-		 */
-		layoutSubtree(
-			node,
-			nodeX,
-			nodeY,
-			depth,
-			direction,
-			positions,
-			options = {},
-			forcedDirection = false
-		) {
-			const nodeH = node.canvasNode.height || this.config.nodeHeight;
-			const nodeW = node.canvasNode.width || this.config.nodeWidth;
-			positions.set(node.canvasNode.id, { x: nodeX, y: nodeY });
-			const contour = /* @__PURE__ */ new Map();
-			contour.set(depth, { top: nodeY, bottom: nodeY + nodeH });
-			const ownRectangle = {
-				left: nodeX,
-				right: nodeX + nodeW,
-				top: nodeY,
-				bottom: nodeY + nodeH
-			};
-			if (node.children.length === 0)
-				return { contour, rectangles: [ownRectangle] };
-			const childSubtrees = [];
-			for (const child of node.children) {
-				const isDirectionOverride =
-					options.branchDirectionOverride?.nodeId ===
-					child.canvasNode.id;
-				const childDirection = forcedDirection
-					? direction
-					: isDirectionOverride
-						? options.branchDirectionOverride.direction
-						: options.nestedDirections?.get(child.canvasNode.id) ||
-							direction;
-				const childW = child.canvasNode.width || this.config.nodeWidth;
-				const childX =
-					childDirection === 'right'
-						? nodeX + nodeW + this.config.horizontalGap
-						: nodeX - childW - this.config.horizontalGap;
-				const tempPositions = /* @__PURE__ */ new Map();
-				const childLayout = this.layoutSubtree(
-					child,
-					childX,
-					0,
-					depth + 1,
-					childDirection,
-					tempPositions,
-					options,
-					forcedDirection || isDirectionOverride
-				);
-				childSubtrees.push({
-					positions: tempPositions,
-					contour: childLayout.contour,
-					rectangles: childLayout.rectangles
-				});
-			}
-			const { yOffsets, combinedContour, combinedRectangles } =
-				this.packSubtrees(childSubtrees);
-			const contourExtents = Array.from(combinedContour.values());
-			const blockTop = Math.min(
-				...contourExtents.map((extent) => extent.top)
-			);
-			const blockBottom = Math.max(
-				...contourExtents.map((extent) => extent.bottom)
-			);
-			const centerShift =
-				nodeY + nodeH / 2 - (blockTop + blockBottom) / 2;
-			for (let i = 0; i < childSubtrees.length; i++) {
-				const yShift = yOffsets[i] + centerShift;
-				for (const [id, pos] of childSubtrees[i].positions) {
-					positions.set(id, { x: pos.x, y: pos.y + yShift });
-				}
-			}
-			for (const [d, ext] of combinedContour) {
-				const shifted = {
-					top: ext.top + centerShift,
-					bottom: ext.bottom + centerShift
-				};
-				const existing = contour.get(d);
-				if (existing) {
-					if (shifted.top < existing.top) existing.top = shifted.top;
-					if (shifted.bottom > existing.bottom)
-						existing.bottom = shifted.bottom;
-				} else {
-					contour.set(d, { ...shifted });
-				}
-			}
-			const rectangles = [ownRectangle];
-			for (const rectangle of combinedRectangles) {
-				rectangles.push({
-					left: rectangle.left,
-					right: rectangle.right,
-					top: rectangle.top + centerShift,
-					bottom: rectangle.bottom + centerShift
-				});
-			}
-			return { contour, rectangles };
-		}
-		/**
-		 * Pack an array of subtrees vertically using contour comparison.
-		 * First subtree stays at y=0; each subsequent one is shifted down
-		 * just enough to clear the combined contour at all shared depths.
-		 */
-		packSubtrees(subtrees) {
-			if (subtrees.length === 0) {
-				return {
-					yOffsets: [],
-					combinedContour: /* @__PURE__ */ new Map(),
-					combinedRectangles: []
-				};
-			}
-			const yOffsets = [0];
-			const combinedContour = /* @__PURE__ */ new Map();
-			const combinedRectangles = (subtrees[0].rectangles || []).map(
-				(rectangle) => ({ ...rectangle })
-			);
-			for (const [d, ext] of subtrees[0].contour) {
-				combinedContour.set(d, { top: ext.top, bottom: ext.bottom });
-			}
-			for (let i = 1; i < subtrees.length; i++) {
-				const sub = subtrees[i];
-				let shift = 0;
-				const horizontalClearance = Math.max(
-					8,
-					this.config.verticalGap
-				);
-				for (const rectangle of sub.rectangles || []) {
-					for (const previous of combinedRectangles) {
-						const overlapsHorizontally =
-							rectangle.left <
-								previous.right + horizontalClearance &&
-							rectangle.right >
-								previous.left - horizontalClearance;
-						if (!overlapsHorizontally) continue;
-						const needed =
-							previous.bottom +
-							this.config.verticalGap -
-							rectangle.top;
-						if (needed > shift) shift = needed;
-					}
-				}
-				yOffsets.push(shift);
-				for (const [d, ext] of sub.contour) {
-					const shifted = {
-						top: ext.top + shift,
-						bottom: ext.bottom + shift
-					};
-					const existing = combinedContour.get(d);
-					if (existing) {
-						if (shifted.top < existing.top)
-							existing.top = shifted.top;
-						if (shifted.bottom > existing.bottom)
-							existing.bottom = shifted.bottom;
-					} else {
-						combinedContour.set(d, { ...shifted });
-					}
-				}
-				for (const rectangle of sub.rectangles || []) {
-					combinedRectangles.push({
-						left: rectangle.left,
-						right: rectangle.right,
-						top: rectangle.top + shift,
-						bottom: rectangle.bottom + shift
-					});
-				}
-			}
-			return { yOffsets, combinedContour, combinedRectangles };
-		}
-		/**
-		 * Arrange multiple trees within a group using flow-based packing.
-		 * Lays out each tree internally first, then packs them into rows
-		 * targeting a roughly square overall shape.
-		 */
-		layoutForest(canvas, groupId) {
-			const group = canvas.nodes.get(groupId);
-			if (!group) return;
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			const roots = forest.filter((root) => {
-				const cx = root.canvasNode.x + root.canvasNode.width / 2;
-				const cy = root.canvasNode.y + root.canvasNode.height / 2;
-				return (
-					cx >= group.x &&
-					cx <= group.x + group.width &&
-					cy >= group.y &&
-					cy <= group.y + group.height
-				);
-			});
-			for (const root of roots) {
-				this.layoutChildren(canvas, root.canvasNode.id);
-			}
-			if (roots.length <= 1) return;
-			const treeBboxes = roots.map((root) => ({
-				root,
-				bbox: this.getTreeBbox(root, canvas)
-			}));
-			treeBboxes.sort((a, b) => {
-				const dy = a.root.canvasNode.y - b.root.canvasNode.y;
-				if (Math.abs(dy) > 50) return dy;
-				return a.root.canvasNode.x - b.root.canvasNode.x;
-			});
-			const gap = this.config.horizontalGap * 1.5;
-			const vGap = this.config.verticalGap * 3;
-			const treeSizes = treeBboxes.map((t) => ({
-				w: t.bbox.maxX - t.bbox.minX,
-				h: t.bbox.maxY - t.bbox.minY
-			}));
-			const treesPerRow = Math.ceil(Math.sqrt(roots.length));
-			const avgWidth =
-				treeSizes.reduce((sum, s) => sum + s.w, 0) / treeSizes.length;
-			const targetWidth = treesPerRow * (avgWidth + gap);
-			const rows = [];
-			let currentRow = [];
-			let currentRowWidth = 0;
-			for (let i = 0; i < treeBboxes.length; i++) {
-				const treeW =
-					treeSizes[i].w + (currentRow.length > 0 ? gap : 0);
-				if (
-					currentRow.length > 0 &&
-					currentRowWidth + treeW > targetWidth
-				) {
-					rows.push(currentRow);
-					currentRow = [i];
-					currentRowWidth = treeSizes[i].w;
-				} else {
-					currentRow.push(i);
-					currentRowWidth += treeW;
-				}
-			}
-			if (currentRow.length > 0) rows.push(currentRow);
-			const PADDING = 20;
-			const originX = group.x + PADDING;
-			const originY = group.y + PADDING;
-			let cursorY = originY;
-			const positions = /* @__PURE__ */ new Map();
-			for (const row of rows) {
-				const rowHeight = Math.max(...row.map((i) => treeSizes[i].h));
-				let cursorX = originX;
-				for (const i of row) {
-					const t = treeBboxes[i];
-					const dx = cursorX - t.bbox.minX;
-					const dy = cursorY - t.bbox.minY;
-					const allNodes = [t.root, ...getDescendants(t.root)];
-					for (const treeNode of allNodes) {
-						const n = treeNode.canvasNode;
-						positions.set(n.id, { x: n.x + dx, y: n.y + dy });
-					}
-					cursorX += treeSizes[i].w + gap;
-				}
-				cursorY += rowHeight + vGap;
-			}
-			this.applyPositions(canvas, positions);
-			updateAllEdgeSides(canvas);
-			let gMinX = Infinity,
-				gMinY = Infinity,
-				gMaxX = -Infinity,
-				gMaxY = -Infinity;
-			for (const [nodeId, pos] of positions) {
-				const node = canvas.nodes.get(nodeId);
-				if (!node) continue;
-				gMinX = Math.min(gMinX, pos.x);
-				gMinY = Math.min(gMinY, pos.y);
-				gMaxX = Math.max(gMaxX, pos.x + node.width);
-				gMaxY = Math.max(gMaxY, pos.y + node.height);
-			}
-			group.moveAndResize({
-				x: gMinX - PADDING,
-				y: gMinY - PADDING,
-				width: gMaxX - gMinX + PADDING * 2,
-				height: gMaxY - gMinY + PADDING * 2
-			});
-			canvas.requestSave();
-		}
-		getTreeBbox(root, canvas) {
-			const allNodes = [root, ...getDescendants(root)];
-			let minX = Infinity,
-				minY = Infinity,
-				maxX = -Infinity,
-				maxY = -Infinity;
-			for (const treeNode of allNodes) {
-				const n = treeNode.canvasNode;
-				minX = Math.min(minX, n.x);
-				minY = Math.min(minY, n.y);
-				maxX = Math.max(maxX, n.x + n.width);
-				maxY = Math.max(maxY, n.y + n.height);
-			}
-			return { minX, minY, maxX, maxY };
-		}
-		/**
-		 * Apply calculated positions to canvas nodes.
-		 */
-		applyPositions(canvas, positions, options = {}) {
-			var _a;
-			const animate = options.animate ?? this.config.animate;
-			const persist = options.persist !== false;
-			for (const [nodeId, pos] of positions) {
-				const node = canvas.nodes.get(nodeId);
-				if (!node) continue;
-				if (animate) {
-					(_a = node.nodeEl) == null
-						? void 0
-						: _a.addClass('mindmap-animating');
-				}
-				node.moveTo({ x: pos.x, y: pos.y });
-			}
-			if (persist) canvas.requestSave();
-			canvas.requestFrame();
-			if (animate) {
-				setTimeout(() => {
-					var _a2;
-					for (const node of canvas.nodes.values()) {
-						(_a2 = node.nodeEl) == null
-							? void 0
-							: _a2.removeClass('mindmap-animating');
-					}
-				}, 350);
-			}
-		}
-	};
+  // src/mindmap/layout-engine.ts
+  var DEFAULT_CONFIG = {
+    horizontalGap: 80,
+    verticalGap: 20,
+    nodeWidth: 300,
+    nodeHeight: 60,
+    animate: true
+  };
+  var LayoutEngine = class {
+    constructor(config) {
+      this.config = { ...DEFAULT_CONFIG, ...config };
+    }
+    /**
+     * Recalculate and apply layout to all trees in the canvas.
+     * Each root's children are partitioned into left/right groups and
+     * laid out independently, centered around their own root.
+     */
+    layout(canvas, options = {}) {
+      const forest = buildForest(canvas);
+      if (forest.length === 0)
+        return;
+      const nestedDirections = new Map();
+      for (const root of forest) {
+        const stack = [...root.children];
+        while (stack.length > 0) {
+          const node = stack.pop();
+          if (node.parent?.parent) {
+            const nodeCenter = node.canvasNode.x + node.canvasNode.width / 2;
+            const parentCenter = node.parent.canvasNode.x + node.parent.canvasNode.width / 2;
+            nestedDirections.set(node.canvasNode.id, nodeCenter >= parentCenter ? "right" : "left");
+          }
+          stack.push(...node.children);
+        }
+      }
+      const layoutOptions = { ...options, nestedDirections };
+      const positions = /* @__PURE__ */ new Map();
+      for (const root of forest) {
+        const rootX = root.canvasNode.x;
+        const rootY = root.canvasNode.y;
+        positions.set(root.canvasNode.id, { x: rootX, y: rootY });
+        const { rightChildren, leftChildren } = this.balanceRootChildren(
+          root,
+          Boolean(options.preserveRootSides)
+        );
+        this.layoutGroup(root, rightChildren, "right", rootX, rootY, positions, layoutOptions);
+        this.layoutGroup(root, leftChildren, "left", rootX, rootY, positions, layoutOptions);
+      }
+      this.applyPositions(canvas, positions);
+      updateAllEdgeSides(canvas);
+      const override = options.branchDirectionOverride;
+      if (override?.nodeId && override.direction) {
+        const branch = findTreeForNode(forest, override.nodeId);
+        if (branch)
+          this.enforceSubtreeDirection(canvas, branch, override.direction);
+      }
+    }
+    /**
+     * Partially re-layout only the children of a specific parent node
+     * (and their subtrees). The parent stays in place; everything
+     * outside this parent's subtree is untouched.
+     */
+    layoutChildren(canvas, parentNodeId, directionOverride = null, options = {}) {
+      const forest = buildForest(canvas);
+      if (forest.length === 0)
+        return;
+      const parentTreeNode = findTreeForNode(forest, parentNodeId);
+      if (!parentTreeNode || parentTreeNode.children.length === 0)
+        return;
+      const positions = /* @__PURE__ */ new Map();
+      if (!parentTreeNode.parent) {
+        const rootX = parentTreeNode.canvasNode.x;
+        const rootY = parentTreeNode.canvasNode.y;
+        if (directionOverride) {
+          propagateDirection(parentTreeNode, directionOverride);
+          this.layoutGroup(parentTreeNode, parentTreeNode.children, directionOverride, rootX, rootY, positions);
+        } else {
+          const { rightChildren, leftChildren } = this.balanceRootChildren(parentTreeNode);
+          this.layoutGroup(parentTreeNode, rightChildren, "right", rootX, rootY, positions);
+          this.layoutGroup(parentTreeNode, leftChildren, "left", rootX, rootY, positions);
+        }
+      } else {
+        const px = parentTreeNode.canvasNode.x;
+        const py = parentTreeNode.canvasNode.y;
+        const direction = directionOverride || parentTreeNode.direction || (parentTreeNode.canvasNode.x >= parentTreeNode.parent.canvasNode.x ? "right" : "left");
+        propagateDirection(parentTreeNode, direction);
+        this.layoutGroup(parentTreeNode, parentTreeNode.children, direction, px, py, positions);
+      }
+      this.applyPositions(canvas, positions, options);
+      updateAllEdgeSides(canvas, options.persist !== false);
+      if (directionOverride)
+        this.enforceSubtreeDirection(canvas, parentTreeNode, directionOverride);
+    }
+    /**
+     * Attached branches have one non-negotiable orientation: their outgoing
+     * edges leave opposite the branch root's incoming arrow. Apply this after
+     * geometry-based edge updates so coordinates cannot contradict topology.
+     */
+    enforceSubtreeDirection(canvas, root, direction) {
+      const fromSide = direction === "left" ? "left" : "right";
+      const toSide = fromSide === "left" ? "right" : "left";
+      const stack = [root];
+      let changed = false;
+      while (stack.length > 0) {
+        const parent = stack.pop();
+        for (const child of parent.children || []) {
+          for (const edge of canvas.edges.values()) {
+            if (
+              !edge.__mindMapPreview &&
+              edge.from?.node?.id === parent.canvasNode.id &&
+              edge.to?.node?.id === child.canvasNode.id
+            ) {
+              if (edge.from.side !== fromSide || edge.to.side !== toSide) {
+                edge.from.side = fromSide;
+                edge.to.side = toSide;
+                changed = true;
+              }
+              break;
+            }
+          }
+          stack.push(child);
+        }
+      }
+      if (changed)
+        canvas.requestFrame();
+    }
+    /**
+     * Preserve the visible branch order (right top-to-bottom, then left
+     * top-to-bottom) and choose the split that best balances rendered subtree
+     * height. This permits unequal topic counts when a few tall branches occupy
+     * the same visual height as several short ones.
+     */
+    balanceRootChildren(root, preserveExistingSides = false) {
+      const rootCx = root.canvasNode.x + root.canvasNode.width / 2;
+      const byPosition = (a, b) => a.canvasNode.y - b.canvasNode.y || a.canvasNode.x - b.canvasNode.x || String(a.canvasNode.id).localeCompare(String(b.canvasNode.id));
+      const right = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 >= rootCx).sort(byPosition);
+      const left = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 < rootCx).sort(byPosition);
+      if (preserveExistingSides) {
+        root.children = [...right, ...left];
+        for (const child of right) {
+          child.direction = "right";
+          propagateDirection(child, "right");
+        }
+        for (const child of left) {
+          child.direction = "left";
+          propagateDirection(child, "left");
+        }
+        return { rightChildren: right, leftChildren: left };
+      }
+      const ordered = [...right, ...left];
+      root.children = ordered;
+      if (ordered.length === 0)
+        return { rightChildren: [], leftChildren: [] };
+      const heights = ordered.map((child) => this.measureSubtreeHeight(child));
+      const heightPrefix = [0];
+      for (const height of heights)
+        heightPrefix.push(heightPrefix[heightPrefix.length - 1] + height);
+      const groupHeight = (start, end) => {
+        const count = end - start;
+        if (count <= 0)
+          return 0;
+        return heightPrefix[end] - heightPrefix[start] + this.config.verticalGap * (count - 1);
+      };
+      let split = ordered.length === 1 ? 1 : Math.ceil(ordered.length / 2);
+      if (ordered.length > 1) {
+        let best = null;
+        for (let candidate = 1; candidate < ordered.length; candidate++) {
+          const rightHeight = groupHeight(0, candidate);
+          const leftHeight = groupHeight(candidate, ordered.length);
+          const score = {
+            difference: Math.abs(rightHeight - leftHeight),
+            countDifference: Math.abs(candidate - (ordered.length - candidate)),
+            rightPreference: Math.abs(candidate - Math.ceil(ordered.length / 2))
+          };
+          if (!best || score.difference < best.score.difference || score.difference === best.score.difference && (score.countDifference < best.score.countDifference || score.countDifference === best.score.countDifference && score.rightPreference < best.score.rightPreference)) {
+            best = { candidate, score };
+          }
+        }
+        split = best.candidate;
+      }
+      const rightChildren = ordered.slice(0, split);
+      const leftChildren = ordered.slice(split);
+      for (const child of rightChildren) {
+        child.direction = "right";
+        propagateDirection(child, "right");
+      }
+      for (const child of leftChildren) {
+        child.direction = "left";
+        propagateDirection(child, "left");
+      }
+      return { rightChildren, leftChildren };
+    }
+    measureSubtreeHeight(node) {
+      const heights = /* @__PURE__ */ new Map();
+      const stack = [{ node, expanded: false }];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current.expanded) {
+          stack.push({ node: current.node, expanded: true });
+          for (let index = current.node.children.length - 1; index >= 0; index--)
+            stack.push({ node: current.node.children[index], expanded: false });
+          continue;
+        }
+        const ownHeight = current.node.canvasNode.height || this.config.nodeHeight;
+        let childHeight = 0;
+        for (let index = 0; index < current.node.children.length; index++) {
+          if (index > 0)
+            childHeight += this.config.verticalGap;
+          childHeight += heights.get(current.node.children[index]) || 0;
+        }
+        heights.set(current.node, Math.max(ownHeight, childHeight));
+      }
+      return heights.get(node) || this.config.nodeHeight;
+    }
+    /**
+     * Layout a group of same-side children, vertically centered around root.
+     * Uses contour-based packing for compact spacing.
+     */
+    layoutGroup(root, children, direction, rootX, rootY, positions, options = {}) {
+      if (children.length === 0)
+        return;
+      const rootH = root.canvasNode.height || this.config.nodeHeight;
+      const rootW = root.canvasNode.width || this.config.nodeWidth;
+      const rootCenterY = rootY + rootH / 2;
+      const subtrees = [];
+      for (const child of children) {
+        const childDirection = options.branchDirectionOverride?.nodeId === child.canvasNode.id
+          ? options.branchDirectionOverride.direction
+          : direction;
+        const forceChildDirection = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
+        const childW = child.canvasNode.width || this.config.nodeWidth;
+        const childX = childDirection === "right" ? rootX + rootW + this.config.horizontalGap : rootX - childW - this.config.horizontalGap;
+        const tempPositions = /* @__PURE__ */ new Map();
+        const layout = this.layoutSubtree(
+          child,
+          childX,
+          0,
+          0,
+          childDirection,
+          tempPositions,
+          options,
+          forceChildDirection
+        );
+        subtrees.push({ positions: tempPositions, contour: layout.contour, rectangles: layout.rectangles });
+      }
+      const { yOffsets, combinedContour } = this.packSubtrees(subtrees);
+      const contourExtents = Array.from(combinedContour.values());
+      const blockTop = Math.min(...contourExtents.map((extent) => extent.top));
+      const blockBottom = Math.max(...contourExtents.map((extent) => extent.bottom));
+      const globalShift = rootCenterY - (blockTop + blockBottom) / 2;
+      for (let i = 0; i < subtrees.length; i++) {
+        const yShift = yOffsets[i] + globalShift;
+        for (const [id, pos] of subtrees[i].positions) {
+          positions.set(id, { x: pos.x, y: pos.y + yShift });
+        }
+      }
+    }
+    /**
+     * Recursively lay out a node and all its descendants.
+     * Returns the contour (vertical extent per depth column).
+     */
+    layoutSubtree(node, nodeX, nodeY, depth, direction, positions, options = {}, forcedDirection = false) {
+      const nodeH = node.canvasNode.height || this.config.nodeHeight;
+      const nodeW = node.canvasNode.width || this.config.nodeWidth;
+      positions.set(node.canvasNode.id, { x: nodeX, y: nodeY });
+      const contour = /* @__PURE__ */ new Map();
+      contour.set(depth, { top: nodeY, bottom: nodeY + nodeH });
+      const ownRectangle = { left: nodeX, right: nodeX + nodeW, top: nodeY, bottom: nodeY + nodeH };
+      if (node.children.length === 0)
+        return { contour, rectangles: [ownRectangle] };
+      const childSubtrees = [];
+      for (const child of node.children) {
+        const isDirectionOverride = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
+        const childDirection = forcedDirection
+          ? direction
+          : isDirectionOverride
+            ? options.branchDirectionOverride.direction
+            : options.nestedDirections?.get(child.canvasNode.id) || direction;
+        const childW = child.canvasNode.width || this.config.nodeWidth;
+        const childX = childDirection === "right" ? nodeX + nodeW + this.config.horizontalGap : nodeX - childW - this.config.horizontalGap;
+        const tempPositions = /* @__PURE__ */ new Map();
+        const childLayout = this.layoutSubtree(
+          child,
+          childX,
+          0,
+          depth + 1,
+          childDirection,
+          tempPositions,
+          options,
+          forcedDirection || isDirectionOverride
+        );
+        childSubtrees.push({ positions: tempPositions, contour: childLayout.contour, rectangles: childLayout.rectangles });
+      }
+      const { yOffsets, combinedContour, combinedRectangles } = this.packSubtrees(childSubtrees);
+      const contourExtents = Array.from(combinedContour.values());
+      const blockTop = Math.min(...contourExtents.map((extent) => extent.top));
+      const blockBottom = Math.max(...contourExtents.map((extent) => extent.bottom));
+      const centerShift = nodeY + nodeH / 2 - (blockTop + blockBottom) / 2;
+      for (let i = 0; i < childSubtrees.length; i++) {
+        const yShift = yOffsets[i] + centerShift;
+        for (const [id, pos] of childSubtrees[i].positions) {
+          positions.set(id, { x: pos.x, y: pos.y + yShift });
+        }
+      }
+      for (const [d, ext] of combinedContour) {
+        const shifted = { top: ext.top + centerShift, bottom: ext.bottom + centerShift };
+        const existing = contour.get(d);
+        if (existing) {
+          if (shifted.top < existing.top)
+            existing.top = shifted.top;
+          if (shifted.bottom > existing.bottom)
+            existing.bottom = shifted.bottom;
+        } else {
+          contour.set(d, { ...shifted });
+        }
+      }
+      const rectangles = [ownRectangle];
+      for (const rectangle of combinedRectangles) {
+        rectangles.push({
+          left: rectangle.left,
+          right: rectangle.right,
+          top: rectangle.top + centerShift,
+          bottom: rectangle.bottom + centerShift
+        });
+      }
+      return { contour, rectangles };
+    }
+    /**
+     * Pack an array of subtrees vertically using contour comparison.
+     * First subtree stays at y=0; each subsequent one is shifted down
+     * just enough to clear the combined contour at all shared depths.
+     */
+    packSubtrees(subtrees) {
+      if (subtrees.length === 0) {
+        return { yOffsets: [], combinedContour: /* @__PURE__ */ new Map(), combinedRectangles: [] };
+      }
+      const yOffsets = [0];
+      const combinedContour = /* @__PURE__ */ new Map();
+      const combinedRectangles = (subtrees[0].rectangles || []).map((rectangle) => ({ ...rectangle }));
+      for (const [d, ext] of subtrees[0].contour) {
+        combinedContour.set(d, { top: ext.top, bottom: ext.bottom });
+      }
+      for (let i = 1; i < subtrees.length; i++) {
+        const sub = subtrees[i];
+        let shift = 0;
+        const horizontalClearance = Math.max(8, this.config.verticalGap);
+        for (const rectangle of sub.rectangles || []) {
+          for (const previous of combinedRectangles) {
+            const overlapsHorizontally = rectangle.left < previous.right + horizontalClearance
+              && rectangle.right > previous.left - horizontalClearance;
+            if (!overlapsHorizontally)
+              continue;
+            const needed = previous.bottom + this.config.verticalGap - rectangle.top;
+            if (needed > shift)
+              shift = needed;
+          }
+        }
+        yOffsets.push(shift);
+        for (const [d, ext] of sub.contour) {
+          const shifted = { top: ext.top + shift, bottom: ext.bottom + shift };
+          const existing = combinedContour.get(d);
+          if (existing) {
+            if (shifted.top < existing.top)
+              existing.top = shifted.top;
+            if (shifted.bottom > existing.bottom)
+              existing.bottom = shifted.bottom;
+          } else {
+            combinedContour.set(d, { ...shifted });
+          }
+        }
+        for (const rectangle of sub.rectangles || []) {
+          combinedRectangles.push({
+            left: rectangle.left,
+            right: rectangle.right,
+            top: rectangle.top + shift,
+            bottom: rectangle.bottom + shift
+          });
+        }
+      }
+      return { yOffsets, combinedContour, combinedRectangles };
+    }
+    /**
+     * Arrange multiple trees within a group using flow-based packing.
+     * Lays out each tree internally first, then packs them into rows
+     * targeting a roughly square overall shape.
+     */
+    layoutForest(canvas, groupId) {
+      const group = canvas.nodes.get(groupId);
+      if (!group)
+        return;
+      const forest = buildForest(canvas);
+      if (forest.length === 0)
+        return;
+      const roots = forest.filter((root) => {
+        const cx = root.canvasNode.x + root.canvasNode.width / 2;
+        const cy = root.canvasNode.y + root.canvasNode.height / 2;
+        return cx >= group.x && cx <= group.x + group.width && cy >= group.y && cy <= group.y + group.height;
+      });
+      for (const root of roots) {
+        this.layoutChildren(canvas, root.canvasNode.id);
+      }
+      if (roots.length <= 1)
+        return;
+      const treeBboxes = roots.map((root) => ({
+        root,
+        bbox: this.getTreeBbox(root, canvas)
+      }));
+      treeBboxes.sort((a, b) => {
+        const dy = a.root.canvasNode.y - b.root.canvasNode.y;
+        if (Math.abs(dy) > 50)
+          return dy;
+        return a.root.canvasNode.x - b.root.canvasNode.x;
+      });
+      const gap = this.config.horizontalGap * 1.5;
+      const vGap = this.config.verticalGap * 3;
+      const treeSizes = treeBboxes.map((t) => ({
+        w: t.bbox.maxX - t.bbox.minX,
+        h: t.bbox.maxY - t.bbox.minY
+      }));
+      const treesPerRow = Math.ceil(Math.sqrt(roots.length));
+      const avgWidth = treeSizes.reduce((sum, s) => sum + s.w, 0) / treeSizes.length;
+      const targetWidth = treesPerRow * (avgWidth + gap);
+      const rows = [];
+      let currentRow = [];
+      let currentRowWidth = 0;
+      for (let i = 0; i < treeBboxes.length; i++) {
+        const treeW = treeSizes[i].w + (currentRow.length > 0 ? gap : 0);
+        if (currentRow.length > 0 && currentRowWidth + treeW > targetWidth) {
+          rows.push(currentRow);
+          currentRow = [i];
+          currentRowWidth = treeSizes[i].w;
+        } else {
+          currentRow.push(i);
+          currentRowWidth += treeW;
+        }
+      }
+      if (currentRow.length > 0)
+        rows.push(currentRow);
+      const PADDING = 20;
+      const originX = group.x + PADDING;
+      const originY = group.y + PADDING;
+      let cursorY = originY;
+      const positions = /* @__PURE__ */ new Map();
+      for (const row of rows) {
+        const rowHeight = Math.max(...row.map((i) => treeSizes[i].h));
+        let cursorX = originX;
+        for (const i of row) {
+          const t = treeBboxes[i];
+          const dx = cursorX - t.bbox.minX;
+          const dy = cursorY - t.bbox.minY;
+          const allNodes = [t.root, ...getDescendants(t.root)];
+          for (const treeNode of allNodes) {
+            const n = treeNode.canvasNode;
+            positions.set(n.id, { x: n.x + dx, y: n.y + dy });
+          }
+          cursorX += treeSizes[i].w + gap;
+        }
+        cursorY += rowHeight + vGap;
+      }
+      this.applyPositions(canvas, positions);
+      updateAllEdgeSides(canvas);
+      let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
+      for (const [nodeId, pos] of positions) {
+        const node = canvas.nodes.get(nodeId);
+        if (!node)
+          continue;
+        gMinX = Math.min(gMinX, pos.x);
+        gMinY = Math.min(gMinY, pos.y);
+        gMaxX = Math.max(gMaxX, pos.x + node.width);
+        gMaxY = Math.max(gMaxY, pos.y + node.height);
+      }
+      group.moveAndResize({
+        x: gMinX - PADDING,
+        y: gMinY - PADDING,
+        width: gMaxX - gMinX + PADDING * 2,
+        height: gMaxY - gMinY + PADDING * 2
+      });
+      canvas.requestSave();
+    }
+    getTreeBbox(root, canvas) {
+      const allNodes = [root, ...getDescendants(root)];
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const treeNode of allNodes) {
+        const n = treeNode.canvasNode;
+        minX = Math.min(minX, n.x);
+        minY = Math.min(minY, n.y);
+        maxX = Math.max(maxX, n.x + n.width);
+        maxY = Math.max(maxY, n.y + n.height);
+      }
+      return { minX, minY, maxX, maxY };
+    }
+    /**
+     * Apply calculated positions to canvas nodes.
+     */
+    applyPositions(canvas, positions, options = {}) {
+      var _a;
+      const animate = options.animate ?? this.config.animate;
+      const persist = options.persist !== false;
+      for (const [nodeId, pos] of positions) {
+        const node = canvas.nodes.get(nodeId);
+        if (!node)
+          continue;
+        if (animate) {
+          (_a = node.nodeEl) == null ? void 0 : _a.addClass("mindmap-animating");
+        }
+        node.moveTo({ x: pos.x, y: pos.y });
+      }
+      if (persist)
+        canvas.requestSave();
+      canvas.requestFrame();
+      if (animate) {
+        setTimeout(() => {
+          var _a2;
+          for (const node of canvas.nodes.values()) {
+            (_a2 = node.nodeEl) == null ? void 0 : _a2.removeClass("mindmap-animating");
+          }
+        }, 350);
+      }
+    }
+  };
 
-	// src/mindmap/branch-colors.ts
-	var DEFAULT_PALETTE = ['1', '2', '3', '4', '5', '6'];
-	var BranchColors = class {
-		constructor(canvasApi, palette) {
-			this.canvasApi = canvasApi;
-			this.palette = palette != null ? palette : DEFAULT_PALETTE;
-		}
-		/**
-		 * Apply auto-coloring to all branches.
-		 */
-		applyColors(canvas) {
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			for (const root of forest) {
-				root.children.forEach((child, index) => {
-					const color = this.palette[index % this.palette.length];
-					this.colorBranch(canvas, child, color);
-				});
-			}
-			canvas.requestSave();
-			canvas.requestFrame();
-		}
-		/**
-		 * Color a single branch (node + all descendants + edges).
-		 */
-		colorBranch(canvas, node, color) {
-			const stack = [node];
-			while (stack.length > 0) {
-				const current = stack.pop();
-				current.canvasNode.setColor(color);
-				const incomingEdge = this.findIncomingEdge(
-					canvas,
-					current.canvasNode
-				);
-				if (incomingEdge) incomingEdge.setColor(color);
-				stack.push(...current.children);
-			}
-		}
-		/**
-		 * Find the edge pointing TO this node.
-		 */
-		findIncomingEdge(canvas, node) {
-			var _a;
-			const edges = this.canvasApi.getConnectedEdges(canvas, node);
-			return (_a = edges.find((e) => e.to.node.id === node.id)) != null
-				? _a
-				: null;
-		}
-	};
+  // src/mindmap/branch-colors.ts
+  var DEFAULT_PALETTE = ["1", "2", "3", "4", "5", "6"];
+  var BranchColors = class {
+    constructor(canvasApi, palette) {
+      this.canvasApi = canvasApi;
+      this.palette = palette != null ? palette : DEFAULT_PALETTE;
+    }
+    /**
+     * Apply auto-coloring to all branches.
+     */
+    applyColors(canvas) {
+      const forest = buildForest(canvas);
+      if (forest.length === 0)
+        return;
+      for (const root of forest) {
+        root.children.forEach((child, index) => {
+          const color = this.palette[index % this.palette.length];
+          this.colorBranch(canvas, child, color);
+        });
+      }
+      canvas.requestSave();
+      canvas.requestFrame();
+    }
+    /**
+     * Color a single branch (node + all descendants + edges).
+     */
+    colorBranch(canvas, node, color) {
+      const stack = [node];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        current.canvasNode.setColor(color);
+        const incomingEdge = this.findIncomingEdge(canvas, current.canvasNode);
+        if (incomingEdge)
+          incomingEdge.setColor(color);
+        stack.push(...current.children);
+      }
+    }
+    /**
+     * Find the edge pointing TO this node.
+     */
+    findIncomingEdge(canvas, node) {
+      var _a;
+      const edges = this.canvasApi.getConnectedEdges(canvas, node);
+      return (_a = edges.find((e) => e.to.node.id === node.id)) != null ? _a : null;
+    }
+  };
 
-	module.exports = {
-		LayoutEngine,
-		BranchColors,
-		computeEdgeSides,
-		registerDragEndHandler,
-		updateAllEdgeSides
-	};
-	return module.exports;
+  module.exports = { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, updateAllEdgeSides };
+  return module.exports;
 })();
 // </tomindmap:module layout>
 
 // <tomindmap:module keyboard-navigation>
 var { KeyboardHandler, Navigation } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
+  const module = { exports: {} };
+  const exports = module.exports;
 
-	function pointInRect(point, rect) {
-		return (
-			point.x >= rect.left &&
-			point.x <= rect.right &&
-			point.y >= rect.top &&
-			point.y <= rect.bottom
-		);
-	}
+  function pointInRect(point, rect) {
+  	return (
+  		point.x >= rect.left &&
+  		point.x <= rect.right &&
+  		point.y >= rect.top &&
+  		point.y <= rect.bottom
+  	);
+  }
 
-	function triangleSign(point, first, second) {
-		return (
-			(point.x - second.x) * (first.y - second.y) -
-			(first.x - second.x) * (point.y - second.y)
-		);
-	}
+  function triangleSign(point, first, second) {
+  	return (
+  		(point.x - second.x) * (first.y - second.y) -
+  		(first.x - second.x) * (point.y - second.y)
+  	);
+  }
 
-	function pointInTriangle(point, triangle) {
-		const d1 = triangleSign(point, triangle[0], triangle[1]);
-		const d2 = triangleSign(point, triangle[1], triangle[2]);
-		const d3 = triangleSign(point, triangle[2], triangle[0]);
-		const hasNegative = d1 < 0 || d2 < 0 || d3 < 0;
-		const hasPositive = d1 > 0 || d2 > 0 || d3 > 0;
-		return !(hasNegative && hasPositive);
-	}
+  function pointInTriangle(point, triangle) {
+  	const d1 = triangleSign(point, triangle[0], triangle[1]);
+  	const d2 = triangleSign(point, triangle[1], triangle[2]);
+  	const d3 = triangleSign(point, triangle[2], triangle[0]);
+  	const hasNegative = d1 < 0 || d2 < 0 || d3 < 0;
+  	const hasPositive = d1 > 0 || d2 > 0 || d3 > 0;
+  	return !(hasNegative && hasPositive);
+  }
 
-	function segmentsIntersect(a, b, c, d) {
-		const orientation = (p, q, r) => {
-			const value = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
-			if (Math.abs(value) < 1e-7) return 0;
-			return value > 0 ? 1 : 2;
-		};
-		const onSegment = (p, q, r) =>
-			q.x <= Math.max(p.x, r.x) &&
-			q.x >= Math.min(p.x, r.x) &&
-			q.y <= Math.max(p.y, r.y) &&
-			q.y >= Math.min(p.y, r.y);
-		const o1 = orientation(a, b, c);
-		const o2 = orientation(a, b, d);
-		const o3 = orientation(c, d, a);
-		const o4 = orientation(c, d, b);
-		return (
-			(o1 !== o2 && o3 !== o4) ||
-			(o1 === 0 && onSegment(a, c, b)) ||
-			(o2 === 0 && onSegment(a, d, b)) ||
-			(o3 === 0 && onSegment(c, a, d)) ||
-			(o4 === 0 && onSegment(c, b, d))
-		);
-	}
+  function segmentsIntersect(a, b, c, d) {
+  	const orientation = (p, q, r) => {
+  		const value = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
+  		if (Math.abs(value) < 1e-7) return 0;
+  		return value > 0 ? 1 : 2;
+  	};
+  	const onSegment = (p, q, r) =>
+  		q.x <= Math.max(p.x, r.x) &&
+  		q.x >= Math.min(p.x, r.x) &&
+  		q.y <= Math.max(p.y, r.y) &&
+  		q.y >= Math.min(p.y, r.y);
+  	const o1 = orientation(a, b, c);
+  	const o2 = orientation(a, b, d);
+  	const o3 = orientation(c, d, a);
+  	const o4 = orientation(c, d, b);
+  	return (
+  		(o1 !== o2 && o3 !== o4) ||
+  		(o1 === 0 && onSegment(a, c, b)) ||
+  		(o2 === 0 && onSegment(a, d, b)) ||
+  		(o3 === 0 && onSegment(c, a, d)) ||
+  		(o4 === 0 && onSegment(c, b, d))
+  	);
+  }
 
-	function rectIntersectsTriangle(rect, triangle) {
-		const corners = [
-			{ x: rect.left, y: rect.top },
-			{ x: rect.right, y: rect.top },
-			{ x: rect.right, y: rect.bottom },
-			{ x: rect.left, y: rect.bottom }
-		];
-		if (
-			corners.some((point) => pointInTriangle(point, triangle)) ||
-			triangle.some((point) => pointInRect(point, rect))
-		)
-			return true;
-		const rectEdges = corners.map((point, index) => [
-			point,
-			corners[(index + 1) % corners.length]
-		]);
-		const triangleEdges = triangle.map((point, index) => [
-			point,
-			triangle[(index + 1) % triangle.length]
-		]);
-		return rectEdges.some(([a, b]) =>
-			triangleEdges.some(([c, d]) => segmentsIntersect(a, b, c, d))
-		);
-	}
+  function rectIntersectsTriangle(rect, triangle) {
+  	const corners = [
+  		{ x: rect.left, y: rect.top },
+  		{ x: rect.right, y: rect.top },
+  		{ x: rect.right, y: rect.bottom },
+  		{ x: rect.left, y: rect.bottom }
+  	];
+  	if (
+  		corners.some((point) => pointInTriangle(point, triangle)) ||
+  		triangle.some((point) => pointInRect(point, rect))
+  	)
+  		return true;
+  	const rectEdges = corners.map((point, index) => [
+  		point,
+  		corners[(index + 1) % corners.length]
+  	]);
+  	const triangleEdges = triangle.map((point, index) => [
+  		point,
+  		triangle[(index + 1) % triangle.length]
+  	]);
+  	return rectEdges.some(([a, b]) =>
+  		triangleEdges.some(([c, d]) => segmentsIntersect(a, b, c, d))
+  	);
+  }
 
-	var import_obsidian2 = require('obsidian');
-	var KeyboardHandler = class {
-		constructor(
-			plugin,
-			canvasApi,
-			nodeOps,
-			layoutEngine,
-			branchColors,
-			autoColorEnabled,
-			isMindmapEnabled = () => true,
-			onNodesChanged = () => {}
-		) {
-			this.plugin = plugin;
-			this.canvasApi = canvasApi;
-			this.nodeOps = nodeOps;
-			this.layoutEngine = layoutEngine;
-			this.branchColors = branchColors;
-			this.autoColorEnabled = autoColorEnabled;
-			this.isMindmapEnabled = isMindmapEnabled;
-			this.onNodesChanged = onNodesChanged;
-			/** Called before actions that leave the current node, to finalize auto-resize. */
-			this.onBeforeLeaveNode = null;
-			/** Padding (px) added around target node when zooming after navigation. */
-			this.zoomPadding = 0;
-			/** Opens the existing map outline search for Cmd/Ctrl+F. */
-			this.onFindRequested = null;
-		}
-		register() {
-			this.plugin.addCommand({
-				id: 'mindmap-edit-node',
-				name: 'Edit selected node',
-				checkCallback: (checking) => {
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					const activeEl = document.activeElement;
-					if (activeEl && !canvas.wrapperEl.contains(activeEl))
-						return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					if (node.isEditing) return false;
-					if (checking) return true;
-					this.startEditing(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-save-node',
-				name: 'Save and exit edit mode',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					if (!node.isEditing) return false;
-					if (checking) return true;
-					this.finishEditing(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-add-child',
-				name: 'Add child node',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					if (checking) return true;
-					this.addChild(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-add-sibling',
-				name: 'Add sibling node',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					if (checking) return true;
-					this.addSibling(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-add-sibling-before',
-				name: 'Add sibling topic before',
-				checkCallback: (checking) => {
-					const canvas = this.canvasApi.getActiveCanvas();
-					const node = canvas
-						? this.canvasApi.getSelectedNode(canvas)
-						: null;
-					if (!canvas || !node) return false;
-					if (checking) return true;
-					this.addSibling(canvas, node, true);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-add-parent',
-				name: 'Add parent topic',
-				checkCallback: (checking) => {
-					const canvas = this.canvasApi.getActiveCanvas();
-					const node = canvas
-						? this.canvasApi.getSelectedNode(canvas)
-						: null;
-					if (!canvas || !node) return false;
-					if (checking) return true;
-					this.addParent(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-delete-branch',
-				name: 'Delete topic and branch',
-				checkCallback: (checking) => {
-					const canvas = this.canvasApi.getActiveCanvas();
-					const node = canvas
-						? this.canvasApi.getSelectedNode(canvas)
-						: null;
-					if (!canvas || !node) return false;
-					if (checking) return true;
-					this.deleteBranch(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-delete-node',
-				name: 'Delete single topic and keep its children',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					if (checking) return true;
-					this.deleteSingleTopic(canvas, node);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-flip-branch',
-				name: 'Flip branch to other side',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					if (!this.isMindmapEnabled(canvas)) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					const parent = this.canvasApi.getParentNode(canvas, node);
-					if (!parent) return false;
-					if (checking) return true;
-					const wasEditing = node.isEditing;
-					if (!wasEditing)
-						(_a = this.onBeforeLeaveNode) == null
-							? void 0
-							: _a.call(this);
-					const parentNode = this.nodeOps.flipBranch(canvas, node);
-					if (parentNode) {
-						const parentCenterX =
-							parentNode.x + parentNode.width / 2;
-						const direction =
-							node.x + node.width / 2 >= parentCenterX
-								? 'right'
-								: 'left';
-						this.layoutEngine.layout(canvas, {
-							preserveRootSides: true,
-							branchDirectionOverride: {
-								nodeId: node.id,
-								direction
-							}
-						});
-						if (this.autoColorEnabled()) {
-							this.branchColors.applyColors(canvas);
-						}
-						this.onNodesChanged(canvas);
-						if (wasEditing) node.startEditing();
-					}
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-toggle-balance',
-				name: 'Toggle balanced layout',
-				checkCallback: (checking) => {
-					var _a;
-					const canvas = this.canvasApi.getActiveCanvas();
-					if (!canvas) return false;
-					if (!this.isMindmapEnabled(canvas)) return false;
-					const node = this.canvasApi.getSelectedNode(canvas);
-					if (!node) return false;
-					const children = this.canvasApi.getChildNodes(canvas, node);
-					if (children.length < 2) return false;
-					if (checking) return true;
-					(_a = this.onBeforeLeaveNode) == null
-						? void 0
-						: _a.call(this);
-					const nodeCx = node.x + node.width / 2;
-					let allRight = true;
-					let allLeft = true;
-					for (const child of children) {
-						const childCx = child.x + child.width / 2;
-						if (childCx >= nodeCx) allLeft = false;
-						else allRight = false;
-					}
-					const allOneSide = allRight || allLeft;
-					if (allOneSide) {
-						const sorted = [...children].sort((a, b) => a.y - b.y);
-						for (let i = 0; i < sorted.length; i++) {
-							const child = sorted[i];
-							if (i % 2 === 1) {
-								const mirrorX =
-									nodeCx -
-									(child.x + child.width / 2 - nodeCx) -
-									child.width / 2;
-								child.moveTo({ x: mirrorX, y: child.y });
-							}
-						}
-					} else {
-						for (const child of children) {
-							const childCx = child.x + child.width / 2;
-							if (childCx < nodeCx) {
-								const mirrorX =
-									nodeCx +
-									(nodeCx - childCx) -
-									child.width / 2;
-								child.moveTo({ x: mirrorX, y: child.y });
-							}
-						}
-					}
-					this.layoutEngine.layoutChildren(canvas, node.id);
-					if (this.autoColorEnabled()) {
-						this.branchColors.applyColors(canvas);
-					}
-					this.onNodesChanged(canvas);
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-nav-right',
-				name: 'Navigate right',
-				checkCallback: (checking) => {
-					return this.directionCommand(checking, 'right');
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-nav-left',
-				name: 'Navigate left',
-				checkCallback: (checking) => {
-					return this.directionCommand(checking, 'left');
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-nav-next-sibling',
-				name: 'Navigate down',
-				checkCallback: (checking) => {
-					return this.directionCommand(checking, 'down');
-				}
-			});
-			this.plugin.addCommand({
-				id: 'mindmap-nav-prev-sibling',
-				name: 'Navigate up',
-				checkCallback: (checking) => {
-					return this.directionCommand(checking, 'up');
-				}
-			});
-			this.registerPhysicalKeyShortcuts();
-		}
-		/**
-		 * Access the CodeMirror 6 EditorView inside a canvas node's iframe.
-		 */
-		getEditorView(node) {
-			var _a, _b, _c, _d, _e, _f;
-			const iframe =
-				(_a = node.contentEl) == null
-					? void 0
-					: _a.querySelector('iframe');
-			const doc =
-				(_c = iframe == null ? void 0 : iframe.contentDocument) != null
-					? _c
-					: (_b = node.contentEl) == null
-						? void 0
-						: _b.ownerDocument;
-			if (!doc) return null;
-			const container =
-				(_d = iframe == null ? void 0 : iframe.contentDocument) != null
-					? _d
-					: node.contentEl;
-			const cmContent =
-				container == null
-					? void 0
-					: container.querySelector('.cm-content');
-			return (_f =
-				(_e = cmContent == null ? void 0 : cmContent.cmView) == null
-					? void 0
-					: _e.view) != null
-				? _f
-				: null;
-		}
-		/**
-		 * Extract the selected text from a node's editor and delete it.
-		 * Returns the selected text, or null if nothing is selected.
-		 */
-		extractAndDeleteSelection(node) {
-			const view = this.getEditorView(node);
-			if (!view) return null;
-			const { from, to } = view.state.selection.main;
-			if (from === to) return null;
-			const text = view.state.sliceDoc(from, to);
-			view.dispatch({ changes: { from, to, insert: '' } });
-			return text;
-		}
-		/**
-		 * Install one coherent, canvas-scoped keyboard controller. Canvas text
-		 * editors live in iframes, so their documents are observed and wired too.
-		 */
-		attachToCanvas(canvas) {
-			const documents = /* @__PURE__ */ new Set();
-			const iframes = /* @__PURE__ */ new Map();
-			const priorityBindings = /* @__PURE__ */ new Map();
-			const handler = (event) => this.handleKeydown(canvas, event);
-			const promoteBindings = (scope, bindings) => {
-				if (!Array.isArray(scope == null ? void 0 : scope.keys)) return;
-				for (const binding of bindings) {
-					const index = scope.keys.indexOf(binding);
-					if (index >= 0) scope.keys.splice(index, 1);
-				}
-				scope.keys.unshift(...bindings);
-			};
-			const bindingMatches = (binding, context) => {
-				if (!context) return false;
-				const modifiersMatch =
-					binding.modifiers === null ||
-					binding.modifiers === context.modifiers;
-				if (!modifiersMatch) return false;
-				if (!binding.key) return true;
-				if (binding.key === context.vkey) return true;
-				return (
-					!!context.key &&
-					binding.key.toLowerCase() === context.key.toLowerCase()
-				);
-			};
-			const installPriorityBindings = (scope) => {
-				if (!scope || typeof scope.register !== 'function') return;
-				const existing = priorityBindings.get(scope);
-				if (existing) {
-					promoteBindings(scope, existing);
-					return;
-				}
-				const bindings = [];
-				const delegateToNative = (currentBinding, event, context) => {
-					if (!Array.isArray(scope.keys)) return;
-					const currentIndex = scope.keys.indexOf(currentBinding);
-					for (
-						let index = Math.max(0, currentIndex + 1);
-						index < scope.keys.length;
-						index++
-					) {
-						const candidate = scope.keys[index];
-						if (
-							bindings.includes(candidate) ||
-							!bindingMatches(candidate, context)
-						)
-							continue;
-						return candidate.func(event, context);
-					}
-				};
-				const registerFirst = (modifiers, key, callback) => {
-					let binding = null;
-					binding = scope.register(
-						modifiers,
-						key,
-						(event, context) => {
-							return callback(event, context, () =>
-								delegateToNative(binding, event, context)
-							);
-						}
-					);
-					bindings.push(binding);
-				};
-				for (const key of [
-					'ArrowUp',
-					'ArrowDown',
-					'ArrowLeft',
-					'ArrowRight'
-				]) {
-					registerFirst([], key, (event, context, delegate) => {
-						if (!this.shouldCaptureArrow(canvas, event))
-							return delegate();
-						event.__tomindmapHandled = true;
-						this.consume(event);
-						const node = this.canvasApi.getSelectedNode(canvas);
-						this.navigate(canvas, node, key.slice(5).toLowerCase());
-						return false;
-					});
-				}
-				const registerPriorityShortcut = (modifiers, key) => {
-					registerFirst(
-						modifiers,
-						key,
-						(event, context, delegate) => {
-							if (
-								!this.shouldCaptureNavigationShortcut(
-									canvas,
-									event
-								)
-							)
-								return delegate();
-							this.handleKeydown(canvas, event);
-							if (!event.defaultPrevented) return delegate();
-							event.__tomindmapHandled = true;
-							return false;
-						}
-					);
-				};
-				for (const key of ['Tab', 'Enter', 'Delete', 'Backspace', 'F2'])
-					registerPriorityShortcut([], key);
-				registerPriorityShortcut(['Shift'], 'Enter');
-				for (const key of ['Enter', 'Delete', 'Backspace', 'Home'])
-					registerPriorityShortcut(['Mod'], key);
-				registerPriorityShortcut(['Mod'], 'R');
-				registerPriorityShortcut(['Mod'], 'F');
-				registerPriorityShortcut(['Mod'], 'Z');
-				registerPriorityShortcut(['Mod', 'Shift'], 'Z');
-				registerPriorityShortcut(['Mod'], 'Y');
-				registerPriorityShortcut(['Alt'], 'ArrowUp');
-				registerPriorityShortcut(['Alt'], 'ArrowDown');
-				priorityBindings.set(scope, bindings);
-				promoteBindings(scope, bindings);
-			};
-			const refreshPriorityScopes = () => {
-				var _a, _b, _c;
-				const keymap = this.plugin.app.keymap;
-				const scopes = [
-					canvas.scope,
-					(_a = canvas.view) == null ? void 0 : _a.scope,
-					(_c = (_b = canvas.view) == null ? void 0 : _b.leaf) == null
-						? void 0
-						: _c.scope,
-					keymap == null ? void 0 : keymap.scope
-				];
-				for (const scope of scopes) installPriorityBindings(scope);
-			};
-			refreshPriorityScopes();
-			const attachDocument = (doc) => {
-				if (!doc || documents.has(doc)) return;
-				doc.addEventListener('keydown', handler, true);
-				documents.add(doc);
-			};
-			const scanEditorDocuments = () => {
-				for (const node of canvas.nodes.values()) {
-					var _a;
-					const iframe =
-						(_a = node.contentEl) == null
-							? void 0
-							: _a.querySelector('iframe');
-					if (!iframe) continue;
-					if (!iframes.has(iframe)) {
-						const loadHandler = () =>
-							attachDocument(iframe.contentDocument);
-						iframe.addEventListener('load', loadHandler);
-						iframes.set(iframe, loadHandler);
-					}
-					if (iframe.contentDocument)
-						attachDocument(iframe.contentDocument);
-				}
-			};
-			canvas.wrapperEl.addEventListener('keydown', handler, true);
-			scanEditorDocuments();
-			const observer = new MutationObserver(() => {
-				scanEditorDocuments();
-				refreshPriorityScopes();
-			});
-			observer.observe(canvas.wrapperEl, {
-				childList: true,
-				subtree: true
-			});
-			const focusHandler = () => {
-				scanEditorDocuments();
-				refreshPriorityScopes();
-			};
-			const pointerHandler = () => refreshPriorityScopes();
-			canvas.wrapperEl.addEventListener('focusin', focusHandler, true);
-			canvas.wrapperEl.addEventListener(
-				'pointerdown',
-				pointerHandler,
-				true
-			);
-			const refreshRaf = requestAnimationFrame(refreshPriorityScopes);
-			return () => {
-				cancelAnimationFrame(refreshRaf);
-				for (const [scope, bindings] of priorityBindings) {
-					for (const binding of bindings) {
-						if (typeof scope.unregister === 'function') {
-							try {
-								scope.unregister(binding);
-							} catch (error) {}
-						}
-						if (Array.isArray(scope.keys)) {
-							const index = scope.keys.indexOf(binding);
-							if (index >= 0) scope.keys.splice(index, 1);
-						}
-					}
-				}
-				priorityBindings.clear();
-				canvas.wrapperEl.removeEventListener('keydown', handler, true);
-				canvas.wrapperEl.removeEventListener(
-					'focusin',
-					focusHandler,
-					true
-				);
-				canvas.wrapperEl.removeEventListener(
-					'pointerdown',
-					pointerHandler,
-					true
-				);
-				observer.disconnect();
-				for (const doc of documents) {
-					doc.removeEventListener('keydown', handler, true);
-				}
-				for (const [iframe, loadHandler] of iframes) {
-					iframe.removeEventListener('load', loadHandler);
-				}
-				documents.clear();
-				iframes.clear();
-			};
-		}
-		shouldCaptureArrow(canvas, event) {
-			if (!event || event.isComposing || event.defaultPrevented)
-				return false;
-			if (
-				!this.isMindmapEnabled(canvas) ||
-				this.canvasApi.getActiveCanvas() !== canvas
-			)
-				return false;
-			if (
-				event.ctrlKey ||
-				event.metaKey ||
-				event.altKey ||
-				event.shiftKey
-			)
-				return false;
-			const node = this.canvasApi.getSelectedNode(canvas);
-			return (
-				!!node &&
-				!node.isEditing &&
-				!getGroupIds(canvas).has(node.id) &&
-				!this.isEditableTarget(event.target)
-			);
-		}
-		shouldCaptureNavigationShortcut(canvas, event) {
-			if (!event || event.isComposing || event.defaultPrevented)
-				return false;
-			if (
-				!this.isMindmapEnabled(canvas) ||
-				this.canvasApi.getActiveCanvas() !== canvas
-			)
-				return false;
-			const primary = import_obsidian2.Platform.isMacOS
-				? event.metaKey
-				: event.ctrlKey;
-			if (
-				primary &&
-				!event.shiftKey &&
-				!event.altKey &&
-				event.key.toLowerCase() === 'f'
-			)
-				return true;
-			if (primary && !event.altKey && event.key.toLowerCase() === 'z')
-				return true;
-			if (
-				primary &&
-				!event.shiftKey &&
-				!event.altKey &&
-				event.key.toLowerCase() === 'y'
-			)
-				return true;
-			const node = this.canvasApi.getSelectedNode(canvas);
-			return (
-				!!node &&
-				!node.isEditing &&
-				!getGroupIds(canvas).has(node.id) &&
-				!this.isEditableTarget(event.target)
-			);
-		}
-		handleKeydown(canvas, event) {
-			if (
-				event.__tomindmapHandled ||
-				!this.isMindmapEnabled(canvas) ||
-				event.defaultPrevented ||
-				event.isComposing
-			)
-				return;
-			const primary = import_obsidian2.Platform.isMacOS
-				? event.metaKey
-				: event.ctrlKey;
-			if (
-				primary &&
-				!event.shiftKey &&
-				!event.altKey &&
-				event.key.toLowerCase() === 'f'
-			) {
-				this.consume(event);
-				this.onFindRequested?.(canvas);
-				return;
-			}
-			if (primary && !event.altKey && event.key.toLowerCase() === 'z') {
-				this.consume(event);
-				if (event.shiftKey) canvas.redo?.();
-				else canvas.undo?.();
-				return;
-			}
-			if (
-				primary &&
-				!event.shiftKey &&
-				!event.altKey &&
-				event.key.toLowerCase() === 'y'
-			) {
-				this.consume(event);
-				canvas.redo?.();
-				return;
-			}
-			const node = this.canvasApi.getSelectedNode(canvas);
-			if (!node || getGroupIds(canvas).has(node.id)) return;
-			if (node.isEditing) {
-				this.handleEditingKeydown(canvas, node, event);
-				return;
-			}
-			if (this.isEditableTarget(event.target)) return;
-			if (
-				event.key === 'Tab' &&
-				!event.shiftKey &&
-				!primary &&
-				!event.altKey
-			) {
-				this.consume(event);
-				this.addChild(canvas, node);
-				return;
-			}
-			if (event.key === 'Enter') {
-				this.consume(event);
-				if (primary) {
-					this.addParent(canvas, node);
-				} else {
-					this.addSibling(canvas, node, event.shiftKey);
-				}
-				return;
-			}
-			if (
-				(event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
-				event.altKey &&
-				!primary
-			) {
-				this.consume(event);
-				this.reorderTopic(
-					canvas,
-					node,
-					event.key === 'ArrowUp' ? -1 : 1
-				);
-				return;
-			}
-			if (
-				event.key.startsWith('Arrow') &&
-				!primary &&
-				!event.altKey &&
-				!event.shiftKey
-			) {
-				const direction = event.key.slice(5).toLowerCase();
-				this.consume(event);
-				this.navigate(canvas, node, direction);
-				return;
-			}
-			if (
-				(event.key === 'Delete' || event.key === 'Backspace') &&
-				primary &&
-				!event.altKey
-			) {
-				this.consume(event);
-				this.deleteSingleTopic(canvas, node);
-				return;
-			}
-			if (
-				(event.key === 'Delete' || event.key === 'Backspace') &&
-				!primary &&
-				!event.altKey
-			) {
-				this.consume(event);
-				this.deleteBranch(canvas, node);
-				return;
-			}
-			if (
-				(event.key === 'Home' && primary) ||
-				(event.key.toLowerCase() === 'r' &&
-					primary &&
-					!event.shiftKey &&
-					!event.altKey)
-			) {
-				this.consume(event);
-				this.navigateToRoot(canvas, node);
-				return;
-			}
-			if (event.key === 'F2') {
-				this.consume(event);
-				this.startEditing(canvas, node);
-				return;
-			}
-			if (event.key === 'Dead' && !primary && !event.altKey) {
-				this.consume(event);
-				this.startEditing(canvas, node);
-				return;
-			}
-			if (this.isPrintableKey(event)) {
-				this.consume(event);
-				this.startEditing(canvas, node, event.key);
-			}
-		}
-		handleEditingKeydown(canvas, node, event) {
-			const primary = import_obsidian2.Platform.isMacOS
-				? event.metaKey
-				: event.ctrlKey;
-			if (
-				event.key === 'Enter' &&
-				event.shiftKey &&
-				!primary &&
-				!event.altKey
-			) {
-				this.consume(event);
-				this.insertEditorText(node, '\n');
-				return;
-			}
-			if (event.key === 'Enter' && !event.shiftKey && !event.altKey) {
-				this.consume(event);
-				if (primary) {
-					this.addParent(canvas, node);
-				} else {
-					this.finishEditing(canvas, node);
-				}
-				return;
-			}
-			if (
-				event.key === 'Tab' &&
-				!event.shiftKey &&
-				!primary &&
-				!event.altKey
-			) {
-				this.consume(event);
-				this.addChild(canvas, node);
-				return;
-			}
-			if (event.key === 'Escape') {
-				this.consume(event);
-				this.finishEditing(canvas, node);
-			}
-		}
-		isEditableTarget(target) {
-			if (!target || typeof target.closest !== 'function') return false;
-			return !!target.closest(
-				'input, textarea, select, [contenteditable="true"], .cm-editor'
-			);
-		}
-		isPrintableKey(event) {
-			return (
-				event.key.length === 1 &&
-				!event.ctrlKey &&
-				!event.metaKey &&
-				!event.altKey
-			);
-		}
-		consume(event) {
-			event.preventDefault();
-			event.stopImmediatePropagation();
-		}
-		startEditing(canvas, node, initialText = '') {
-			for (const candidate of canvas.nodes.values()) {
-				var _a;
-				(_a = candidate.nodeEl) == null
-					? void 0
-					: _a.removeClass('tomindmap-navigation-selected');
-			}
-			node.startEditing();
-			if (initialText) this.insertEditorTextWhenReady(node, initialText);
-		}
-		insertEditorTextWhenReady(node, text, attempt = 0) {
-			const view = this.getEditorView(node);
-			if (view) {
-				const end = view.state.doc.length;
-				view.dispatch({ selection: { anchor: end } });
-				view.dispatch({
-					changes: { from: end, to: end, insert: text }
-				});
-				view.focus();
-				return;
-			}
-			if (attempt < 10) {
-				setTimeout(
-					() =>
-						this.insertEditorTextWhenReady(node, text, attempt + 1),
-					20
-				);
-				return;
-			}
-			node.setText(`${node.text || ''}${text}`);
-			node.startEditing();
-		}
-		insertEditorText(node, text) {
-			const view = this.getEditorView(node);
-			if (!view) return;
-			const { from, to } = view.state.selection.main;
-			view.dispatch({
-				changes: { from, to, insert: text },
-				selection: { anchor: from + text.length }
-			});
-			view.focus();
-		}
-		finishEditing(canvas, node) {
-			var _a;
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			node.blur();
-			this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
-		}
-		addChild(canvas, node) {
-			var _a;
-			let selectedText = null;
-			if (node.isEditing)
-				selectedText = this.extractAndDeleteSelection(node);
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			const newNode = this.nodeOps.addChild(canvas, node);
-			if (!newNode) return;
-			if (selectedText) newNode.setText(selectedText);
-			this.finishMutation(canvas, node);
-			this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
-		}
-		addSibling(canvas, node, before = false) {
-			var _a;
-			let selectedText = null;
-			if (node.isEditing)
-				selectedText = this.extractAndDeleteSelection(node);
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			const newNode = this.nodeOps.addSibling(canvas, node, before);
-			if (!newNode) return;
-			if (selectedText) newNode.setText(selectedText);
-			const parent = this.canvasApi.getParentNode(canvas, newNode);
-			this.finishMutation(canvas, parent || node);
-			this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
-		}
-		addParent(canvas, node) {
-			var _a;
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			const newNode = this.nodeOps.addParent(canvas, node);
-			if (!newNode) return;
-			this.finishMutation(canvas, newNode);
-			this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
-		}
-		deleteBranch(canvas, node) {
-			var _a;
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			const parent = this.canvasApi.getParentNode(canvas, node);
-			const removedIds = this.collectBranchIds(canvas, node);
-			const fallback =
-				parent || this.nearestRemainingNode(canvas, node, removedIds);
-			this.nodeOps.deleteSubtree(canvas, node);
-			this.finishMutation(canvas, fallback);
-			if (fallback)
-				this.canvasApi.selectForNavigation(
-					canvas,
-					fallback,
-					this.zoomPadding
-				);
-			else this.clearSelection(canvas);
-		}
-		deleteSingleTopic(canvas, node) {
-			var _a;
-			(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-			const focusNode = this.nodeOps.deleteAndFocusParent(canvas, node);
-			this.finishMutation(canvas, focusNode);
-			if (focusNode)
-				this.canvasApi.selectForNavigation(
-					canvas,
-					focusNode,
-					this.zoomPadding
-				);
-			else this.clearSelection(canvas);
-		}
-		finishMutation(canvas, anchor) {
-			if (anchor) this.relayoutFromAnchor(canvas, anchor);
-			if (this.autoColorEnabled() && this.isMindmapEnabled(canvas))
-				this.branchColors.applyColors(canvas);
-			this.onNodesChanged(canvas);
-		}
-		relayoutFromAnchor(canvas, anchor) {
-			if (
-				!this.plugin.isAutoAdjustCanvas(canvas) ||
-				!this.isMindmapEnabled(canvas)
-			)
-				return;
-			const forest = buildForest(canvas);
-			const tree = findTreeForNode(forest, anchor.id);
-			if (!tree) return;
-			let root = tree;
-			while (root.parent) root = root.parent;
-			this.layoutEngine.layoutChildren(canvas, root.canvasNode.id);
-		}
-		navigate(canvas, node, direction) {
-			const target = this.findSpatialTarget(canvas, node, direction);
-			if (target)
-				this.canvasApi.selectForNavigation(
-					canvas,
-					target,
-					this.zoomPadding
-				);
-		}
-		directionCommand(checking, direction) {
-			const canvas = this.canvasApi.getActiveCanvas();
-			if (!canvas || !this.isMindmapEnabled(canvas)) return false;
-			const node = this.canvasApi.getSelectedNode(canvas);
-			if (!node) return false;
-			if (checking) return true;
-			if (node.isEditing) this.finishEditing(canvas, node);
-			this.navigate(canvas, node, direction);
-			return true;
-		}
-		findSpatialTarget(canvas, current, direction) {
-			const groupIds = getGroupIds(canvas);
-			const all = Array.from(canvas.nodes.values()).filter(
-				(node) => node.id !== current.id && !groupIds.has(node.id)
-			);
-			const buffer = Math.max(
-				0,
-				Number(this.plugin.settings.navigationCrossAxisBuffer) || 0
-			);
-			const mapRect = [current, ...all].reduce(
-				(bounds, node) => ({
-					left: Math.min(bounds.left, node.x),
-					right: Math.max(bounds.right, node.x + node.width),
-					top: Math.min(bounds.top, node.y),
-					bottom: Math.max(bounds.bottom, node.y + node.height)
-				}),
-				{
-					left: Infinity,
-					right: -Infinity,
-					top: Infinity,
-					bottom: -Infinity
-				}
-			);
-			const canvasRect = (node) => ({
-				left: node.x,
-				right: node.x + node.width,
-				top: node.y,
-				bottom: node.y + node.height,
-				width: node.width,
-				height: node.height
-			});
-			const currentRect = canvasRect(current);
-			const currentCenterX = (currentRect.left + currentRect.right) / 2;
-			const currentCenterY = (currentRect.top + currentRect.bottom) / 2;
-			const origin =
-				direction === 'left'
-					? { x: currentRect.left, y: currentCenterY }
-					: direction === 'right'
-						? { x: currentRect.right, y: currentCenterY }
-						: direction === 'up'
-							? { x: currentCenterX, y: currentRect.top }
-							: { x: currentCenterX, y: currentRect.bottom };
-			const pointFacingOrigin = (rect) =>
-				direction === 'left'
-					? { x: rect.right, y: (rect.top + rect.bottom) / 2 }
-					: direction === 'right'
-						? { x: rect.left, y: (rect.top + rect.bottom) / 2 }
-						: direction === 'up'
-							? {
-									x: (rect.left + rect.right) / 2,
-									y: rect.bottom
-								}
-							: { x: (rect.left + rect.right) / 2, y: rect.top };
-			const rayHitsMapEdge = (rayOrigin, dx, dy) => {
-				if (direction === 'left' || direction === 'right') {
-					if (Math.abs(dx) < 0.01) return false;
-					const edgeX =
-						direction === 'left' ? mapRect.left : mapRect.right;
-					const t = (edgeX - rayOrigin.x) / dx;
-					if (t <= 0) return false;
-					const hitY = rayOrigin.y + t * dy;
-					return (
-						hitY >= mapRect.top - buffer &&
-						hitY <= mapRect.bottom + buffer
-					);
-				}
-				if (Math.abs(dy) < 0.01) return false;
-				const edgeY = direction === 'up' ? mapRect.top : mapRect.bottom;
-				const t = (edgeY - rayOrigin.y) / dy;
-				if (t <= 0) return false;
-				const hitX = rayOrigin.x + t * dx;
-				return (
-					hitX >= mapRect.left - buffer &&
-					hitX <= mapRect.right + buffer
-				);
-			};
-			const ranked = all.map((candidate) => {
-				const rect = canvasRect(candidate);
-				const point = pointFacingOrigin(rect);
-				const dx = point.x - origin.x;
-				const dy = point.y - origin.y;
-				const primary =
-					direction === 'left'
-						? -dx
-						: direction === 'right'
-							? dx
-							: direction === 'up'
-								? -dy
-								: dy;
-				const cross =
-					direction === 'left' || direction === 'right'
-						? Math.abs(dy)
-						: Math.abs(dx);
-				const strictCrossAxisOverlap =
-					direction === 'left' || direction === 'right'
-						? rect.bottom >= currentRect.top &&
-							rect.top <= currentRect.bottom
-						: rect.right >= currentRect.left &&
-							rect.left <= currentRect.right;
-				const crossAxisOverlap =
-					direction === 'left' || direction === 'right'
-						? rect.bottom >= currentRect.top - buffer &&
-							rect.top <= currentRect.bottom + buffer
-						: rect.right >= currentRect.left - buffer &&
-							rect.left <= currentRect.right + buffer;
-				return {
-					node: candidate,
-					primary,
-					cross,
-					distance: dx * dx + dy * dy,
-					alignment: cross / Math.max(primary, 1),
-					inStrictCorridor: primary > 1 && strictCrossAxisOverlap,
-					crossAxisOverlap,
-					inCorridor: primary > 1 && crossAxisOverlap,
-					inMapWedge: primary > 1 && rayHitsMapEdge(origin, dx, dy),
-					rect
-				};
-			});
-			const tieBreak = (a, b) => {
-				const ay = a.node.y + a.node.height / 2;
-				const by = b.node.y + b.node.height / 2;
-				const ax = a.node.x + a.node.width / 2;
-				const bx = b.node.x + b.node.width / 2;
-				return (
-					ay - by ||
-					ax - bx ||
-					String(a.node.id).localeCompare(String(b.node.id))
-				);
-			};
-			const byDistance = (a, b) =>
-				a.distance - b.distance || tieBreak(a, b);
-			const byAlignmentThenDistance = (a, b) => {
-				const bandA = Math.floor(a.alignment / 0.12);
-				const bandB = Math.floor(b.alignment / 0.12);
-				return bandA - bandB || byDistance(a, b);
-			};
-			const strictCorridor = ranked
-				.filter((candidate) => candidate.inStrictCorridor)
-				.sort(byDistance);
-			if (strictCorridor.length > 0) return strictCorridor[0].node;
-			const corridor = ranked
-				.filter((candidate) => candidate.inCorridor)
-				.sort(byAlignmentThenDistance);
-			if (corridor.length > 0) return corridor[0].node;
-			const wedge = ranked
-				.filter((candidate) => candidate.inMapWedge)
-				.sort(byAlignmentThenDistance);
-			if (wedge.length > 0) return wedge[0].node;
-			if (!this.plugin.settings.wrapArrowNavigation) return null;
-			const clamp = (value, min, max) =>
-				Math.min(max, Math.max(min, value));
-			const wrapOrigin =
-				direction === 'left'
-					? {
-							x: mapRect.right,
-							y: clamp(origin.y, mapRect.top, mapRect.bottom)
-						}
-					: direction === 'right'
-						? {
-								x: mapRect.left,
-								y: clamp(origin.y, mapRect.top, mapRect.bottom)
-							}
-						: direction === 'up'
-							? {
-									x: clamp(
-										origin.x,
-										mapRect.left,
-										mapRect.right
-									),
-									y: mapRect.bottom
-								}
-							: {
-									x: clamp(
-										origin.x,
-										mapRect.left,
-										mapRect.right
-									),
-									y: mapRect.top
-								};
-			const wrapTriangle =
-				direction === 'left'
-					? [
-							wrapOrigin,
-							{ x: mapRect.left, y: mapRect.top },
-							{ x: mapRect.left, y: mapRect.bottom }
-						]
-					: direction === 'right'
-						? [
-								wrapOrigin,
-								{ x: mapRect.right, y: mapRect.top },
-								{ x: mapRect.right, y: mapRect.bottom }
-							]
-						: direction === 'up'
-							? [
-									wrapOrigin,
-									{ x: mapRect.left, y: mapRect.top },
-									{ x: mapRect.right, y: mapRect.top }
-								]
-							: [
-									wrapOrigin,
-									{ x: mapRect.left, y: mapRect.bottom },
-									{ x: mapRect.right, y: mapRect.bottom }
-								];
-			const distanceToRect = (point, rect) => {
-				const dx =
-					point.x < rect.left
-						? rect.left - point.x
-						: point.x > rect.right
-							? point.x - rect.right
-							: 0;
-				const dy =
-					point.y < rect.top
-						? rect.top - point.y
-						: point.y > rect.bottom
-							? point.y - rect.bottom
-							: 0;
-				return dx * dx + dy * dy;
-			};
-			// Perform exactly one wrap. The projected point on the opposite edge is
-			// the apex of a fresh cone whose base is the two far-side map corners.
-			// A card touching the apex is inside the cone even though its directional
-			// delta is zero.
-			const wrapRanked = ranked.map((candidate) => {
-				const point = pointFacingOrigin(candidate.rect);
-				const dx = point.x - wrapOrigin.x;
-				const dy = point.y - wrapOrigin.y;
-				const primary =
-					direction === 'left'
-						? -dx
-						: direction === 'right'
-							? dx
-							: direction === 'up'
-								? -dy
-								: dy;
-				const cross =
-					direction === 'left' || direction === 'right'
-						? Math.abs(dy)
-						: Math.abs(dx);
-				const strictStraight =
-					direction === 'left' || direction === 'right'
-						? candidate.rect.top <= wrapOrigin.y &&
-							candidate.rect.bottom >= wrapOrigin.y
-						: candidate.rect.left <= wrapOrigin.x &&
-							candidate.rect.right >= wrapOrigin.x;
-				const straight =
-					direction === 'left' || direction === 'right'
-						? candidate.rect.top <= wrapOrigin.y + buffer &&
-							candidate.rect.bottom >= wrapOrigin.y - buffer
-						: candidate.rect.left <= wrapOrigin.x + buffer &&
-							candidate.rect.right >= wrapOrigin.x - buffer;
-				return {
-					node: candidate.node,
-					primary,
-					cross,
-					distance: distanceToRect(wrapOrigin, candidate.rect),
-					alignment: cross / Math.max(primary, 1),
-					inStrictCorridor: primary > 1 && strictStraight,
-					inCorridor: primary > 1 && straight,
-					inMapWedge: rectIntersectsTriangle(
-						candidate.rect,
-						wrapTriangle
-					)
-				};
-			});
-			const wrapWedge = wrapRanked
-				.filter((candidate) => candidate.inMapWedge)
-				.sort(byDistance);
-			if (wrapWedge.length > 0) return wrapWedge[0].node;
-			return null;
-		}
-		collectBranchIds(canvas, node) {
-			const ids = /* @__PURE__ */ new Set([node.id]);
-			const queue = [node.id];
-			for (let cursor = 0; cursor < queue.length; cursor++) {
-				const id = queue[cursor];
-				for (const edge of this.canvasApi.getOutgoingEdges(
-					canvas,
-					id
-				)) {
-					const childId = edge.to.node.id;
-					if (!ids.has(childId)) {
-						ids.add(childId);
-						queue.push(childId);
-					}
-				}
-			}
-			return ids;
-		}
-		nearestRemainingNode(canvas, current, excludedIds) {
-			const groupIds = getGroupIds(canvas);
-			const cx = current.x + current.width / 2;
-			const cy = current.y + current.height / 2;
-			return (
-				Array.from(canvas.nodes.values())
-					.filter(
-						(node) =>
-							!excludedIds.has(node.id) && !groupIds.has(node.id)
-					)
-					.sort((a, b) => {
-						const ad = Math.hypot(
-							a.x + a.width / 2 - cx,
-							a.y + a.height / 2 - cy
-						);
-						const bd = Math.hypot(
-							b.x + b.width / 2 - cx,
-							b.y + b.height / 2 - cy
-						);
-						return (
-							ad - bd ||
-							a.y - b.y ||
-							a.x - b.x ||
-							String(a.id).localeCompare(String(b.id))
-						);
-					})[0] || null
-			);
-		}
-		clearSelection(canvas) {
-			if (typeof canvas.deselectAll === 'function') canvas.deselectAll();
-			if (typeof canvas.requestFrame === 'function')
-				canvas.requestFrame();
-		}
-		navigateToRoot(canvas, node) {
-			const forest = buildForest(canvas);
-			let tree = findTreeForNode(forest, node.id);
-			if (!tree) return;
-			while (tree.parent) tree = tree.parent;
-			this.canvasApi.selectForNavigation(
-				canvas,
-				tree.canvasNode,
-				this.zoomPadding
-			);
-		}
-		reorderTopic(canvas, node, delta) {
-			const forest = buildForest(canvas);
-			const tree = findTreeForNode(forest, node.id);
-			if (!tree || !tree.parent) return;
-			const parentCx =
-				tree.parent.canvasNode.x + tree.parent.canvasNode.width / 2;
-			const currentCx = node.x + node.width / 2;
-			const onLeft = currentCx < parentCx;
-			const siblings = tree.parent.children
-				.filter((sibling) => {
-					const siblingCx =
-						sibling.canvasNode.x + sibling.canvasNode.width / 2;
-					return siblingCx < parentCx === onLeft;
-				})
-				.sort((a, b) => a.canvasNode.y - b.canvasNode.y);
-			const index = siblings.indexOf(tree);
-			const targetIndex = index + delta;
-			if (index < 0 || targetIndex < 0 || targetIndex >= siblings.length)
-				return;
-			const target = siblings[targetIndex].canvasNode;
-			const oldY = node.y;
-			node.moveTo({ x: node.x, y: target.y });
-			target.moveTo({ x: target.x, y: oldY });
-			this.plugin.markMarkdownOrderDirty(canvas);
-			this.finishMutation(canvas, tree.parent.canvasNode);
-			this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
-		}
-		/**
-		 * Fallback keydown listener that uses event.code (physical key position)
-		 * instead of event.key (character). Activates only when a non-Latin layout
-		 * is detected (event.key doesn't match the expected Latin character),
-		 * so it won't double-fire with Obsidian's built-in hotkey system.
-		 */
-		registerPhysicalKeyShortcuts() {
-			const shortcuts = [
-				{
-					code: 'Period',
-					key: '.',
-					ctrl: true,
-					shift: false,
-					alt: false,
-					cmdId: `${this.plugin.manifest.id}:mindmap-add-child`
-				},
-				{
-					code: 'KeyS',
-					key: 's',
-					ctrl: true,
-					shift: false,
-					alt: false,
-					cmdId: `${this.plugin.manifest.id}:mindmap-save-node`
-				},
-				{
-					code: 'KeyS',
-					key: 's',
-					ctrl: true,
-					shift: true,
-					alt: false,
-					cmdId: `${this.plugin.manifest.id}:mindmap-flip-branch`
-				},
-				{
-					code: 'KeyD',
-					key: 'd',
-					ctrl: true,
-					shift: true,
-					alt: false,
-					cmdId: `${this.plugin.manifest.id}:mindmap-toggle-balance`
-				},
-				{
-					code: 'KeyL',
-					key: 'l',
-					ctrl: true,
-					shift: true,
-					alt: false,
-					cmdId: `${this.plugin.manifest.id}:mindmap-resize-subtree`
-				},
-				{
-					code: 'KeyR',
-					key: 'r',
-					ctrl: true,
-					shift: true,
-					alt: true,
-					cmdId: `${this.plugin.manifest.id}:mindmap-resize-all`
-				}
-			];
-			this.plugin.registerDomEvent(document, 'keydown', (e) => {
-				var _a, _b, _c;
-				const canvas = this.canvasApi.getActiveCanvas();
-				if (!canvas) return;
-				const ctrlOrCmd = import_obsidian2.Platform.isMacOS
-					? e.metaKey
-					: e.ctrlKey;
-				if (!ctrlOrCmd) return;
-				if (
-					e.code === 'KeyZ' &&
-					!e.altKey &&
-					e.key.toLowerCase() !== 'z'
-				) {
-					e.preventDefault();
-					e.stopPropagation();
-					if (e.shiftKey) {
-						(_a = canvas.redo) == null ? void 0 : _a.call(canvas);
-					} else {
-						(_b = canvas.undo) == null ? void 0 : _b.call(canvas);
-					}
-					return;
-				}
-				if (
-					e.code === 'KeyY' &&
-					!e.shiftKey &&
-					!e.altKey &&
-					e.key.toLowerCase() !== 'y'
-				) {
-					e.preventDefault();
-					e.stopPropagation();
-					(_c = canvas.redo) == null ? void 0 : _c.call(canvas);
-					return;
-				}
-				const { commands } = this.plugin.app;
-				if (!(commands == null ? void 0 : commands.executeCommandById))
-					return;
-				for (const s of shortcuts) {
-					if (
-						e.code === s.code &&
-						ctrlOrCmd === s.ctrl &&
-						e.shiftKey === s.shift &&
-						e.altKey === s.alt
-					) {
-						if (e.key.toLowerCase() === s.key) return;
-						e.preventDefault();
-						e.stopPropagation();
-						commands.executeCommandById(s.cmdId);
-						return;
-					}
-				}
-			});
-		}
-		/**
-		 * Find the child whose vertical center is closest to the current node's.
-		 */
-		nearestChild(tree, candidates) {
-			const children = candidates != null ? candidates : tree.children;
-			if (children.length === 0) return null;
-			const nodeCy = tree.canvasNode.y + tree.canvasNode.height / 2;
-			let best = children[0];
-			let bestDist = Math.abs(
-				best.canvasNode.y + best.canvasNode.height / 2 - nodeCy
-			);
-			for (let i = 1; i < children.length; i++) {
-				const childCy =
-					children[i].canvasNode.y +
-					children[i].canvasNode.height / 2;
-				const dist = Math.abs(childCy - nodeCy);
-				if (dist < bestDist) {
-					best = children[i];
-					bestDist = dist;
-				}
-			}
-			return best.canvasNode;
-		}
-	};
+  var import_obsidian2 = require('obsidian');
+  var KeyboardHandler = class {
+  	constructor(
+  		plugin,
+  		canvasApi,
+  		nodeOps,
+  		layoutEngine,
+  		branchColors,
+  		autoColorEnabled,
+  		isMindmapEnabled = () => true,
+  		onNodesChanged = () => {}
+  	) {
+  		this.plugin = plugin;
+  		this.canvasApi = canvasApi;
+  		this.nodeOps = nodeOps;
+  		this.layoutEngine = layoutEngine;
+  		this.branchColors = branchColors;
+  		this.autoColorEnabled = autoColorEnabled;
+  		this.isMindmapEnabled = isMindmapEnabled;
+  		this.onNodesChanged = onNodesChanged;
+  		/** Called before actions that leave the current node, to finalize auto-resize. */
+  		this.onBeforeLeaveNode = null;
+  		/** Padding (px) added around target node when zooming after navigation. */
+  		this.zoomPadding = 0;
+  		/** Opens the existing map outline search for Cmd/Ctrl+F. */
+  		this.onFindRequested = null;
+  	}
+  	register() {
+  		this.plugin.addCommand({
+  			id: 'mindmap-edit-node',
+  			name: 'Edit selected node',
+  			checkCallback: (checking) => {
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				const activeEl = document.activeElement;
+  				if (activeEl && !canvas.wrapperEl.contains(activeEl))
+  					return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				if (node.isEditing) return false;
+  				if (checking) return true;
+  				this.startEditing(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-save-node',
+  			name: 'Save and exit edit mode',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				if (!node.isEditing) return false;
+  				if (checking) return true;
+  				this.finishEditing(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-add-child',
+  			name: 'Add child node',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				if (checking) return true;
+  				this.addChild(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-add-sibling',
+  			name: 'Add sibling node',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				if (checking) return true;
+  				this.addSibling(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-add-sibling-before',
+  			name: 'Add sibling topic before',
+  			checkCallback: (checking) => {
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				const node = canvas
+  					? this.canvasApi.getSelectedNode(canvas)
+  					: null;
+  				if (!canvas || !node) return false;
+  				if (checking) return true;
+  				this.addSibling(canvas, node, true);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-add-parent',
+  			name: 'Add parent topic',
+  			checkCallback: (checking) => {
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				const node = canvas
+  					? this.canvasApi.getSelectedNode(canvas)
+  					: null;
+  				if (!canvas || !node) return false;
+  				if (checking) return true;
+  				this.addParent(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-delete-branch',
+  			name: 'Delete topic and branch',
+  			checkCallback: (checking) => {
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				const node = canvas
+  					? this.canvasApi.getSelectedNode(canvas)
+  					: null;
+  				if (!canvas || !node) return false;
+  				if (checking) return true;
+  				this.deleteBranch(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-delete-node',
+  			name: 'Delete single topic and keep its children',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				if (checking) return true;
+  				this.deleteSingleTopic(canvas, node);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-flip-branch',
+  			name: 'Flip branch to other side',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				if (!this.isMindmapEnabled(canvas)) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				const parent = this.canvasApi.getParentNode(canvas, node);
+  				if (!parent) return false;
+  				if (checking) return true;
+  				const wasEditing = node.isEditing;
+  				if (!wasEditing)
+  					(_a = this.onBeforeLeaveNode) == null
+  						? void 0
+  						: _a.call(this);
+  				const parentNode = this.nodeOps.flipBranch(canvas, node);
+  				if (parentNode) {
+  					const parentCenterX = parentNode.x + parentNode.width / 2;
+  					const direction =
+  						node.x + node.width / 2 >= parentCenterX
+  							? 'right'
+  							: 'left';
+  					this.layoutEngine.layout(canvas, {
+  						preserveRootSides: true,
+  						branchDirectionOverride: { nodeId: node.id, direction }
+  					});
+  					if (this.autoColorEnabled()) {
+  						this.branchColors.applyColors(canvas);
+  					}
+  					this.onNodesChanged(canvas);
+  					if (wasEditing) node.startEditing();
+  				}
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-toggle-balance',
+  			name: 'Toggle balanced layout',
+  			checkCallback: (checking) => {
+  				var _a;
+  				const canvas = this.canvasApi.getActiveCanvas();
+  				if (!canvas) return false;
+  				if (!this.isMindmapEnabled(canvas)) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
+  				const children = this.canvasApi.getChildNodes(canvas, node);
+  				if (children.length < 2) return false;
+  				if (checking) return true;
+  				(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  				const nodeCx = node.x + node.width / 2;
+  				let allRight = true;
+  				let allLeft = true;
+  				for (const child of children) {
+  					const childCx = child.x + child.width / 2;
+  					if (childCx >= nodeCx) allLeft = false;
+  					else allRight = false;
+  				}
+  				const allOneSide = allRight || allLeft;
+  				if (allOneSide) {
+  					const sorted = [...children].sort((a, b) => a.y - b.y);
+  					for (let i = 0; i < sorted.length; i++) {
+  						const child = sorted[i];
+  						if (i % 2 === 1) {
+  							const mirrorX =
+  								nodeCx -
+  								(child.x + child.width / 2 - nodeCx) -
+  								child.width / 2;
+  							child.moveTo({ x: mirrorX, y: child.y });
+  						}
+  					}
+  				} else {
+  					for (const child of children) {
+  						const childCx = child.x + child.width / 2;
+  						if (childCx < nodeCx) {
+  							const mirrorX =
+  								nodeCx + (nodeCx - childCx) - child.width / 2;
+  							child.moveTo({ x: mirrorX, y: child.y });
+  						}
+  					}
+  				}
+  				this.layoutEngine.layoutChildren(canvas, node.id);
+  				if (this.autoColorEnabled()) {
+  					this.branchColors.applyColors(canvas);
+  				}
+  				this.onNodesChanged(canvas);
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-nav-right',
+  			name: 'Navigate right',
+  			checkCallback: (checking) => {
+  				return this.directionCommand(checking, 'right');
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-nav-left',
+  			name: 'Navigate left',
+  			checkCallback: (checking) => {
+  				return this.directionCommand(checking, 'left');
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-nav-next-sibling',
+  			name: 'Navigate down',
+  			checkCallback: (checking) => {
+  				return this.directionCommand(checking, 'down');
+  			}
+  		});
+  		this.plugin.addCommand({
+  			id: 'mindmap-nav-prev-sibling',
+  			name: 'Navigate up',
+  			checkCallback: (checking) => {
+  				return this.directionCommand(checking, 'up');
+  			}
+  		});
+  		this.registerPhysicalKeyShortcuts();
+  	}
+  	/**
+  	 * Access the CodeMirror 6 EditorView inside a canvas node's iframe.
+  	 */
+  	getEditorView(node) {
+  		var _a, _b, _c, _d, _e, _f;
+  		const iframe =
+  			(_a = node.contentEl) == null ? void 0 : _a.querySelector('iframe');
+  		const doc =
+  			(_c = iframe == null ? void 0 : iframe.contentDocument) != null
+  				? _c
+  				: (_b = node.contentEl) == null
+  					? void 0
+  					: _b.ownerDocument;
+  		if (!doc) return null;
+  		const container =
+  			(_d = iframe == null ? void 0 : iframe.contentDocument) != null
+  				? _d
+  				: node.contentEl;
+  		const cmContent =
+  			container == null ? void 0 : container.querySelector('.cm-content');
+  		return (_f =
+  			(_e = cmContent == null ? void 0 : cmContent.cmView) == null
+  				? void 0
+  				: _e.view) != null
+  			? _f
+  			: null;
+  	}
+  	/**
+  	 * Extract the selected text from a node's editor and delete it.
+  	 * Returns the selected text, or null if nothing is selected.
+  	 */
+  	extractAndDeleteSelection(node) {
+  		const view = this.getEditorView(node);
+  		if (!view) return null;
+  		const { from, to } = view.state.selection.main;
+  		if (from === to) return null;
+  		const text = view.state.sliceDoc(from, to);
+  		view.dispatch({ changes: { from, to, insert: '' } });
+  		return text;
+  	}
+  	/**
+  	 * Install one coherent, canvas-scoped keyboard controller. Canvas text
+  	 * editors live in iframes, so their documents are observed and wired too.
+  	 */
+  	attachToCanvas(canvas) {
+  		const documents = /* @__PURE__ */ new Set();
+  		const iframes = /* @__PURE__ */ new Map();
+  		const priorityBindings = /* @__PURE__ */ new Map();
+  		const handler = (event) => this.handleKeydown(canvas, event);
+  		const promoteBindings = (scope, bindings) => {
+  			if (!Array.isArray(scope == null ? void 0 : scope.keys)) return;
+  			for (const binding of bindings) {
+  				const index = scope.keys.indexOf(binding);
+  				if (index >= 0) scope.keys.splice(index, 1);
+  			}
+  			scope.keys.unshift(...bindings);
+  		};
+  		const bindingMatches = (binding, context) => {
+  			if (!context) return false;
+  			const modifiersMatch =
+  				binding.modifiers === null ||
+  				binding.modifiers === context.modifiers;
+  			if (!modifiersMatch) return false;
+  			if (!binding.key) return true;
+  			if (binding.key === context.vkey) return true;
+  			return (
+  				!!context.key &&
+  				binding.key.toLowerCase() === context.key.toLowerCase()
+  			);
+  		};
+  		const installPriorityBindings = (scope) => {
+  			if (!scope || typeof scope.register !== 'function') return;
+  			const existing = priorityBindings.get(scope);
+  			if (existing) {
+  				promoteBindings(scope, existing);
+  				return;
+  			}
+  			const bindings = [];
+  			const delegateToNative = (currentBinding, event, context) => {
+  				if (!Array.isArray(scope.keys)) return;
+  				const currentIndex = scope.keys.indexOf(currentBinding);
+  				for (
+  					let index = Math.max(0, currentIndex + 1);
+  					index < scope.keys.length;
+  					index++
+  				) {
+  					const candidate = scope.keys[index];
+  					if (
+  						bindings.includes(candidate) ||
+  						!bindingMatches(candidate, context)
+  					)
+  						continue;
+  					return candidate.func(event, context);
+  				}
+  			};
+  			const registerFirst = (modifiers, key, callback) => {
+  				let binding = null;
+  				binding = scope.register(modifiers, key, (event, context) => {
+  					return callback(event, context, () =>
+  						delegateToNative(binding, event, context)
+  					);
+  				});
+  				bindings.push(binding);
+  			};
+  			for (const key of [
+  				'ArrowUp',
+  				'ArrowDown',
+  				'ArrowLeft',
+  				'ArrowRight'
+  			]) {
+  				registerFirst([], key, (event, context, delegate) => {
+  					if (!this.shouldCaptureArrow(canvas, event))
+  						return delegate();
+  					event.__tomindmapHandled = true;
+  					this.consume(event);
+  					const node = this.canvasApi.getSelectedNode(canvas);
+  					this.navigate(canvas, node, key.slice(5).toLowerCase());
+  					return false;
+  				});
+  			}
+  			const registerPriorityShortcut = (modifiers, key) => {
+  				registerFirst(modifiers, key, (event, context, delegate) => {
+  					if (!this.shouldCaptureNavigationShortcut(canvas, event))
+  						return delegate();
+  					this.handleKeydown(canvas, event);
+  					if (!event.defaultPrevented) return delegate();
+  					event.__tomindmapHandled = true;
+  					return false;
+  				});
+  			};
+  			for (const key of ['Tab', 'Enter', 'Delete', 'Backspace', 'F2'])
+  				registerPriorityShortcut([], key);
+  			registerPriorityShortcut(['Shift'], 'Enter');
+  			for (const key of ['Enter', 'Delete', 'Backspace', 'Home'])
+  				registerPriorityShortcut(['Mod'], key);
+  			registerPriorityShortcut(['Mod'], 'R');
+  			registerPriorityShortcut(['Mod'], 'F');
+  			registerPriorityShortcut(['Mod'], 'Z');
+  			registerPriorityShortcut(['Mod', 'Shift'], 'Z');
+  			registerPriorityShortcut(['Mod'], 'Y');
+  			registerPriorityShortcut(['Alt'], 'ArrowUp');
+  			registerPriorityShortcut(['Alt'], 'ArrowDown');
+  			priorityBindings.set(scope, bindings);
+  			promoteBindings(scope, bindings);
+  		};
+  		const refreshPriorityScopes = () => {
+  			var _a, _b, _c;
+  			const keymap = this.plugin.app.keymap;
+  			const scopes = [
+  				canvas.scope,
+  				(_a = canvas.view) == null ? void 0 : _a.scope,
+  				(_c = (_b = canvas.view) == null ? void 0 : _b.leaf) == null
+  					? void 0
+  					: _c.scope,
+  				keymap == null ? void 0 : keymap.scope
+  			];
+  			for (const scope of scopes) installPriorityBindings(scope);
+  		};
+  		refreshPriorityScopes();
+  		const attachDocument = (doc) => {
+  			if (!doc || documents.has(doc)) return;
+  			doc.addEventListener('keydown', handler, true);
+  			documents.add(doc);
+  		};
+  		const scanEditorDocuments = () => {
+  			for (const node of canvas.nodes.values()) {
+  				var _a;
+  				const iframe =
+  					(_a = node.contentEl) == null
+  						? void 0
+  						: _a.querySelector('iframe');
+  				if (!iframe) continue;
+  				if (!iframes.has(iframe)) {
+  					const loadHandler = () =>
+  						attachDocument(iframe.contentDocument);
+  					iframe.addEventListener('load', loadHandler);
+  					iframes.set(iframe, loadHandler);
+  				}
+  				if (iframe.contentDocument)
+  					attachDocument(iframe.contentDocument);
+  			}
+  		};
+  		canvas.wrapperEl.addEventListener('keydown', handler, true);
+  		scanEditorDocuments();
+  		const observer = new MutationObserver(() => {
+  			scanEditorDocuments();
+  			refreshPriorityScopes();
+  		});
+  		observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
+  		const focusHandler = () => {
+  			scanEditorDocuments();
+  			refreshPriorityScopes();
+  		};
+  		const pointerHandler = () => refreshPriorityScopes();
+  		canvas.wrapperEl.addEventListener('focusin', focusHandler, true);
+  		canvas.wrapperEl.addEventListener('pointerdown', pointerHandler, true);
+  		const refreshRaf = requestAnimationFrame(refreshPriorityScopes);
+  		return () => {
+  			cancelAnimationFrame(refreshRaf);
+  			for (const [scope, bindings] of priorityBindings) {
+  				for (const binding of bindings) {
+  					if (typeof scope.unregister === 'function') {
+  						try {
+  							scope.unregister(binding);
+  						} catch (error) {}
+  					}
+  					if (Array.isArray(scope.keys)) {
+  						const index = scope.keys.indexOf(binding);
+  						if (index >= 0) scope.keys.splice(index, 1);
+  					}
+  				}
+  			}
+  			priorityBindings.clear();
+  			canvas.wrapperEl.removeEventListener('keydown', handler, true);
+  			canvas.wrapperEl.removeEventListener('focusin', focusHandler, true);
+  			canvas.wrapperEl.removeEventListener(
+  				'pointerdown',
+  				pointerHandler,
+  				true
+  			);
+  			observer.disconnect();
+  			for (const doc of documents) {
+  				doc.removeEventListener('keydown', handler, true);
+  			}
+  			for (const [iframe, loadHandler] of iframes) {
+  				iframe.removeEventListener('load', loadHandler);
+  			}
+  			documents.clear();
+  			iframes.clear();
+  		};
+  	}
+  	shouldCaptureArrow(canvas, event) {
+  		if (!event || event.isComposing || event.defaultPrevented) return false;
+  		if (
+  			!this.isMindmapEnabled(canvas) ||
+  			this.canvasApi.getActiveCanvas() !== canvas
+  		)
+  			return false;
+  		if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+  			return false;
+  		const node = this.canvasApi.getSelectedNode(canvas);
+  		return (
+  			!!node &&
+  			!node.isEditing &&
+  			!getGroupIds(canvas).has(node.id) &&
+  			!this.isEditableTarget(event.target)
+  		);
+  	}
+  	shouldCaptureNavigationShortcut(canvas, event) {
+  		if (!event || event.isComposing || event.defaultPrevented) return false;
+  		if (
+  			!this.isMindmapEnabled(canvas) ||
+  			this.canvasApi.getActiveCanvas() !== canvas
+  		)
+  			return false;
+  		const primary = import_obsidian2.Platform.isMacOS
+  			? event.metaKey
+  			: event.ctrlKey;
+  		if (
+  			primary &&
+  			!event.shiftKey &&
+  			!event.altKey &&
+  			event.key.toLowerCase() === 'f'
+  		)
+  			return true;
+  		if (primary && !event.altKey && event.key.toLowerCase() === 'z')
+  			return true;
+  		if (
+  			primary &&
+  			!event.shiftKey &&
+  			!event.altKey &&
+  			event.key.toLowerCase() === 'y'
+  		)
+  			return true;
+  		const node = this.canvasApi.getSelectedNode(canvas);
+  		return (
+  			!!node &&
+  			!node.isEditing &&
+  			!getGroupIds(canvas).has(node.id) &&
+  			!this.isEditableTarget(event.target)
+  		);
+  	}
+  	handleKeydown(canvas, event) {
+  		if (
+  			event.__tomindmapHandled ||
+  			!this.isMindmapEnabled(canvas) ||
+  			event.defaultPrevented ||
+  			event.isComposing
+  		)
+  			return;
+  		const primary = import_obsidian2.Platform.isMacOS
+  			? event.metaKey
+  			: event.ctrlKey;
+  		if (
+  			primary &&
+  			!event.shiftKey &&
+  			!event.altKey &&
+  			event.key.toLowerCase() === 'f'
+  		) {
+  			this.consume(event);
+  			this.onFindRequested?.(canvas);
+  			return;
+  		}
+  		if (primary && !event.altKey && event.key.toLowerCase() === 'z') {
+  			this.consume(event);
+  			if (event.shiftKey) canvas.redo?.();
+  			else canvas.undo?.();
+  			return;
+  		}
+  		if (
+  			primary &&
+  			!event.shiftKey &&
+  			!event.altKey &&
+  			event.key.toLowerCase() === 'y'
+  		) {
+  			this.consume(event);
+  			canvas.redo?.();
+  			return;
+  		}
+  		const node = this.canvasApi.getSelectedNode(canvas);
+  		if (!node || getGroupIds(canvas).has(node.id)) return;
+  		if (node.isEditing) {
+  			this.handleEditingKeydown(canvas, node, event);
+  			return;
+  		}
+  		if (this.isEditableTarget(event.target)) return;
+  		if (
+  			event.key === 'Tab' &&
+  			!event.shiftKey &&
+  			!primary &&
+  			!event.altKey
+  		) {
+  			this.consume(event);
+  			this.addChild(canvas, node);
+  			return;
+  		}
+  		if (event.key === 'Enter') {
+  			this.consume(event);
+  			if (primary) {
+  				this.addParent(canvas, node);
+  			} else {
+  				this.addSibling(canvas, node, event.shiftKey);
+  			}
+  			return;
+  		}
+  		if (
+  			(event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+  			event.altKey &&
+  			!primary
+  		) {
+  			this.consume(event);
+  			this.reorderTopic(canvas, node, event.key === 'ArrowUp' ? -1 : 1);
+  			return;
+  		}
+  		if (
+  			event.key.startsWith('Arrow') &&
+  			!primary &&
+  			!event.altKey &&
+  			!event.shiftKey
+  		) {
+  			const direction = event.key.slice(5).toLowerCase();
+  			this.consume(event);
+  			this.navigate(canvas, node, direction);
+  			return;
+  		}
+  		if (
+  			(event.key === 'Delete' || event.key === 'Backspace') &&
+  			primary &&
+  			!event.altKey
+  		) {
+  			this.consume(event);
+  			this.deleteSingleTopic(canvas, node);
+  			return;
+  		}
+  		if (
+  			(event.key === 'Delete' || event.key === 'Backspace') &&
+  			!primary &&
+  			!event.altKey
+  		) {
+  			this.consume(event);
+  			this.deleteBranch(canvas, node);
+  			return;
+  		}
+  		if (
+  			(event.key === 'Home' && primary) ||
+  			(event.key.toLowerCase() === 'r' &&
+  				primary &&
+  				!event.shiftKey &&
+  				!event.altKey)
+  		) {
+  			this.consume(event);
+  			this.navigateToRoot(canvas, node);
+  			return;
+  		}
+  		if (event.key === 'F2') {
+  			this.consume(event);
+  			this.startEditing(canvas, node);
+  			return;
+  		}
+  		if (event.key === 'Dead' && !primary && !event.altKey) {
+  			this.consume(event);
+  			this.startEditing(canvas, node);
+  			return;
+  		}
+  		if (this.isPrintableKey(event)) {
+  			this.consume(event);
+  			this.startEditing(canvas, node, event.key);
+  		}
+  	}
+  	handleEditingKeydown(canvas, node, event) {
+  		const primary = import_obsidian2.Platform.isMacOS
+  			? event.metaKey
+  			: event.ctrlKey;
+  		if (
+  			event.key === 'Enter' &&
+  			event.shiftKey &&
+  			!primary &&
+  			!event.altKey
+  		) {
+  			this.consume(event);
+  			this.insertEditorText(node, '\n');
+  			return;
+  		}
+  		if (event.key === 'Enter' && !event.shiftKey && !event.altKey) {
+  			this.consume(event);
+  			if (primary) {
+  				this.addParent(canvas, node);
+  			} else {
+  				this.finishEditing(canvas, node);
+  			}
+  			return;
+  		}
+  		if (
+  			event.key === 'Tab' &&
+  			!event.shiftKey &&
+  			!primary &&
+  			!event.altKey
+  		) {
+  			this.consume(event);
+  			this.addChild(canvas, node);
+  			return;
+  		}
+  		if (event.key === 'Escape') {
+  			this.consume(event);
+  			this.finishEditing(canvas, node);
+  		}
+  	}
+  	isEditableTarget(target) {
+  		if (!target || typeof target.closest !== 'function') return false;
+  		return !!target.closest(
+  			'input, textarea, select, [contenteditable="true"], .cm-editor'
+  		);
+  	}
+  	isPrintableKey(event) {
+  		return (
+  			event.key.length === 1 &&
+  			!event.ctrlKey &&
+  			!event.metaKey &&
+  			!event.altKey
+  		);
+  	}
+  	consume(event) {
+  		event.preventDefault();
+  		event.stopImmediatePropagation();
+  	}
+  	startEditing(canvas, node, initialText = '') {
+  		for (const candidate of canvas.nodes.values()) {
+  			var _a;
+  			(_a = candidate.nodeEl) == null
+  				? void 0
+  				: _a.removeClass('tomindmap-navigation-selected');
+  		}
+  		node.startEditing();
+  		if (initialText) this.insertEditorTextWhenReady(node, initialText);
+  	}
+  	insertEditorTextWhenReady(node, text, attempt = 0) {
+  		const view = this.getEditorView(node);
+  		if (view) {
+  			const end = view.state.doc.length;
+  			view.dispatch({ selection: { anchor: end } });
+  			view.dispatch({ changes: { from: end, to: end, insert: text } });
+  			view.focus();
+  			return;
+  		}
+  		if (attempt < 10) {
+  			setTimeout(
+  				() => this.insertEditorTextWhenReady(node, text, attempt + 1),
+  				20
+  			);
+  			return;
+  		}
+  		node.setText(`${node.text || ''}${text}`);
+  		node.startEditing();
+  	}
+  	insertEditorText(node, text) {
+  		const view = this.getEditorView(node);
+  		if (!view) return;
+  		const { from, to } = view.state.selection.main;
+  		view.dispatch({
+  			changes: { from, to, insert: text },
+  			selection: { anchor: from + text.length }
+  		});
+  		view.focus();
+  	}
+  	finishEditing(canvas, node) {
+  		var _a;
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		node.blur();
+  		this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
+  	}
+  	addChild(canvas, node) {
+  		var _a;
+  		let selectedText = null;
+  		if (node.isEditing) selectedText = this.extractAndDeleteSelection(node);
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		const newNode = this.nodeOps.addChild(canvas, node);
+  		if (!newNode) return;
+  		if (selectedText) newNode.setText(selectedText);
+  		this.finishMutation(canvas, node);
+  		this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
+  	}
+  	addSibling(canvas, node, before = false) {
+  		var _a;
+  		let selectedText = null;
+  		if (node.isEditing) selectedText = this.extractAndDeleteSelection(node);
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		const newNode = this.nodeOps.addSibling(canvas, node, before);
+  		if (!newNode) return;
+  		if (selectedText) newNode.setText(selectedText);
+  		const parent = this.canvasApi.getParentNode(canvas, newNode);
+  		this.finishMutation(canvas, parent || node);
+  		this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
+  	}
+  	addParent(canvas, node) {
+  		var _a;
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		const newNode = this.nodeOps.addParent(canvas, node);
+  		if (!newNode) return;
+  		this.finishMutation(canvas, newNode);
+  		this.canvasApi.selectAndEdit(canvas, newNode, this.zoomPadding);
+  	}
+  	deleteBranch(canvas, node) {
+  		var _a;
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		const parent = this.canvasApi.getParentNode(canvas, node);
+  		const removedIds = this.collectBranchIds(canvas, node);
+  		const fallback =
+  			parent || this.nearestRemainingNode(canvas, node, removedIds);
+  		this.nodeOps.deleteSubtree(canvas, node);
+  		this.finishMutation(canvas, fallback);
+  		if (fallback)
+  			this.canvasApi.selectForNavigation(
+  				canvas,
+  				fallback,
+  				this.zoomPadding
+  			);
+  		else this.clearSelection(canvas);
+  	}
+  	deleteSingleTopic(canvas, node) {
+  		var _a;
+  		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
+  		const focusNode = this.nodeOps.deleteAndFocusParent(canvas, node);
+  		this.finishMutation(canvas, focusNode);
+  		if (focusNode)
+  			this.canvasApi.selectForNavigation(
+  				canvas,
+  				focusNode,
+  				this.zoomPadding
+  			);
+  		else this.clearSelection(canvas);
+  	}
+  	finishMutation(canvas, anchor) {
+  		if (anchor) this.relayoutFromAnchor(canvas, anchor);
+  		if (this.autoColorEnabled() && this.isMindmapEnabled(canvas))
+  			this.branchColors.applyColors(canvas);
+  		this.onNodesChanged(canvas);
+  	}
+  	relayoutFromAnchor(canvas, anchor) {
+  		if (
+  			!this.plugin.isAutoAdjustCanvas(canvas) ||
+  			!this.isMindmapEnabled(canvas)
+  		)
+  			return;
+  		// Deletion changes ancestor subtree heights. A partial child layout
+  		// leaves those ancestors at stale coordinates until the next gesture.
+  		this.layoutEngine.layout(canvas);
+  	}
+  	navigate(canvas, node, direction) {
+  		const target = this.findSpatialTarget(canvas, node, direction);
+  		if (target)
+  			this.canvasApi.selectForNavigation(
+  				canvas,
+  				target,
+  				this.zoomPadding
+  			);
+  	}
+  	directionCommand(checking, direction) {
+  		const canvas = this.canvasApi.getActiveCanvas();
+  		if (!canvas || !this.isMindmapEnabled(canvas)) return false;
+  		const node = this.canvasApi.getSelectedNode(canvas);
+  		if (!node) return false;
+  		if (checking) return true;
+  		if (node.isEditing) this.finishEditing(canvas, node);
+  		this.navigate(canvas, node, direction);
+  		return true;
+  	}
+  	findSpatialTarget(canvas, current, direction) {
+  		const groupIds = getGroupIds(canvas);
+  		const all = Array.from(canvas.nodes.values()).filter(
+  			(node) => node.id !== current.id && !groupIds.has(node.id)
+  		);
+  		const buffer = Math.max(
+  			0,
+  			Number(this.plugin.settings.navigationCrossAxisBuffer) || 0
+  		);
+  		const mapRect = [current, ...all].reduce(
+  			(bounds, node) => ({
+  				left: Math.min(bounds.left, node.x),
+  				right: Math.max(bounds.right, node.x + node.width),
+  				top: Math.min(bounds.top, node.y),
+  				bottom: Math.max(bounds.bottom, node.y + node.height)
+  			}),
+  			{
+  				left: Infinity,
+  				right: -Infinity,
+  				top: Infinity,
+  				bottom: -Infinity
+  			}
+  		);
+  		const canvasRect = (node) => ({
+  			left: node.x,
+  			right: node.x + node.width,
+  			top: node.y,
+  			bottom: node.y + node.height,
+  			width: node.width,
+  			height: node.height
+  		});
+  		const currentRect = canvasRect(current);
+  		const currentCenterX = (currentRect.left + currentRect.right) / 2;
+  		const currentCenterY = (currentRect.top + currentRect.bottom) / 2;
+  		const origin =
+  			direction === 'left'
+  				? { x: currentRect.left, y: currentCenterY }
+  				: direction === 'right'
+  					? { x: currentRect.right, y: currentCenterY }
+  					: direction === 'up'
+  						? { x: currentCenterX, y: currentRect.top }
+  						: { x: currentCenterX, y: currentRect.bottom };
+  		const pointFacingOrigin = (rect) =>
+  			direction === 'left'
+  				? { x: rect.right, y: (rect.top + rect.bottom) / 2 }
+  				: direction === 'right'
+  					? { x: rect.left, y: (rect.top + rect.bottom) / 2 }
+  					: direction === 'up'
+  						? { x: (rect.left + rect.right) / 2, y: rect.bottom }
+  						: { x: (rect.left + rect.right) / 2, y: rect.top };
+  		const rayHitsMapEdge = (rayOrigin, dx, dy) => {
+  			if (direction === 'left' || direction === 'right') {
+  				if (Math.abs(dx) < 0.01) return false;
+  				const edgeX =
+  					direction === 'left' ? mapRect.left : mapRect.right;
+  				const t = (edgeX - rayOrigin.x) / dx;
+  				if (t <= 0) return false;
+  				const hitY = rayOrigin.y + t * dy;
+  				return (
+  					hitY >= mapRect.top - buffer &&
+  					hitY <= mapRect.bottom + buffer
+  				);
+  			}
+  			if (Math.abs(dy) < 0.01) return false;
+  			const edgeY = direction === 'up' ? mapRect.top : mapRect.bottom;
+  			const t = (edgeY - rayOrigin.y) / dy;
+  			if (t <= 0) return false;
+  			const hitX = rayOrigin.x + t * dx;
+  			return (
+  				hitX >= mapRect.left - buffer && hitX <= mapRect.right + buffer
+  			);
+  		};
+  		const ranked = all.map((candidate) => {
+  			const rect = canvasRect(candidate);
+  			const point = pointFacingOrigin(rect);
+  			const dx = point.x - origin.x;
+  			const dy = point.y - origin.y;
+  			const primary =
+  				direction === 'left'
+  					? -dx
+  					: direction === 'right'
+  						? dx
+  						: direction === 'up'
+  							? -dy
+  							: dy;
+  			const cross =
+  				direction === 'left' || direction === 'right'
+  					? Math.abs(dy)
+  					: Math.abs(dx);
+  			const strictCrossAxisOverlap =
+  				direction === 'left' || direction === 'right'
+  					? rect.bottom >= currentRect.top &&
+  						rect.top <= currentRect.bottom
+  					: rect.right >= currentRect.left &&
+  						rect.left <= currentRect.right;
+  			const crossAxisOverlap =
+  				direction === 'left' || direction === 'right'
+  					? rect.bottom >= currentRect.top - buffer &&
+  						rect.top <= currentRect.bottom + buffer
+  					: rect.right >= currentRect.left - buffer &&
+  						rect.left <= currentRect.right + buffer;
+  			return {
+  				node: candidate,
+  				primary,
+  				cross,
+  				distance: dx * dx + dy * dy,
+  				alignment: cross / Math.max(primary, 1),
+  				inStrictCorridor: primary > 1 && strictCrossAxisOverlap,
+  				crossAxisOverlap,
+  				inCorridor: primary > 1 && crossAxisOverlap,
+  				inMapWedge: primary > 1 && rayHitsMapEdge(origin, dx, dy),
+  				rect
+  			};
+  		});
+  		const tieBreak = (a, b) => {
+  			const ay = a.node.y + a.node.height / 2;
+  			const by = b.node.y + b.node.height / 2;
+  			const ax = a.node.x + a.node.width / 2;
+  			const bx = b.node.x + b.node.width / 2;
+  			return (
+  				ay - by ||
+  				ax - bx ||
+  				String(a.node.id).localeCompare(String(b.node.id))
+  			);
+  		};
+  		const byDistance = (a, b) => a.distance - b.distance || tieBreak(a, b);
+  		const byAlignmentThenDistance = (a, b) => {
+  			const bandA = Math.floor(a.alignment / 0.12);
+  			const bandB = Math.floor(b.alignment / 0.12);
+  			return bandA - bandB || byDistance(a, b);
+  		};
+  		const strictCorridor = ranked
+  			.filter((candidate) => candidate.inStrictCorridor)
+  			.sort(byDistance);
+  		if (strictCorridor.length > 0) return strictCorridor[0].node;
+  		const corridor = ranked
+  			.filter((candidate) => candidate.inCorridor)
+  			.sort(byAlignmentThenDistance);
+  		if (corridor.length > 0) return corridor[0].node;
+  		const wedge = ranked
+  			.filter((candidate) => candidate.inMapWedge)
+  			.sort(byAlignmentThenDistance);
+  		if (wedge.length > 0) return wedge[0].node;
+  		if (!this.plugin.settings.wrapArrowNavigation) return null;
+  		const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  		const wrapOrigin =
+  			direction === 'left'
+  				? {
+  						x: mapRect.right,
+  						y: clamp(origin.y, mapRect.top, mapRect.bottom)
+  					}
+  				: direction === 'right'
+  					? {
+  							x: mapRect.left,
+  							y: clamp(origin.y, mapRect.top, mapRect.bottom)
+  						}
+  					: direction === 'up'
+  						? {
+  								x: clamp(origin.x, mapRect.left, mapRect.right),
+  								y: mapRect.bottom
+  							}
+  						: {
+  								x: clamp(origin.x, mapRect.left, mapRect.right),
+  								y: mapRect.top
+  							};
+  		const wrapTriangle =
+  			direction === 'left'
+  				? [
+  						wrapOrigin,
+  						{ x: mapRect.left, y: mapRect.top },
+  						{ x: mapRect.left, y: mapRect.bottom }
+  					]
+  				: direction === 'right'
+  					? [
+  							wrapOrigin,
+  							{ x: mapRect.right, y: mapRect.top },
+  							{ x: mapRect.right, y: mapRect.bottom }
+  						]
+  					: direction === 'up'
+  						? [
+  								wrapOrigin,
+  								{ x: mapRect.left, y: mapRect.top },
+  								{ x: mapRect.right, y: mapRect.top }
+  							]
+  						: [
+  								wrapOrigin,
+  								{ x: mapRect.left, y: mapRect.bottom },
+  								{ x: mapRect.right, y: mapRect.bottom }
+  							];
+  		const distanceToRect = (point, rect) => {
+  			const dx =
+  				point.x < rect.left
+  					? rect.left - point.x
+  					: point.x > rect.right
+  						? point.x - rect.right
+  						: 0;
+  			const dy =
+  				point.y < rect.top
+  					? rect.top - point.y
+  					: point.y > rect.bottom
+  						? point.y - rect.bottom
+  						: 0;
+  			return dx * dx + dy * dy;
+  		};
+  		// Perform exactly one wrap. The projected point on the opposite edge is
+  		// the apex of a fresh cone whose base is the two far-side map corners.
+  		// A card touching the apex is inside the cone even though its directional
+  		// delta is zero.
+  		const wrapRanked = ranked.map((candidate) => {
+  			const point = pointFacingOrigin(candidate.rect);
+  			const dx = point.x - wrapOrigin.x;
+  			const dy = point.y - wrapOrigin.y;
+  			const primary =
+  				direction === 'left'
+  					? -dx
+  					: direction === 'right'
+  						? dx
+  						: direction === 'up'
+  							? -dy
+  							: dy;
+  			const cross =
+  				direction === 'left' || direction === 'right'
+  					? Math.abs(dy)
+  					: Math.abs(dx);
+  			const strictStraight =
+  				direction === 'left' || direction === 'right'
+  					? candidate.rect.top <= wrapOrigin.y &&
+  						candidate.rect.bottom >= wrapOrigin.y
+  					: candidate.rect.left <= wrapOrigin.x &&
+  						candidate.rect.right >= wrapOrigin.x;
+  			const straight =
+  				direction === 'left' || direction === 'right'
+  					? candidate.rect.top <= wrapOrigin.y + buffer &&
+  						candidate.rect.bottom >= wrapOrigin.y - buffer
+  					: candidate.rect.left <= wrapOrigin.x + buffer &&
+  						candidate.rect.right >= wrapOrigin.x - buffer;
+  			return {
+  				node: candidate.node,
+  				primary,
+  				cross,
+  				distance: distanceToRect(wrapOrigin, candidate.rect),
+  				alignment: cross / Math.max(primary, 1),
+  				inStrictCorridor: primary > 1 && strictStraight,
+  				inCorridor: primary > 1 && straight,
+  				inMapWedge: rectIntersectsTriangle(candidate.rect, wrapTriangle)
+  			};
+  		});
+  		const wrapWedge = wrapRanked
+  			.filter((candidate) => candidate.inMapWedge)
+  			.sort(byDistance);
+  		if (wrapWedge.length > 0) return wrapWedge[0].node;
+  		return null;
+  	}
+  	collectBranchIds(canvas, node) {
+  		const ids = /* @__PURE__ */ new Set([node.id]);
+  		const queue = [node.id];
+  		for (let cursor = 0; cursor < queue.length; cursor++) {
+  			const id = queue[cursor];
+  			for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
+  				const childId = edge.to.node.id;
+  				if (!ids.has(childId)) {
+  					ids.add(childId);
+  					queue.push(childId);
+  				}
+  			}
+  		}
+  		return ids;
+  	}
+  	nearestRemainingNode(canvas, current, excludedIds) {
+  		const groupIds = getGroupIds(canvas);
+  		const cx = current.x + current.width / 2;
+  		const cy = current.y + current.height / 2;
+  		return (
+  			Array.from(canvas.nodes.values())
+  				.filter(
+  					(node) =>
+  						!excludedIds.has(node.id) && !groupIds.has(node.id)
+  				)
+  				.sort((a, b) => {
+  					const ad = Math.hypot(
+  						a.x + a.width / 2 - cx,
+  						a.y + a.height / 2 - cy
+  					);
+  					const bd = Math.hypot(
+  						b.x + b.width / 2 - cx,
+  						b.y + b.height / 2 - cy
+  					);
+  					return (
+  						ad - bd ||
+  						a.y - b.y ||
+  						a.x - b.x ||
+  						String(a.id).localeCompare(String(b.id))
+  					);
+  				})[0] || null
+  		);
+  	}
+  	clearSelection(canvas) {
+  		if (typeof canvas.deselectAll === 'function') canvas.deselectAll();
+  		if (typeof canvas.requestFrame === 'function') canvas.requestFrame();
+  	}
+  	navigateToRoot(canvas, node) {
+  		const forest = buildForest(canvas);
+  		let tree = findTreeForNode(forest, node.id);
+  		if (!tree) return;
+  		while (tree.parent) tree = tree.parent;
+  		this.canvasApi.selectForNavigation(
+  			canvas,
+  			tree.canvasNode,
+  			this.zoomPadding
+  		);
+  	}
+  	reorderTopic(canvas, node, delta) {
+  		const forest = buildForest(canvas);
+  		const tree = findTreeForNode(forest, node.id);
+  		if (!tree || !tree.parent) return;
+  		const parentCx =
+  			tree.parent.canvasNode.x + tree.parent.canvasNode.width / 2;
+  		const currentCx = node.x + node.width / 2;
+  		const onLeft = currentCx < parentCx;
+  		const siblings = tree.parent.children
+  			.filter((sibling) => {
+  				const siblingCx =
+  					sibling.canvasNode.x + sibling.canvasNode.width / 2;
+  				return siblingCx < parentCx === onLeft;
+  			})
+  			.sort((a, b) => a.canvasNode.y - b.canvasNode.y);
+  		const index = siblings.indexOf(tree);
+  		const targetIndex = index + delta;
+  		if (index < 0 || targetIndex < 0 || targetIndex >= siblings.length)
+  			return;
+  		const target = siblings[targetIndex].canvasNode;
+  		const oldY = node.y;
+  		node.moveTo({ x: node.x, y: target.y });
+  		target.moveTo({ x: target.x, y: oldY });
+  		this.plugin.markMarkdownOrderDirty(canvas);
+  		this.finishMutation(canvas, tree.parent.canvasNode);
+  		this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
+  	}
+  	/**
+  	 * Fallback keydown listener that uses event.code (physical key position)
+  	 * instead of event.key (character). Activates only when a non-Latin layout
+  	 * is detected (event.key doesn't match the expected Latin character),
+  	 * so it won't double-fire with Obsidian's built-in hotkey system.
+  	 */
+  	registerPhysicalKeyShortcuts() {
+  		const shortcuts = [
+  			{
+  				code: 'Period',
+  				key: '.',
+  				ctrl: true,
+  				shift: false,
+  				alt: false,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-add-child`
+  			},
+  			{
+  				code: 'KeyS',
+  				key: 's',
+  				ctrl: true,
+  				shift: false,
+  				alt: false,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-save-node`
+  			},
+  			{
+  				code: 'KeyS',
+  				key: 's',
+  				ctrl: true,
+  				shift: true,
+  				alt: false,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-flip-branch`
+  			},
+  			{
+  				code: 'KeyD',
+  				key: 'd',
+  				ctrl: true,
+  				shift: true,
+  				alt: false,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-toggle-balance`
+  			},
+  			{
+  				code: 'KeyL',
+  				key: 'l',
+  				ctrl: true,
+  				shift: true,
+  				alt: false,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-resize-subtree`
+  			},
+  			{
+  				code: 'KeyR',
+  				key: 'r',
+  				ctrl: true,
+  				shift: true,
+  				alt: true,
+  				cmdId: `${this.plugin.manifest.id}:mindmap-resize-all`
+  			}
+  		];
+  		this.plugin.registerDomEvent(document, 'keydown', (e) => {
+  			var _a, _b, _c;
+  			const canvas = this.canvasApi.getActiveCanvas();
+  			if (!canvas) return;
+  			const ctrlOrCmd = import_obsidian2.Platform.isMacOS
+  				? e.metaKey
+  				: e.ctrlKey;
+  			if (!ctrlOrCmd) return;
+  			if (e.code === 'KeyZ' && !e.altKey && e.key.toLowerCase() !== 'z') {
+  				e.preventDefault();
+  				e.stopPropagation();
+  				if (e.shiftKey) {
+  					(_a = canvas.redo) == null ? void 0 : _a.call(canvas);
+  				} else {
+  					(_b = canvas.undo) == null ? void 0 : _b.call(canvas);
+  				}
+  				return;
+  			}
+  			if (
+  				e.code === 'KeyY' &&
+  				!e.shiftKey &&
+  				!e.altKey &&
+  				e.key.toLowerCase() !== 'y'
+  			) {
+  				e.preventDefault();
+  				e.stopPropagation();
+  				(_c = canvas.redo) == null ? void 0 : _c.call(canvas);
+  				return;
+  			}
+  			const { commands } = this.plugin.app;
+  			if (!(commands == null ? void 0 : commands.executeCommandById))
+  				return;
+  			for (const s of shortcuts) {
+  				if (
+  					e.code === s.code &&
+  					ctrlOrCmd === s.ctrl &&
+  					e.shiftKey === s.shift &&
+  					e.altKey === s.alt
+  				) {
+  					if (e.key.toLowerCase() === s.key) return;
+  					e.preventDefault();
+  					e.stopPropagation();
+  					commands.executeCommandById(s.cmdId);
+  					return;
+  				}
+  			}
+  		});
+  	}
+  	/**
+  	 * Find the child whose vertical center is closest to the current node's.
+  	 */
+  	nearestChild(tree, candidates) {
+  		const children = candidates != null ? candidates : tree.children;
+  		if (children.length === 0) return null;
+  		const nodeCy = tree.canvasNode.y + tree.canvasNode.height / 2;
+  		let best = children[0];
+  		let bestDist = Math.abs(
+  			best.canvasNode.y + best.canvasNode.height / 2 - nodeCy
+  		);
+  		for (let i = 1; i < children.length; i++) {
+  			const childCy =
+  				children[i].canvasNode.y + children[i].canvasNode.height / 2;
+  			const dist = Math.abs(childCy - nodeCy);
+  			if (dist < bestDist) {
+  				best = children[i];
+  				bestDist = dist;
+  			}
+  		}
+  		return best.canvasNode;
+  	}
+  };
 
-	// src/ui/navigation.ts
-	var Navigation = class {
-		constructor(canvasApi) {
-			this.canvasApi = canvasApi;
-		}
-		/**
-		 * Select the entire tree (root + all descendants) that a node belongs to.
-		 * Triggered by Alt+click on a node.
-		 */
-		selectTree(canvas, node) {
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			const treeNode = findTreeForNode(forest, node.id);
-			if (!treeNode) return;
-			let root = treeNode;
-			while (root.parent) root = root.parent;
-			const allNodes = [root, ...getDescendants(root)];
-			canvas.deselectAll();
-			for (const n of allNodes) {
-				canvas.selection.add(n.canvasNode);
-			}
-			canvas.requestFrame();
-		}
-		/**
-		 * Zoom to fit an entire branch (node + all descendants).
-		 * Triggered by Ctrl+click on a node.
-		 */
-		zoomToBranch(canvas, node) {
-			const forest = buildForest(canvas);
-			if (forest.length === 0) return;
-			const treeNode = findTreeForNode(forest, node.id);
-			if (!treeNode) return;
-			const allNodes = [treeNode, ...getDescendants(treeNode)];
-			let minX = Infinity,
-				minY = Infinity,
-				maxX = -Infinity,
-				maxY = -Infinity;
-			for (const n of allNodes) {
-				const cn = n.canvasNode;
-				minX = Math.min(minX, cn.x);
-				minY = Math.min(minY, cn.y);
-				maxX = Math.max(maxX, cn.x + cn.width);
-				maxY = Math.max(maxY, cn.y + cn.height);
-			}
-			const pad = 50;
-			canvas.zoomToBbox({
-				minX: minX - pad,
-				minY: minY - pad,
-				maxX: maxX + pad,
-				maxY: maxY + pad
-			});
-		}
-		/**
-		 * Register Ctrl+click handler for zoom-to-branch.
-		 */
-		registerClickHandler(canvas) {
-			var _a;
-			const handler = (e) => {
-				if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
-				const target = e.target;
-				if (target.closest('.canvas-node-connection-point')) return;
-				const nodeEl = target.closest('.canvas-node');
-				if (!nodeEl) return;
-				for (const node of canvas.nodes.values()) {
-					if (node.nodeEl === nodeEl) {
-						e.preventDefault();
-						e.stopPropagation();
-						if (e.altKey) {
-							this.selectTree(canvas, node);
-						} else {
-							this.zoomToBranch(canvas, node);
-						}
-						break;
-					}
-				}
-			};
-			(_a = canvas.wrapperEl) == null
-				? void 0
-				: _a.addEventListener('click', handler, true);
-			return () => {
-				var _a2;
-				(_a2 = canvas.wrapperEl) == null
-					? void 0
-					: _a2.removeEventListener('click', handler, true);
-			};
-		}
-	};
+  // src/ui/navigation.ts
+  var Navigation = class {
+  	constructor(canvasApi) {
+  		this.canvasApi = canvasApi;
+  	}
+  	/**
+  	 * Select the entire tree (root + all descendants) that a node belongs to.
+  	 * Triggered by Alt+click on a node.
+  	 */
+  	selectTree(canvas, node) {
+  		const forest = buildForest(canvas);
+  		if (forest.length === 0) return;
+  		const treeNode = findTreeForNode(forest, node.id);
+  		if (!treeNode) return;
+  		let root = treeNode;
+  		while (root.parent) root = root.parent;
+  		const allNodes = [root, ...getDescendants(root)];
+  		canvas.deselectAll();
+  		for (const n of allNodes) {
+  			canvas.selection.add(n.canvasNode);
+  		}
+  		canvas.requestFrame();
+  	}
+  	/**
+  	 * Zoom to fit an entire branch (node + all descendants).
+  	 * Triggered by Ctrl+click on a node.
+  	 */
+  	zoomToBranch(canvas, node) {
+  		const forest = buildForest(canvas);
+  		if (forest.length === 0) return;
+  		const treeNode = findTreeForNode(forest, node.id);
+  		if (!treeNode) return;
+  		const allNodes = [treeNode, ...getDescendants(treeNode)];
+  		let minX = Infinity,
+  			minY = Infinity,
+  			maxX = -Infinity,
+  			maxY = -Infinity;
+  		for (const n of allNodes) {
+  			const cn = n.canvasNode;
+  			minX = Math.min(minX, cn.x);
+  			minY = Math.min(minY, cn.y);
+  			maxX = Math.max(maxX, cn.x + cn.width);
+  			maxY = Math.max(maxY, cn.y + cn.height);
+  		}
+  		const pad = 50;
+  		canvas.zoomToBbox({
+  			minX: minX - pad,
+  			minY: minY - pad,
+  			maxX: maxX + pad,
+  			maxY: maxY + pad
+  		});
+  	}
+  	/**
+  	 * Register Ctrl+click handler for zoom-to-branch.
+  	 */
+  	registerClickHandler(canvas) {
+  		var _a;
+  		const handler = (e) => {
+  			if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
+  			const target = e.target;
+  			if (target.closest('.canvas-node-connection-point')) return;
+  			const nodeEl = target.closest('.canvas-node');
+  			if (!nodeEl) return;
+  			for (const node of canvas.nodes.values()) {
+  				if (node.nodeEl === nodeEl) {
+  					e.preventDefault();
+  					e.stopPropagation();
+  					if (e.altKey) {
+  						this.selectTree(canvas, node);
+  					} else {
+  						this.zoomToBranch(canvas, node);
+  					}
+  					break;
+  				}
+  			}
+  		};
+  		(_a = canvas.wrapperEl) == null
+  			? void 0
+  			: _a.addEventListener('click', handler, true);
+  		return () => {
+  			var _a2;
+  			(_a2 = canvas.wrapperEl) == null
+  				? void 0
+  				: _a2.removeEventListener('click', handler, true);
+  		};
+  	}
+  };
 
-	module.exports = { KeyboardHandler, Navigation };
-	return module.exports;
+  module.exports = { KeyboardHandler, Navigation };
+  return module.exports;
 })();
 // </tomindmap:module keyboard-navigation>
 
@@ -5142,1639 +4388,1611 @@ var { KeyboardHandler, Navigation } = (() => {
 var import_obsidian3 = require('obsidian');
 // <tomindmap:module settings>
 var { DEFAULT_SETTINGS, normalizeSettings } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const DEFAULT_SETTINGS = Object.freeze({
-		autoColor: true,
-		horizontalGap: 80,
-		verticalGap: 20,
-		minNodeWidth: 180,
-		maxNodeWidth: 1200,
-		defaultNodeWidth: 300,
-		defaultNodeHeight: 60,
-		maxNodeHeight: 2400,
-		defaultMindmapMode: true,
-		wrapArrowNavigation: true,
-		navigationCrossAxisBuffer: 40,
-		navigationZoomPadding: 200,
-		mouseNavigation: false,
-		exportMarkmapFrontmatter: true,
-		markmapColorFreezeLevel: 2
-	});
+  const module = { exports: {} };
+  const exports = module.exports;
+  const DEFAULT_SETTINGS = Object.freeze({
+    autoColor: true,
+    horizontalGap: 80,
+    verticalGap: 20,
+    minNodeWidth: 180,
+    maxNodeWidth: 1200,
+    defaultNodeWidth: 300,
+    defaultNodeHeight: 60,
+    maxNodeHeight: 2400,
+    defaultMindmapMode: true,
+    wrapArrowNavigation: true,
+    navigationCrossAxisBuffer: 40,
+    navigationZoomPadding: 200,
+    mouseNavigation: false,
+    exportMarkmapFrontmatter: true,
+    markmapColorFreezeLevel: 2
+  });
 
-	const NUMBER_RULES = {
-		horizontalGap: [1, 2000],
-		verticalGap: [1, 2000],
-		minNodeWidth: [80, 12000],
-		maxNodeWidth: [80, 12000],
-		defaultNodeWidth: [80, 12000],
-		defaultNodeHeight: [20, 24000],
-		maxNodeHeight: [20, 24000],
-		navigationCrossAxisBuffer: [0, 2000],
-		navigationZoomPadding: [0, 10000],
-		markmapColorFreezeLevel: [0, 10]
-	};
+  const NUMBER_RULES = {
+    horizontalGap: [1, 2000],
+    verticalGap: [1, 2000],
+    minNodeWidth: [80, 12000],
+    maxNodeWidth: [80, 12000],
+    defaultNodeWidth: [80, 12000],
+    defaultNodeHeight: [20, 24000],
+    maxNodeHeight: [20, 24000],
+    navigationCrossAxisBuffer: [0, 2000],
+    navigationZoomPadding: [0, 10000],
+    markmapColorFreezeLevel: [0, 10]
+  };
 
-	function finiteInteger(value, fallback, minimum, maximum) {
-		const number =
-			typeof value === 'number'
-				? value
-				: Number.parseFloat(String(value));
-		if (!Number.isFinite(number)) return fallback;
-		return Math.min(maximum, Math.max(minimum, Math.round(number)));
-	}
+  function finiteInteger(value, fallback, minimum, maximum) {
+    const number = typeof value === "number" ? value : Number.parseFloat(String(value));
+    if (!Number.isFinite(number))
+      return fallback;
+    return Math.min(maximum, Math.max(minimum, Math.round(number)));
+  }
 
-	function normalizeSettings(stored = {}) {
-		const source = stored && typeof stored === 'object' ? stored : {};
-		const result = { ...DEFAULT_SETTINGS };
+  function normalizeSettings(stored = {}) {
+    const source = stored && typeof stored === "object" ? stored : {};
+    const result = { ...DEFAULT_SETTINGS };
 
-		for (const key of [
-			'autoColor',
-			'defaultMindmapMode',
-			'wrapArrowNavigation',
-			'mouseNavigation',
-			'exportMarkmapFrontmatter'
-		]) {
-			if (typeof source[key] === 'boolean') result[key] = source[key];
-		}
+    for (const key of [
+      "autoColor",
+      "defaultMindmapMode",
+      "wrapArrowNavigation",
+      "mouseNavigation",
+      "exportMarkmapFrontmatter"
+    ]) {
+      if (typeof source[key] === "boolean")
+        result[key] = source[key];
+    }
 
-		for (const [key, [minimum, maximum]] of Object.entries(NUMBER_RULES)) {
-			result[key] = finiteInteger(
-				source[key],
-				DEFAULT_SETTINGS[key],
-				minimum,
-				maximum
-			);
-		}
+    for (const [key, [minimum, maximum]] of Object.entries(NUMBER_RULES)) {
+      result[key] = finiteInteger(source[key], DEFAULT_SETTINGS[key], minimum, maximum);
+    }
 
-		// Keep the three width settings internally coherent even when data.json was
-		// hand-edited or came from an older version.
-		result.maxNodeWidth = Math.max(
-			result.minNodeWidth,
-			result.maxNodeWidth
-		);
-		result.defaultNodeWidth = Math.min(
-			result.maxNodeWidth,
-			Math.max(result.minNodeWidth, result.defaultNodeWidth)
-		);
-		result.maxNodeHeight = Math.max(
-			result.defaultNodeHeight,
-			result.maxNodeHeight
-		);
-		return result;
-	}
+    // Keep the three width settings internally coherent even when data.json was
+    // hand-edited or came from an older version.
+    result.maxNodeWidth = Math.max(result.minNodeWidth, result.maxNodeWidth);
+    result.defaultNodeWidth = Math.min(
+      result.maxNodeWidth,
+      Math.max(result.minNodeWidth, result.defaultNodeWidth)
+    );
+    result.maxNodeHeight = Math.max(result.defaultNodeHeight, result.maxNodeHeight);
+    return result;
+  }
 
-	module.exports = { DEFAULT_SETTINGS, normalizeSettings };
-	return module.exports;
+  module.exports = { DEFAULT_SETTINGS, normalizeSettings };
+  return module.exports;
 })();
 // </tomindmap:module settings>
 // <tomindmap:module media-drop>
 var MediaDrop = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const IMAGE_EXTENSIONS = new Set([
-		'avif',
-		'bmp',
-		'gif',
-		'jpeg',
-		'jpg',
-		'png',
-		'svg',
-		'webp'
-	]);
-	const VIDEO_EXTENSIONS = new Set(['m4v', 'mov', 'mp4', 'ogv', 'webm']);
-	const AUDIO_EXTENSIONS = new Set([
-		'flac',
-		'm4a',
-		'mp3',
-		'oga',
-		'ogg',
-		'wav'
-	]);
+  const module = { exports: {} };
+  const exports = module.exports;
+  const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
+  const VIDEO_EXTENSIONS = new Set(["m4v", "mov", "mp4", "ogv", "webm"]);
+  const AUDIO_EXTENSIONS = new Set(["flac", "m4a", "mp3", "oga", "ogg", "wav"]);
 
-	function extensionOf(name) {
-		const clean = String(name || '').split(/[?#]/)[0];
-		const index = clean.lastIndexOf('.');
-		return index >= 0 ? clean.slice(index + 1).toLowerCase() : '';
-	}
+  function extensionOf(name) {
+    const clean = String(name || "").split(/[?#]/)[0];
+    const index = clean.lastIndexOf(".");
+    return index >= 0 ? clean.slice(index + 1).toLowerCase() : "";
+  }
 
-	function mediaKind(name, mimeType = '') {
-		const extension = extensionOf(name);
-		const mime = String(mimeType || '').toLowerCase();
-		if (extension === 'pdf' || mime === 'application/pdf')
-			return 'document';
-		if (IMAGE_EXTENSIONS.has(extension) || mime.startsWith('image/'))
-			return 'image';
-		if (VIDEO_EXTENSIONS.has(extension) || mime.startsWith('video/'))
-			return 'video';
-		if (AUDIO_EXTENSIONS.has(extension) || mime.startsWith('audio/'))
-			return 'audio';
-		return 'file';
-	}
+  function mediaKind(name, mimeType = "") {
+    const extension = extensionOf(name);
+    const mime = String(mimeType || "").toLowerCase();
+    if (extension === "pdf" || mime === "application/pdf")
+      return "document";
+    if (IMAGE_EXTENSIONS.has(extension) || mime.startsWith("image/"))
+      return "image";
+    if (VIDEO_EXTENSIONS.has(extension) || mime.startsWith("video/"))
+      return "video";
+    if (AUDIO_EXTENSIONS.has(extension) || mime.startsWith("audio/"))
+      return "audio";
+    return "file";
+  }
 
-	function mediaNodeSize(name, mimeType, settings = {}) {
-		const kind = mediaKind(name, mimeType);
-		const minWidth = Math.max(80, Number(settings.minNodeWidth) || 180);
-		const maxWidth = Math.max(
-			minWidth,
-			Number(settings.maxNodeWidth) || 1200
-		);
-		const maxHeight = Math.max(20, Number(settings.maxNodeHeight) || 2400);
-		const defaultHeight = Math.max(
-			20,
-			Number(settings.defaultNodeHeight) || 60
-		);
-		const sizes = {
-			document: [640, 480],
-			image: [480, 320],
-			video: [480, 300],
-			audio: [420, 110],
-			file: [400, 240]
-		};
-		const [width, height] = sizes[kind];
-		return {
-			kind,
-			width: Math.min(maxWidth, Math.max(minWidth, width)),
-			height: Math.min(maxHeight, Math.max(defaultHeight, height))
-		};
-	}
+  function mediaNodeSize(name, mimeType, settings = {}) {
+    const kind = mediaKind(name, mimeType);
+    const minWidth = Math.max(80, Number(settings.minNodeWidth) || 180);
+    const maxWidth = Math.max(minWidth, Number(settings.maxNodeWidth) || 1200);
+    const maxHeight = Math.max(20, Number(settings.maxNodeHeight) || 2400);
+    const defaultHeight = Math.max(20, Number(settings.defaultNodeHeight) || 60);
+    const sizes = {
+      document: [640, 480],
+      image: [480, 320],
+      video: [480, 300],
+      audio: [420, 110],
+      file: [400, 240]
+    };
+    const [width, height] = sizes[kind];
+    return {
+      kind,
+      width: Math.min(maxWidth, Math.max(minWidth, width)),
+      height: Math.min(maxHeight, Math.max(defaultHeight, height))
+    };
+  }
 
-	function createFileNodeSpec(
-		filePath,
-		mimeType,
-		position,
-		settings = {},
-		id = ''
-	) {
-		const size = mediaNodeSize(filePath, mimeType, settings);
-		return {
-			id,
-			type: 'file',
-			file: filePath,
-			x: Number(position?.x) || 0,
-			y: Number(position?.y) || 0,
-			width: size.width,
-			height: size.height
-		};
-	}
+  function createFileNodeSpec(filePath, mimeType, position, settings = {}, id = "") {
+    const size = mediaNodeSize(filePath, mimeType, settings);
+    return {
+      id,
+      type: "file",
+      file: filePath,
+      x: Number(position?.x) || 0,
+      y: Number(position?.y) || 0,
+      width: size.width,
+      height: size.height
+    };
+  }
 
-	function extractFilePathFromUrl(url) {
-		if (!url) return null;
-		let str = String(url).trim();
+  function extractFilePathFromUrl(url) {
+    if (!url) return null;
+    let str = String(url).trim();
 
-		// 1. Wikilink [[Path/To/Note]] or embed ![[Path/To/Note|Alias]]
-		if (
-			(str.startsWith('[[') || str.startsWith('![[')) &&
-			str.endsWith(']]')
-		) {
-			const offset = str.startsWith('![[') ? 3 : 2;
-			let inner = str.slice(offset, -2).split('|')[0].trim();
-			if (!inner.includes('.')) inner += '.md';
-			return inner;
-		}
+    // 1. Wikilink [[Path/To/Note]] or embed ![[Path/To/Note|Alias]]
+    if ((str.startsWith("[[") || str.startsWith("![[")) && str.endsWith("]]")) {
+      const offset = str.startsWith("![[") ? 3 : 2;
+      let inner = str.slice(offset, -2).split("|")[0].trim();
+      if (!inner.includes(".")) inner += ".md";
+      return inner;
+    }
 
-		// 2. Markdown link [Text](path)
-		const mdMatch = str.match(/^!?\[.*?\]\((.*?)\)$/);
-		if (mdMatch) {
-			str = mdMatch[1].trim();
-			if (str.startsWith('<') && str.endsWith('>'))
-				str = str.slice(1, -1).trim();
-		}
+    // 2. Markdown link [Text](path)
+    const mdMatch = str.match(/^!?\[.*?\]\((.*?)\)$/);
+    if (mdMatch) {
+      str = mdMatch[1].trim();
+      if (str.startsWith("<") && str.endsWith(">"))
+        str = str.slice(1, -1).trim();
+    }
 
-		// 3. obsidian:// URIs (e.g. obsidian://open?vault=...&file=...)
-		if (str.startsWith('obsidian:')) {
-			try {
-				const u = new URL(str);
-				if (u.searchParams.has('file')) {
-					return u.searchParams.get('file');
-				}
-			} catch (_) {}
-		}
+    // 3. obsidian:// URIs (e.g. obsidian://open?vault=...&file=...)
+    if (str.startsWith("obsidian:")) {
+      try {
+        const u = new URL(str);
+        if (u.searchParams.has("file")) {
+          return u.searchParams.get("file");
+        }
+      } catch (_) {}
+    }
 
-		// 4. app://... (Obsidian internal resource URLs)
-		if (str.startsWith('app://')) {
-			try {
-				const parsed = new URL(str);
-				return decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
-			} catch (_) {}
-		}
+    // 4. app://... (Obsidian internal resource URLs)
+    if (str.startsWith("app://")) {
+      try {
+        const parsed = new URL(str);
+        return decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+      } catch (_) {}
+    }
 
-		// 5. file:// URIs
-		if (str.startsWith('file://')) {
-			try {
-				return decodeURIComponent(new URL(str).pathname);
-			} catch (_) {}
-		}
+    // 5. file:// URIs
+    if (str.startsWith("file://")) {
+      try {
+        return decodeURIComponent(new URL(str).pathname);
+      } catch (_) {}
+    }
 
-		// 6. Direct vault paths. Keep this extension-agnostic so audio, video,
-		// office documents, and plugin-defined file types are supported too.
-		// Remote resources must remain link nodes. A URL ending in ".pdf" is not a
-		// vault path and Canvas cannot render it as a native file card.
-		if (/^[a-z][a-z0-9+.-]*:/i.test(str)) {
-			return null;
-		}
-		const cleanStr = str.replace(/[?#].*$/, '');
-		if (/(?:^|\/)[^/]+\.[a-z0-9][a-z0-9._-]{0,20}$/i.test(cleanStr)) {
-			try {
-				return decodeURIComponent(cleanStr);
-			} catch (_) {
-				return cleanStr;
-			}
-		}
+    // 6. Direct vault paths. Keep this extension-agnostic so audio, video,
+    // office documents, and plugin-defined file types are supported too.
+    // Remote resources must remain link nodes. A URL ending in ".pdf" is not a
+    // vault path and Canvas cannot render it as a native file card.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(str)) {
+      return null;
+    }
+    const cleanStr = str.replace(/[?#].*$/, "");
+    if (/(?:^|\/)[^/]+\.[a-z0-9][a-z0-9._-]{0,20}$/i.test(cleanStr)) {
+      try {
+        return decodeURIComponent(cleanStr);
+      } catch (_) {
+        return cleanStr;
+      }
+    }
 
-		return null;
-	}
+    return null;
+  }
 
-	function obsidianDragPath(payload) {
-		const value = String(payload || '').trim();
-		if (!value) return '';
+  function obsidianDragPath(payload) {
+    const value = String(payload || "").trim();
+    if (!value) return "";
 
-		const pathFromEntry = (entry) => {
-			if (typeof entry === 'string') return entry.trim();
-			if (!entry || typeof entry !== 'object') return '';
-			return String(
-				entry.path || entry.file || entry.filePath || ''
-			).trim();
-		};
+    const pathFromEntry = (entry) => {
+      if (typeof entry === "string") return entry.trim();
+      if (!entry || typeof entry !== "object") return "";
+      return String(entry.path || entry.file || entry.filePath || "").trim();
+    };
 
-		try {
-			const parsed = JSON.parse(value);
-			if (Array.isArray(parsed)) {
-				for (const entry of parsed) {
-					const path = pathFromEntry(entry);
-					if (path) return path;
-				}
-				return '';
-			}
-			return pathFromEntry(parsed);
-		} catch (_) {
-			return value;
-		}
-	}
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          const path = pathFromEntry(entry);
+          if (path) return path;
+        }
+        return "";
+      }
+      return pathFromEntry(parsed);
+    } catch (_) {
+      return value;
+    }
+  }
 
-	function createLinkNodeSpec(url, position, settings = {}, id = '') {
-		const filePath = extractFilePathFromUrl(url);
-		const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(
-			String(url || '').trim()
-		);
-		if (filePath && !hasUriScheme) {
-			const size = mediaNodeSize(filePath, '', settings);
-			return {
-				id,
-				type: 'file',
-				file: filePath,
-				x: Number(position?.x) || 0,
-				y: Number(position?.y) || 0,
-				width: size.width,
-				height: size.height
-			};
-		}
+  function createLinkNodeSpec(url, position, settings = {}, id = "") {
+    const filePath = extractFilePathFromUrl(url);
+    const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(String(url || "").trim());
+    if (filePath && !hasUriScheme) {
+      const size = mediaNodeSize(filePath, "", settings);
+      return {
+        id,
+        type: "file",
+        file: filePath,
+        x: Number(position?.x) || 0,
+        y: Number(position?.y) || 0,
+        width: size.width,
+        height: size.height
+      };
+    }
 
-		const isObsidianUrl = String(url || '').startsWith('obsidian:');
-		if (isObsidianUrl) {
-			return {
-				id,
-				type: 'text',
-				text: `[Obsidian link](<${url}>)`,
-				x: Number(position?.x) || 0,
-				y: Number(position?.y) || 0,
-				width: 420,
-				height: 110
-			};
-		}
+    const isObsidianUrl = String(url || "").startsWith("obsidian:");
+    if (isObsidianUrl) {
+      return {
+        id,
+        type: "text",
+        text: `[Obsidian link](<${url}>)`,
+        x: Number(position?.x) || 0,
+        y: Number(position?.y) || 0,
+        width: 420,
+        height: 110
+      };
+    }
 
-		return {
-			id,
-			type: 'link',
-			url,
-			x: Number(position?.x) || 0,
-			y: Number(position?.y) || 0,
-			width: 480,
-			height: 280
-		};
-	}
+    return {
+      id,
+      type: "link",
+      url,
+      x: Number(position?.x) || 0,
+      y: Number(position?.y) || 0,
+      width: 480,
+      height: 280
+    };
+  }
 
-	function droppedUrl(dataTransfer) {
-		if (!dataTransfer || typeof dataTransfer.getData !== 'function')
-			return '';
-		let uriList = '';
-		let plainText = '';
-		let obsidianAppFile = '';
-		try {
-			uriList = dataTransfer.getData('text/uri-list') || '';
-			plainText = dataTransfer.getData('text/plain') || '';
-			obsidianAppFile =
-				dataTransfer.getData('application/x-obsidian-app-file') || '';
-		} catch (_) {
-			return '';
-		}
+  function droppedUrl(dataTransfer) {
+    if (!dataTransfer || typeof dataTransfer.getData !== "function")
+      return "";
+    let uriList = "";
+    let plainText = "";
+    let obsidianAppFile = "";
+    try {
+      uriList = dataTransfer.getData("text/uri-list") || "";
+      plainText = dataTransfer.getData("text/plain") || "";
+      obsidianAppFile = dataTransfer.getData("application/x-obsidian-app-file") || "";
+    } catch (_) {
+      return "";
+    }
 
-		// Check application/x-obsidian-app-file first (Obsidian file explorer drag)
-		if (obsidianAppFile) {
-			const path = obsidianDragPath(obsidianAppFile);
-			if (path) return path;
-		}
+    // Check application/x-obsidian-app-file first (Obsidian file explorer drag)
+    if (obsidianAppFile) {
+      const path = obsidianDragPath(obsidianAppFile);
+      if (path) return path;
+    }
 
-		const candidate =
-			uriList
-				.split(/\r?\n/)
-				.map((line) => line.trim())
-				.find((line) => line && !line.startsWith('#')) ||
-			plainText.trim();
+    const candidate = uriList
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("#"))
+      || plainText.trim();
 
-		if (!candidate) return '';
+    if (!candidate) return "";
 
-		if (
-			candidate.startsWith('obsidian:') ||
-			candidate.startsWith('http:') ||
-			candidate.startsWith('https:') ||
-			candidate.startsWith('app://') ||
-			candidate.startsWith('file://')
-		) {
-			return candidate;
-		}
+    if (candidate.startsWith("obsidian:") || candidate.startsWith("http:") || candidate.startsWith("https:") || candidate.startsWith("app://") || candidate.startsWith("file://")) {
+      return candidate;
+    }
 
-		if (candidate.startsWith('[[') && candidate.includes(']]')) {
-			return candidate;
-		}
+    if (candidate.startsWith("[[") && candidate.includes("]]")) {
+      return candidate;
+    }
 
-		const extracted = extractFilePathFromUrl(candidate);
-		if (extracted) {
-			return extracted;
-		}
+    const extracted = extractFilePathFromUrl(candidate);
+    if (extracted) {
+      return extracted;
+    }
 
-		try {
-			const url = new URL(candidate);
-			return ['http:', 'https:', 'obsidian:', 'app:', 'file:'].includes(
-				url.protocol
-			)
-				? url.href
-				: candidate;
-		} catch (_) {
-			if (
-				candidate.includes('/') ||
-				candidate.endsWith('.md') ||
-				candidate.endsWith('.canvas')
-			) {
-				return candidate;
-			}
-		}
+    try {
+      const url = new URL(candidate);
+      return ["http:", "https:", "obsidian:", "app:", "file:"].includes(url.protocol) ? url.href : candidate;
+    } catch (_) {
+      if (candidate.includes("/") || candidate.endsWith(".md") || candidate.endsWith(".canvas")) {
+        return candidate;
+      }
+    }
 
-		return '';
-	}
+    return "";
+  }
 
-	function hasSupportedDrop(dataTransfer) {
-		if (!dataTransfer) return false;
-		if (dataTransfer.files?.length > 0) return true;
-		if (
-			dataTransfer.types &&
-			Array.from(dataTransfer.types).includes(
-				'application/x-obsidian-app-file'
-			)
-		)
-			return true;
-		if (droppedUrl(dataTransfer)) return true;
-		return Array.from(dataTransfer.types || []).includes('text/uri-list');
-	}
+  function hasSupportedDrop(dataTransfer) {
+    if (!dataTransfer)
+      return false;
+    if (dataTransfer.files?.length > 0)
+      return true;
+    if (dataTransfer.types && Array.from(dataTransfer.types).includes("application/x-obsidian-app-file"))
+      return true;
+    if (droppedUrl(dataTransfer))
+      return true;
+    return Array.from(dataTransfer.types || []).includes("text/uri-list");
+  }
 
-	function linkLabel(url) {
-		try {
-			const parsed = new URL(url);
-			if (parsed.protocol === 'obsidian:') return 'Obsidian link';
-			return parsed.hostname.replace(/^www\./, '') || 'Web link';
-		} catch (_) {
-			return 'Link';
-		}
-	}
+  function linkLabel(url) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "obsidian:")
+        return "Obsidian link";
+      return parsed.hostname.replace(/^www\./, "") || "Web link";
+    } catch (_) {
+      return "Link";
+    }
+  }
 
-	module.exports = {
-		createFileNodeSpec,
-		createLinkNodeSpec,
-		droppedUrl,
-		extractFilePathFromUrl,
-		hasSupportedDrop,
-		linkLabel,
-		mediaKind,
-		mediaNodeSize,
-		obsidianDragPath
-	};
-	return module.exports;
+  module.exports = {
+    createFileNodeSpec,
+    createLinkNodeSpec,
+    droppedUrl,
+    extractFilePathFromUrl,
+    hasSupportedDrop,
+    linkLabel,
+    mediaKind,
+    mediaNodeSize,
+    obsidianDragPath
+  };
+  return module.exports;
 })();
 // </tomindmap:module media-drop>
 // <tomindmap:module tree-drag>
 var TreeDrag = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const ATTACHMENT_DISTANCE = 180;
-
-	const treeModel =
-		(typeof require === 'function'
-			? (() => {
-					try {
-						return require('./tree-model.js');
-					} catch (_) {
-						return {};
-					}
-				})()
-			: {}) || {};
-
-	function getFindTreeForNode() {
-		return (
-			treeModel.findTreeForNode ||
-			(typeof findTreeForNode === 'function' ? findTreeForNode : null)
-		);
-	}
-
-	function getGetDescendants() {
-		return (
-			treeModel.getDescendants ||
-			(typeof getDescendants === 'function' ? getDescendants : null)
-		);
-	}
-
-	function getNodeCenter(node) {
-		return {
-			x: Number(node?.x || 0) + Number(node?.width || 0) / 2,
-			y: Number(node?.y || 0) + Number(node?.height || 0) / 2
-		};
-	}
-
-	/**
-	 * Determine which side of the main/root node a topic currently occupies.
-	 *
-	 * Right-side topic:
-	 *   parent right -> child left
-	 *
-	 * Left-side topic:
-	 *   parent left -> child right
-	 */
-	function getBranchSide(node, mainRootNode) {
-		if (!node || !mainRootNode) {
-			return 'right';
-		}
-
-		return getNodeCenter(node).x >= getNodeCenter(mainRootNode).x
-			? 'right'
-			: 'left';
-	}
-
-	function getConnectionSides(childNode, mainRootNode, parentNode = null) {
-		// The dragged/child card is the sole side authority. Using the prospective
-		// parent here allowed a left-side drop to inherit a right-side attachment
-		// (or vice versa) when ray selection chose a deeper parent.
-		const branchSide = getBranchSide(childNode, mainRootNode);
-
-		if (branchSide === 'right') {
-			return {
-				branchSide,
-				fromSide: 'right',
-				toSide: 'left'
-			};
-		}
-
-		return {
-			branchSide,
-			fromSide: 'left',
-			toSide: 'right'
-		};
-	}
-
-	function classifyDropZone(targetNode, point) {
-		if (!targetNode || !point) {
-			return 'child';
-		}
-
-		const width = Math.max(1, Number(targetNode.width) || 1);
-		const height = Math.max(1, Number(targetNode.height) || 1);
-
-		const relX = (Number(point.x || 0) - Number(targetNode.x || 0)) / width;
-		const relY =
-			(Number(point.y || 0) - Number(targetNode.y || 0)) / height;
-
-		if (relX >= 0.2 && relX <= 0.8 && relY >= 0.2 && relY <= 0.8) {
-			return 'child';
-		}
-
-		if (relY < 0.2) {
-			return 'sibling-above';
-		}
-
-		if (relY > 0.8) {
-			return 'sibling-below';
-		}
-
-		if (relX < 0.2) {
-			return 'sibling-left';
-		}
-
-		if (relX > 0.8) {
-			return 'sibling-right';
-		}
-
-		return 'child';
-	}
-
-	/**
-	 * Returns true when targetId is rootId itself or belongs to its subtree.
-	 */
-	function isDescendant(forest, rootId, targetId) {
-		if (!rootId || !targetId) {
-			return false;
-		}
-
-		if (rootId === targetId) {
-			return true;
-		}
-
-		const findFn = getFindTreeForNode();
-		const descendantsFn = getGetDescendants();
-
-		if (!findFn || !descendantsFn) {
-			return false;
-		}
-
-		const treeNode = findFn(forest, rootId);
-
-		if (!treeNode) {
-			return false;
-		}
-
-		const descendants = descendantsFn(treeNode);
-
-		return descendants.some((item) => item?.canvasNode?.id === targetId);
-	}
-
-	/**
-	 * Distance from point C to finite segment A-B.
-	 *
-	 * `t` is deliberately returned unclamped:
-	 *   t < 0: before A
-	 *   0..1: between A and B
-	 *   t > 1: beyond B
-	 */
-	function pointToSegmentDistance(C, A, B) {
-		const vx = B.x - A.x;
-		const vy = B.y - A.y;
-		const lengthSquared = vx * vx + vy * vy;
-
-		if (lengthSquared === 0) {
-			const dx = C.x - A.x;
-			const dy = C.y - A.y;
-
-			return {
-				dist: Math.hypot(dx, dy),
-				t: 0,
-				clampedT: 0,
-				proj: {
-					x: A.x,
-					y: A.y
-				}
-			};
-		}
-
-		const t = ((C.x - A.x) * vx + (C.y - A.y) * vy) / lengthSquared;
-
-		const clampedT = Math.max(0, Math.min(1, t));
-
-		const projectedPoint = {
-			x: A.x + clampedT * vx,
-			y: A.y + clampedT * vy
-		};
-
-		return {
-			dist: Math.hypot(C.x - projectedPoint.x, C.y - projectedPoint.y),
-			t,
-			clampedT,
-			proj: projectedPoint
-		};
-	}
-
-	/**
-	 * Approximate distance between a point and a node's rectangular bounds.
-	 *
-	 * Returns zero if the point lies inside the node.
-	 */
-	function pointToNodeDistance(point, node) {
-		const left = Number(node.x || 0);
-		const top = Number(node.y || 0);
-		const right = left + Math.max(1, Number(node.width) || 1);
-		const bottom = top + Math.max(1, Number(node.height) || 1);
-
-		const dx = Math.max(left - point.x, 0, point.x - right);
-		const dy = Math.max(top - point.y, 0, point.y - bottom);
-
-		return Math.hypot(dx, dy);
-	}
-
-	/**
-	 * Shortest edge-to-edge distance between two rectangular Canvas nodes.
-	 *
-	 * This is deliberately a fixed local distance, not a radius around a root or
-	 * around the complete graph. Overlapping/touching cards have distance zero.
-	 */
-	function nodeToNodeDistance(leftNode, rightNode) {
-		if (!leftNode || !rightNode) return Infinity;
-		const left = Number(leftNode.x || 0);
-		const top = Number(leftNode.y || 0);
-		const right = left + Math.max(1, Number(leftNode.width) || 1);
-		const bottom = top + Math.max(1, Number(leftNode.height) || 1);
-		const otherLeft = Number(rightNode.x || 0);
-		const otherTop = Number(rightNode.y || 0);
-		const otherRight =
-			otherLeft + Math.max(1, Number(rightNode.width) || 1);
-		const otherBottom =
-			otherTop + Math.max(1, Number(rightNode.height) || 1);
-		const dx = Math.max(left - otherRight, otherLeft - right, 0);
-		const dy = Math.max(top - otherBottom, otherTop - bottom, 0);
-		return Math.hypot(dx, dy);
-	}
-
-	function getNodeCorners(node) {
-		const left = Number(node?.x || 0);
-		const top = Number(node?.y || 0);
-		const right = left + Math.max(1, Number(node?.width) || 1);
-		const bottom = top + Math.max(1, Number(node?.height) || 1);
-		return [
-			{ x: left, y: top },
-			{ x: right, y: top },
-			{ x: left, y: bottom },
-			{ x: right, y: bottom }
-		];
-	}
-
-	function closestPointOnNode(point, node) {
-		const left = Number(node?.x || 0);
-		const top = Number(node?.y || 0);
-		const right = left + Math.max(1, Number(node?.width) || 1);
-		const bottom = top + Math.max(1, Number(node?.height) || 1);
-		return {
-			x: Math.max(left, Math.min(right, Number(point?.x || 0))),
-			y: Math.max(top, Math.min(bottom, Number(point?.y || 0)))
-		};
-	}
-
-	function closestCornerToNode(node, targetNode) {
-		let bestCorner = null;
-		let bestDistance = Infinity;
-		for (const corner of getNodeCorners(node)) {
-			const targetPoint = closestPointOnNode(corner, targetNode);
-			const distance = Math.hypot(
-				targetPoint.x - corner.x,
-				targetPoint.y - corner.y
-			);
-			if (distance < bestDistance) {
-				bestCorner = corner;
-				bestDistance = distance;
-			}
-		}
-		return bestCorner;
-	}
-
-	/**
-	 * Return where segment start-end first enters a rectangular node, or null.
-	 * The result is progress along the finite segment: 0 is start and 1 is end.
-	 */
-	function segmentNodeEntry(start, end, node) {
-		const left = Number(node?.x || 0);
-		const top = Number(node?.y || 0);
-		const right = left + Math.max(1, Number(node?.width) || 1);
-		const bottom = top + Math.max(1, Number(node?.height) || 1);
-		const dx = end.x - start.x;
-		const dy = end.y - start.y;
-		let entry = 0;
-		let exit = 1;
-
-		for (const [origin, direction, minimum, maximum] of [
-			[start.x, dx, left, right],
-			[start.y, dy, top, bottom]
-		]) {
-			if (Math.abs(direction) < 1e-9) {
-				if (origin < minimum || origin > maximum) return null;
-				continue;
-			}
-			const first = (minimum - origin) / direction;
-			const second = (maximum - origin) / direction;
-			entry = Math.max(entry, Math.min(first, second));
-			exit = Math.min(exit, Math.max(first, second));
-			if (entry > exit) return null;
-		}
-		return entry >= 0 && entry <= 1 ? entry : null;
-	}
-
-	/**
-	 * Follow the exact corner-to-corner line requested by the drag interaction:
-	 * start at the dragged-card corner closest to the central root and end at the
-	 * root corner closest to the dragged card, then select
-	 * the first card whose bounds that finite segment enters. If there is no
-	 * intervening card, the central root is the prospective parent.
-	 */
-	function findFirstNodeOnCornerRay(
-		draggedNode,
-		allNodes,
-		mainRootNode,
-		isDescendantFn = null
-	) {
-		if (!draggedNode || !mainRootNode || draggedNode.id === mainRootNode.id)
-			return null;
-		const start = closestCornerToNode(draggedNode, mainRootNode);
-		const end = closestCornerToNode(mainRootNode, draggedNode);
-		let bestNode = null;
-		let bestEntry = Infinity;
-		for (const node of Array.isArray(allNodes)
-			? allNodes
-			: Array.from(allNodes || [])) {
-			const type = node?.unknownData?.type || node?.type;
-			if (
-				!node ||
-				node.id === draggedNode.id ||
-				node.id === mainRootNode.id ||
-				type === 'group' ||
-				(isDescendantFn && isDescendantFn(draggedNode.id, node.id))
-			) {
-				continue;
-			}
-			const entry = segmentNodeEntry(start, end, node);
-			if (entry !== null && entry < bestEntry) {
-				bestNode = node;
-				bestEntry = entry;
-			}
-		}
-		return bestNode || mainRootNode;
-	}
-
-	function findNearestAttachableNode(
-		draggedNode,
-		allNodes,
-		isDescendantFn = null,
-		maximumDistance = ATTACHMENT_DISTANCE
-	) {
-		if (!draggedNode) return null;
-		const nodes = Array.isArray(allNodes)
-			? allNodes
-			: Array.from(allNodes || []);
-		const draggedCenter = getNodeCenter(draggedNode);
-		let bestNode = null;
-		let bestDistance = Math.max(0, Number(maximumDistance) || 0);
-		let bestCenterDistance = Infinity;
-		for (const node of nodes) {
-			const type = node?.unknownData?.type || node?.type;
-			if (
-				!node ||
-				node.id === draggedNode.id ||
-				type === 'group' ||
-				(isDescendantFn && isDescendantFn(draggedNode.id, node.id))
-			) {
-				continue;
-			}
-			const distance = nodeToNodeDistance(draggedNode, node);
-			if (distance > bestDistance) continue;
-			const center = getNodeCenter(node);
-			const centerDistance = Math.hypot(
-				center.x - draggedCenter.x,
-				center.y - draggedCenter.y
-			);
-			if (
-				distance < bestDistance - 0.0001 ||
-				(Math.abs(distance - bestDistance) <= 0.0001 &&
-					centerDistance < bestCenterDistance)
-			) {
-				bestNode = node;
-				bestDistance = distance;
-				bestCenterDistance = centerDistance;
-			}
-		}
-		return bestNode;
-	}
-
-	/**
-	 * Find the first valid node encountered while moving from the dragged node
-	 * toward the main root.
-	 *
-	 * The important comparison is `t`, not merely Euclidean distance:
-	 *
-	 *   t = 0 is the dragged node
-	 *   t = 1 is the root
-	 *
-	 * Therefore, the smallest valid positive t is the first node on the path.
-	 */
-	function findClosestNodeOnRay(
-		draggedNode,
-		allNodes,
-		mainRootNode,
-		isDescendantFn = null,
-		options = {}
-	) {
-		if (!draggedNode || !mainRootNode) {
-			return null;
-		}
-
-		if (draggedNode.id === mainRootNode.id) {
-			return null;
-		}
-
-		const nodes = Array.isArray(allNodes)
-			? allNodes
-			: Array.from(allNodes || []);
-
-		const draggedCenter = getNodeCenter(draggedNode);
-		const rootCenter = getNodeCenter(mainRootNode);
-
-		const {
-			corridorWidth = 90,
-			minimumProgress = 0.025,
-			maximumProgress = 1.025
-		} = options;
-
-		let bestNode = null;
-		let bestProgress = Infinity;
-		let bestPerpendicularDistance = Infinity;
-
-		for (const node of nodes) {
-			if (!node) {
-				continue;
-			}
-
-			if (
-				node.id === draggedNode.id ||
-				node.id === mainRootNode.id ||
-				node.type === 'group'
-			) {
-				continue;
-			}
-
-			if (isDescendantFn && isDescendantFn(draggedNode.id, node.id)) {
-				continue;
-			}
-
-			const nodeCenter = getNodeCenter(node);
-
-			const result = pointToSegmentDistance(
-				nodeCenter,
-				draggedCenter,
-				rootCenter
-			);
-
-			if (result.t < minimumProgress || result.t > maximumProgress) {
-				continue;
-			}
-
-			/*
-			 * Account for the node's dimensions. A line may pass through the node
-			 * even when it does not pass close to the exact center.
-			 */
-			const distanceToBounds = pointToNodeDistance(result.proj, node);
-
-			if (distanceToBounds > corridorWidth) {
-				continue;
-			}
-
-			const isEarlierOnPath = result.t < bestProgress - 0.0001;
-
-			const isSamePositionButCloser =
-				Math.abs(result.t - bestProgress) <= 0.0001 &&
-				distanceToBounds < bestPerpendicularDistance;
-
-			if (isEarlierOnPath || isSamePositionButCloser) {
-				bestNode = node;
-				bestProgress = result.t;
-				bestPerpendicularDistance = distanceToBounds;
-			}
-		}
-
-		return bestNode || mainRootNode;
-	}
-
-	function removeIncomingParentEdges(canvas, canvasApi, draggedNode) {
-		if (!canvasApi.getIncomingEdges) {
-			return;
-		}
-
-		const incomingEdges =
-			canvasApi.getIncomingEdges(canvas, draggedNode) || [];
-
-		for (const edge of incomingEdges) {
-			if (canvasApi.removeEdge) {
-				canvasApi.removeEdge(canvas, edge);
-			}
-		}
-	}
-
-	function applyCurvedArrowStyle(canvas, canvasApi, edge, options = {}) {
-		if (!edge) {
-			return;
-		}
-
-		const { preview = false, color, curvature = 0.35 } = options;
-
-		/*
-		 * Different Canvas wrappers expose different APIs. These fallbacks let
-		 * the same logic work without crashing when one method is unavailable.
-		 */
-		if (canvasApi.setEdgeCurved) {
-			canvasApi.setEdgeCurved(canvas, edge, true, curvature);
-		} else if (canvasApi.updateEdge) {
-			canvasApi.updateEdge(canvas, edge, {
-				lineType: 'curved',
-				curve: true,
-				curvature
-			});
-		} else {
-			edge.lineType = 'curved';
-			edge.curve = true;
-			edge.curvature = curvature;
-		}
-
-		if (canvasApi.setEdgeArrow) {
-			canvasApi.setEdgeArrow(canvas, edge, 'to');
-		} else if (canvasApi.updateEdge) {
-			canvasApi.updateEdge(canvas, edge, {
-				fromEnd: 'none',
-				toEnd: 'arrow'
-			});
-		} else {
-			edge.fromEnd = 'none';
-			edge.toEnd = 'arrow';
-		}
-
-		if (color) {
-			if (canvasApi.setEdgeColor) {
-				canvasApi.setEdgeColor(canvas, edge, color);
-			} else {
-				edge.color = color;
-			}
-		}
-
-		if (preview) {
-			edge.__mindMapPreview = true;
-		}
-
-		canvas?.requestFrame?.();
-	}
-
-	/**
-	 * Create a parent-child edge with correctly mirrored attachment points.
-	 */
-	function createMindMapEdge(
-		canvas,
-		canvasApi,
-		parentNode,
-		childNode,
-		mainRootNode,
-		options = {}
-	) {
-		if (
-			!canvas ||
-			!canvasApi ||
-			!parentNode ||
-			!childNode ||
-			!canvasApi.createEdge
-		) {
-			return null;
-		}
-
-		const { fromSide, toSide } = getConnectionSides(
-			childNode,
-			mainRootNode,
-			parentNode
-		);
-
-		const color =
-			options.color ?? parentNode.color ?? childNode.color ?? undefined;
-
-		const edge = canvasApi.createEdge(
-			canvas,
-			parentNode,
-			childNode,
-			fromSide,
-			toSide,
-			color
-		);
-
-		applyCurvedArrowStyle(canvas, canvasApi, edge, {
-			preview: Boolean(options.preview),
-			color,
-			curvature: options.curvature ?? 0.35
-		});
-
-		return edge;
-	}
-
-	/**
-	 * Move a subtree under a new parent.
-	 *
-	 * For sibling drop zones, the target's parent becomes the new parent.
-	 */
-	function reparentSubtree(
-		canvas,
-		canvasApi,
-		draggedNode,
-		targetNode,
-		dropZone = 'child',
-		forest = [],
-		mainRootNode = null
-	) {
-		if (!canvas || !canvasApi || !draggedNode || !targetNode) {
-			return false;
-		}
-
-		if (draggedNode.id === targetNode.id) {
-			return false;
-		}
-
-		if (
-			forest.length > 0 &&
-			isDescendant(forest, draggedNode.id, targetNode.id)
-		) {
-			return false;
-		}
-
-		let newParent = targetNode;
-
-		if (dropZone !== 'child') {
-			newParent = canvasApi.getParentNode
-				? canvasApi.getParentNode(canvas, targetNode)
-				: null;
-
-			/*
-			 * A root node has no parent. Dropping beside it therefore means
-			 * attaching directly to the root.
-			 */
-			if (!newParent) {
-				newParent = targetNode;
-			}
-		}
-
-		if (!newParent || newParent.id === draggedNode.id) {
-			return false;
-		}
-
-		if (
-			forest.length > 0 &&
-			isDescendant(forest, draggedNode.id, newParent.id)
-		) {
-			return false;
-		}
-
-		/*
-		 * Remove old edges only after all validation has succeeded. Previously,
-		 * invalid drops could leave the node disconnected.
-		 */
-		removeIncomingParentEdges(canvas, canvasApi, draggedNode);
-
-		const edge = createMindMapEdge(
-			canvas,
-			canvasApi,
-			newParent,
-			draggedNode,
-			mainRootNode || newParent,
-			{
-				preview: false,
-				color: newParent.color
-			}
-		);
-
-		return Boolean(edge);
-	}
-
-	function isWithinGraphBounds(draggedNode, allNodes, paddingRatio = 0.2) {
-		if (!draggedNode) {
-			return false;
-		}
-
-		const nodes = Array.isArray(allNodes)
-			? allNodes
-			: Array.from(allNodes || []);
-
-		const otherNodes = nodes.filter(
-			(node) =>
-				node && node.id !== draggedNode.id && node.type !== 'group'
-		);
-
-		if (otherNodes.length === 0) {
-			return false;
-		}
-
-		let minX = Infinity;
-		let minY = Infinity;
-		let maxX = -Infinity;
-		let maxY = -Infinity;
-
-		for (const node of otherNodes) {
-			const x = Number(node.x || 0);
-			const y = Number(node.y || 0);
-			const width = Math.max(1, Number(node.width) || 1);
-			const height = Math.max(1, Number(node.height) || 1);
-
-			minX = Math.min(minX, x);
-			minY = Math.min(minY, y);
-			maxX = Math.max(maxX, x + width);
-			maxY = Math.max(maxY, y + height);
-		}
-
-		const graphWidth = Math.max(1, maxX - minX);
-		const graphHeight = Math.max(1, maxY - minY);
-
-		const paddingX = graphWidth * paddingRatio;
-		const paddingY = graphHeight * paddingRatio;
-
-		const center = getNodeCenter(draggedNode);
-
-		return (
-			center.x >= minX - paddingX &&
-			center.x <= maxX + paddingX &&
-			center.y >= minY - paddingY &&
-			center.y <= maxY + paddingY
-		);
-	}
-
-	function isWithinAttachmentRadius(draggedNode, mainRootNode, radius = 500) {
-		if (!draggedNode || !mainRootNode) {
-			return false;
-		}
-
-		const draggedCenter = getNodeCenter(draggedNode);
-		const rootCenter = getNodeCenter(mainRootNode);
-
-		return (
-			Math.hypot(
-				draggedCenter.x - rootCenter.x,
-				draggedCenter.y - rootCenter.y
-			) <= radius
-		);
-	}
-
-	module.exports = {
-		ATTACHMENT_DISTANCE,
-		applyCurvedArrowStyle,
-		classifyDropZone,
-		createMindMapEdge,
-		closestCornerToNode,
-		closestPointOnNode,
-		findClosestNodeOnRay,
-		findFirstNodeOnCornerRay,
-		findNearestAttachableNode,
-		getBranchSide,
-		getConnectionSides,
-		getNodeCorners,
-		getNodeCenter,
-		isDescendant,
-		isWithinAttachmentRadius,
-		isWithinGraphBounds,
-		nodeToNodeDistance,
-		pointToNodeDistance,
-		pointToSegmentDistance,
-		segmentNodeEntry,
-		removeIncomingParentEdges,
-		reparentSubtree
-	};
-	return module.exports;
+  const module = { exports: {} };
+  const exports = module.exports;
+  const ATTACHMENT_DISTANCE = 180;
+
+  const treeModel = (
+    typeof require === "function"
+      ? (() => {
+          try {
+            return require("./tree-model.js");
+          } catch (_) {
+            return {};
+          }
+        })()
+      : {}
+  ) || {};
+
+  function getFindTreeForNode() {
+    return (
+      treeModel.findTreeForNode ||
+      (typeof findTreeForNode === "function" ? findTreeForNode : null)
+    );
+  }
+
+  function getGetDescendants() {
+    return (
+      treeModel.getDescendants ||
+      (typeof getDescendants === "function" ? getDescendants : null)
+    );
+  }
+
+  function getNodeCenter(node) {
+    return {
+      x: Number(node?.x || 0) + Number(node?.width || 0) / 2,
+      y: Number(node?.y || 0) + Number(node?.height || 0) / 2
+    };
+  }
+
+  /**
+   * Determine which side of the main/root node a topic currently occupies.
+   *
+   * Right-side topic:
+   *   parent right -> child left
+   *
+   * Left-side topic:
+   *   parent left -> child right
+   */
+  function getBranchSide(node, mainRootNode) {
+    if (!node || !mainRootNode) {
+      return "right";
+    }
+
+    return getNodeCenter(node).x >= getNodeCenter(mainRootNode).x
+      ? "right"
+      : "left";
+  }
+
+  function getConnectionSides(childNode, mainRootNode, parentNode = null) {
+    // The dragged/child card is the sole side authority. Using the prospective
+    // parent here allowed a left-side drop to inherit a right-side attachment
+    // (or vice versa) when ray selection chose a deeper parent.
+    const branchSide = getBranchSide(childNode, mainRootNode);
+
+    if (branchSide === "right") {
+      return {
+        branchSide,
+        fromSide: "right",
+        toSide: "left"
+      };
+    }
+
+    return {
+      branchSide,
+      fromSide: "left",
+      toSide: "right"
+    };
+  }
+
+  function classifyDropZone(targetNode, point) {
+    if (!targetNode || !point) {
+      return "child";
+    }
+
+    const width = Math.max(1, Number(targetNode.width) || 1);
+    const height = Math.max(1, Number(targetNode.height) || 1);
+
+    const relX =
+      (Number(point.x || 0) - Number(targetNode.x || 0)) / width;
+    const relY =
+      (Number(point.y || 0) - Number(targetNode.y || 0)) / height;
+
+    if (
+      relX >= 0.2 &&
+      relX <= 0.8 &&
+      relY >= 0.2 &&
+      relY <= 0.8
+    ) {
+      return "child";
+    }
+
+    if (relY < 0.2) {
+      return "sibling-above";
+    }
+
+    if (relY > 0.8) {
+      return "sibling-below";
+    }
+
+    if (relX < 0.2) {
+      return "sibling-left";
+    }
+
+    if (relX > 0.8) {
+      return "sibling-right";
+    }
+
+    return "child";
+  }
+
+  /**
+   * Returns true when targetId is rootId itself or belongs to its subtree.
+   */
+  function isDescendant(forest, rootId, targetId) {
+    if (!rootId || !targetId) {
+      return false;
+    }
+
+    if (rootId === targetId) {
+      return true;
+    }
+
+    const findFn = getFindTreeForNode();
+    const descendantsFn = getGetDescendants();
+
+    if (!findFn || !descendantsFn) {
+      return false;
+    }
+
+    const treeNode = findFn(forest, rootId);
+
+    if (!treeNode) {
+      return false;
+    }
+
+    const descendants = descendantsFn(treeNode);
+
+    return descendants.some(
+      (item) => item?.canvasNode?.id === targetId
+    );
+  }
+
+  /**
+   * Distance from point C to finite segment A-B.
+   *
+   * `t` is deliberately returned unclamped:
+   *   t < 0: before A
+   *   0..1: between A and B
+   *   t > 1: beyond B
+   */
+  function pointToSegmentDistance(C, A, B) {
+    const vx = B.x - A.x;
+    const vy = B.y - A.y;
+    const lengthSquared = vx * vx + vy * vy;
+
+    if (lengthSquared === 0) {
+      const dx = C.x - A.x;
+      const dy = C.y - A.y;
+
+      return {
+        dist: Math.hypot(dx, dy),
+        t: 0,
+        clampedT: 0,
+        proj: {
+          x: A.x,
+          y: A.y
+        }
+      };
+    }
+
+    const t =
+      ((C.x - A.x) * vx + (C.y - A.y) * vy) /
+      lengthSquared;
+
+    const clampedT = Math.max(0, Math.min(1, t));
+
+    const projectedPoint = {
+      x: A.x + clampedT * vx,
+      y: A.y + clampedT * vy
+    };
+
+    return {
+      dist: Math.hypot(
+        C.x - projectedPoint.x,
+        C.y - projectedPoint.y
+      ),
+      t,
+      clampedT,
+      proj: projectedPoint
+    };
+  }
+
+  /**
+   * Approximate distance between a point and a node's rectangular bounds.
+   *
+   * Returns zero if the point lies inside the node.
+   */
+  function pointToNodeDistance(point, node) {
+    const left = Number(node.x || 0);
+    const top = Number(node.y || 0);
+    const right = left + Math.max(1, Number(node.width) || 1);
+    const bottom = top + Math.max(1, Number(node.height) || 1);
+
+    const dx = Math.max(left - point.x, 0, point.x - right);
+    const dy = Math.max(top - point.y, 0, point.y - bottom);
+
+    return Math.hypot(dx, dy);
+  }
+
+  /**
+   * Shortest edge-to-edge distance between two rectangular Canvas nodes.
+   *
+   * This is deliberately a fixed local distance, not a radius around a root or
+   * around the complete graph. Overlapping/touching cards have distance zero.
+   */
+  function nodeToNodeDistance(leftNode, rightNode) {
+    if (!leftNode || !rightNode)
+      return Infinity;
+    const left = Number(leftNode.x || 0);
+    const top = Number(leftNode.y || 0);
+    const right = left + Math.max(1, Number(leftNode.width) || 1);
+    const bottom = top + Math.max(1, Number(leftNode.height) || 1);
+    const otherLeft = Number(rightNode.x || 0);
+    const otherTop = Number(rightNode.y || 0);
+    const otherRight = otherLeft + Math.max(1, Number(rightNode.width) || 1);
+    const otherBottom = otherTop + Math.max(1, Number(rightNode.height) || 1);
+    const dx = Math.max(left - otherRight, otherLeft - right, 0);
+    const dy = Math.max(top - otherBottom, otherTop - bottom, 0);
+    return Math.hypot(dx, dy);
+  }
+
+  function getNodeCorners(node) {
+    const left = Number(node?.x || 0);
+    const top = Number(node?.y || 0);
+    const right = left + Math.max(1, Number(node?.width) || 1);
+    const bottom = top + Math.max(1, Number(node?.height) || 1);
+    return [
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: left, y: bottom },
+      { x: right, y: bottom }
+    ];
+  }
+
+  function closestPointOnNode(point, node) {
+    const left = Number(node?.x || 0);
+    const top = Number(node?.y || 0);
+    const right = left + Math.max(1, Number(node?.width) || 1);
+    const bottom = top + Math.max(1, Number(node?.height) || 1);
+    return {
+      x: Math.max(left, Math.min(right, Number(point?.x || 0))),
+      y: Math.max(top, Math.min(bottom, Number(point?.y || 0)))
+    };
+  }
+
+  function closestCornerToNode(node, targetNode) {
+    let bestCorner = null;
+    let bestDistance = Infinity;
+    for (const corner of getNodeCorners(node)) {
+      const targetPoint = closestPointOnNode(corner, targetNode);
+      const distance = Math.hypot(
+        targetPoint.x - corner.x,
+        targetPoint.y - corner.y
+      );
+      if (distance < bestDistance) {
+        bestCorner = corner;
+        bestDistance = distance;
+      }
+    }
+    return bestCorner;
+  }
+
+  /**
+   * Return where segment start-end first enters a rectangular node, or null.
+   * The result is progress along the finite segment: 0 is start and 1 is end.
+   */
+  function segmentNodeEntry(start, end, node) {
+    const left = Number(node?.x || 0);
+    const top = Number(node?.y || 0);
+    const right = left + Math.max(1, Number(node?.width) || 1);
+    const bottom = top + Math.max(1, Number(node?.height) || 1);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    let entry = 0;
+    let exit = 1;
+
+    for (const [origin, direction, minimum, maximum] of [
+      [start.x, dx, left, right],
+      [start.y, dy, top, bottom]
+    ]) {
+      if (Math.abs(direction) < 1e-9) {
+        if (origin < minimum || origin > maximum)
+          return null;
+        continue;
+      }
+      const first = (minimum - origin) / direction;
+      const second = (maximum - origin) / direction;
+      entry = Math.max(entry, Math.min(first, second));
+      exit = Math.min(exit, Math.max(first, second));
+      if (entry > exit)
+        return null;
+    }
+    return entry >= 0 && entry <= 1 ? entry : null;
+  }
+
+  /**
+   * Follow the exact corner-to-corner line requested by the drag interaction:
+   * start at the dragged-card corner closest to the central root and end at the
+   * root corner closest to the dragged card, then select
+   * the first card whose bounds that finite segment enters. If there is no
+   * intervening card, the central root is the prospective parent.
+   */
+  function findFirstNodeOnCornerRay(
+    draggedNode,
+    allNodes,
+    mainRootNode,
+    isDescendantFn = null
+  ) {
+    if (!draggedNode || !mainRootNode || draggedNode.id === mainRootNode.id)
+      return null;
+    const start = closestCornerToNode(draggedNode, mainRootNode);
+    const end = closestCornerToNode(mainRootNode, draggedNode);
+    let bestNode = null;
+    let bestEntry = Infinity;
+    for (const node of Array.isArray(allNodes) ? allNodes : Array.from(allNodes || [])) {
+      const type = node?.unknownData?.type || node?.type;
+      if (
+        !node ||
+        node.id === draggedNode.id ||
+        node.id === mainRootNode.id ||
+        type === "group" ||
+        (isDescendantFn && isDescendantFn(draggedNode.id, node.id))
+      ) {
+        continue;
+      }
+      const entry = segmentNodeEntry(start, end, node);
+      if (entry !== null && entry < bestEntry) {
+        bestNode = node;
+        bestEntry = entry;
+      }
+    }
+    return bestNode || mainRootNode;
+  }
+
+  function findNearestAttachableNode(
+    draggedNode,
+    allNodes,
+    isDescendantFn = null,
+    maximumDistance = ATTACHMENT_DISTANCE
+  ) {
+    if (!draggedNode)
+      return null;
+    const nodes = Array.isArray(allNodes)
+      ? allNodes
+      : Array.from(allNodes || []);
+    const draggedCenter = getNodeCenter(draggedNode);
+    let bestNode = null;
+    let bestDistance = Math.max(0, Number(maximumDistance) || 0);
+    let bestCenterDistance = Infinity;
+    for (const node of nodes) {
+      const type = node?.unknownData?.type || node?.type;
+      if (
+        !node ||
+        node.id === draggedNode.id ||
+        type === "group" ||
+        (isDescendantFn && isDescendantFn(draggedNode.id, node.id))
+      ) {
+        continue;
+      }
+      const distance = nodeToNodeDistance(draggedNode, node);
+      if (distance > bestDistance)
+        continue;
+      const center = getNodeCenter(node);
+      const centerDistance = Math.hypot(
+        center.x - draggedCenter.x,
+        center.y - draggedCenter.y
+      );
+      if (
+        distance < bestDistance - 0.0001 ||
+        Math.abs(distance - bestDistance) <= 0.0001 &&
+          centerDistance < bestCenterDistance
+      ) {
+        bestNode = node;
+        bestDistance = distance;
+        bestCenterDistance = centerDistance;
+      }
+    }
+    return bestNode;
+  }
+
+  /**
+   * Find the first valid node encountered while moving from the dragged node
+   * toward the main root.
+   *
+   * The important comparison is `t`, not merely Euclidean distance:
+   *
+   *   t = 0 is the dragged node
+   *   t = 1 is the root
+   *
+   * Therefore, the smallest valid positive t is the first node on the path.
+   */
+  function findClosestNodeOnRay(
+    draggedNode,
+    allNodes,
+    mainRootNode,
+    isDescendantFn = null,
+    options = {}
+  ) {
+    if (!draggedNode || !mainRootNode) {
+      return null;
+    }
+
+    if (draggedNode.id === mainRootNode.id) {
+      return null;
+    }
+
+    const nodes = Array.isArray(allNodes)
+      ? allNodes
+      : Array.from(allNodes || []);
+
+    const draggedCenter = getNodeCenter(draggedNode);
+    const rootCenter = getNodeCenter(mainRootNode);
+
+    const {
+      corridorWidth = 90,
+      minimumProgress = 0.025,
+      maximumProgress = 1.025
+    } = options;
+
+    let bestNode = null;
+    let bestProgress = Infinity;
+    let bestPerpendicularDistance = Infinity;
+
+    for (const node of nodes) {
+      if (!node) {
+        continue;
+      }
+
+      if (
+        node.id === draggedNode.id ||
+        node.id === mainRootNode.id ||
+        node.type === "group"
+      ) {
+        continue;
+      }
+
+      if (
+        isDescendantFn &&
+        isDescendantFn(draggedNode.id, node.id)
+      ) {
+        continue;
+      }
+
+      const nodeCenter = getNodeCenter(node);
+
+      const result = pointToSegmentDistance(
+        nodeCenter,
+        draggedCenter,
+        rootCenter
+      );
+
+      if (
+        result.t < minimumProgress ||
+        result.t > maximumProgress
+      ) {
+        continue;
+      }
+
+      /*
+       * Account for the node's dimensions. A line may pass through the node
+       * even when it does not pass close to the exact center.
+       */
+      const distanceToBounds = pointToNodeDistance(
+        result.proj,
+        node
+      );
+
+      if (distanceToBounds > corridorWidth) {
+        continue;
+      }
+
+      const isEarlierOnPath =
+        result.t < bestProgress - 0.0001;
+
+      const isSamePositionButCloser =
+        Math.abs(result.t - bestProgress) <= 0.0001 &&
+        distanceToBounds < bestPerpendicularDistance;
+
+      if (isEarlierOnPath || isSamePositionButCloser) {
+        bestNode = node;
+        bestProgress = result.t;
+        bestPerpendicularDistance = distanceToBounds;
+      }
+    }
+
+    return bestNode || mainRootNode;
+  }
+
+  function removeIncomingParentEdges(
+    canvas,
+    canvasApi,
+    draggedNode
+  ) {
+    if (!canvasApi.getIncomingEdges) {
+      return;
+    }
+
+    const incomingEdges =
+      canvasApi.getIncomingEdges(canvas, draggedNode) || [];
+
+    for (const edge of incomingEdges) {
+      if (canvasApi.removeEdge) {
+        canvasApi.removeEdge(canvas, edge);
+      }
+    }
+  }
+
+  function applyCurvedArrowStyle(
+    canvas,
+    canvasApi,
+    edge,
+    options = {}
+  ) {
+    if (!edge) {
+      return;
+    }
+
+    const {
+      preview = false,
+      color,
+      curvature = 0.35
+    } = options;
+
+    /*
+     * Different Canvas wrappers expose different APIs. These fallbacks let
+     * the same logic work without crashing when one method is unavailable.
+     */
+    if (canvasApi.setEdgeCurved) {
+      canvasApi.setEdgeCurved(canvas, edge, true, curvature);
+    } else if (canvasApi.updateEdge) {
+      canvasApi.updateEdge(canvas, edge, {
+        lineType: "curved",
+        curve: true,
+        curvature
+      });
+    } else {
+      edge.lineType = "curved";
+      edge.curve = true;
+      edge.curvature = curvature;
+    }
+
+    if (canvasApi.setEdgeArrow) {
+      canvasApi.setEdgeArrow(canvas, edge, "to");
+    } else if (canvasApi.updateEdge) {
+      canvasApi.updateEdge(canvas, edge, {
+        fromEnd: "none",
+        toEnd: "arrow"
+      });
+    } else {
+      edge.fromEnd = "none";
+      edge.toEnd = "arrow";
+    }
+
+    if (color) {
+      if (canvasApi.setEdgeColor) {
+        canvasApi.setEdgeColor(canvas, edge, color);
+      } else {
+        edge.color = color;
+      }
+    }
+
+    if (preview) {
+      edge.__mindMapPreview = true;
+    }
+
+    canvas?.requestFrame?.();
+  }
+
+  /**
+   * Create a parent-child edge with correctly mirrored attachment points.
+   */
+  function createMindMapEdge(
+    canvas,
+    canvasApi,
+    parentNode,
+    childNode,
+    mainRootNode,
+    options = {}
+  ) {
+    if (
+      !canvas ||
+      !canvasApi ||
+      !parentNode ||
+      !childNode ||
+      !canvasApi.createEdge
+    ) {
+      return null;
+    }
+
+    const { fromSide, toSide } = getConnectionSides(
+      childNode,
+      mainRootNode,
+      parentNode
+    );
+
+    const color =
+      options.color ??
+      parentNode.color ??
+      childNode.color ??
+      undefined;
+
+    const edge = canvasApi.createEdge(
+      canvas,
+      parentNode,
+      childNode,
+      fromSide,
+      toSide,
+      color
+    );
+
+    applyCurvedArrowStyle(canvas, canvasApi, edge, {
+      preview: Boolean(options.preview),
+      color,
+      curvature: options.curvature ?? 0.35
+    });
+
+    return edge;
+  }
+
+  /**
+   * Move a subtree under a new parent.
+   *
+   * For sibling drop zones, the target's parent becomes the new parent.
+   */
+  function reparentSubtree(
+    canvas,
+    canvasApi,
+    draggedNode,
+    targetNode,
+    dropZone = "child",
+    forest = [],
+    mainRootNode = null
+  ) {
+    if (
+      !canvas ||
+      !canvasApi ||
+      !draggedNode ||
+      !targetNode
+    ) {
+      return false;
+    }
+
+    if (draggedNode.id === targetNode.id) {
+      return false;
+    }
+
+    if (
+      forest.length > 0 &&
+      isDescendant(forest, draggedNode.id, targetNode.id)
+    ) {
+      return false;
+    }
+
+    let newParent = targetNode;
+
+    if (dropZone !== "child") {
+      newParent = canvasApi.getParentNode
+        ? canvasApi.getParentNode(canvas, targetNode)
+        : null;
+
+      /*
+       * A root node has no parent. Dropping beside it therefore means
+       * attaching directly to the root.
+       */
+      if (!newParent) {
+        newParent = targetNode;
+      }
+    }
+
+    if (
+      !newParent ||
+      newParent.id === draggedNode.id
+    ) {
+      return false;
+    }
+
+    if (
+      forest.length > 0 &&
+      isDescendant(forest, draggedNode.id, newParent.id)
+    ) {
+      return false;
+    }
+
+    /*
+     * Remove old edges only after all validation has succeeded. Previously,
+     * invalid drops could leave the node disconnected.
+     */
+    removeIncomingParentEdges(canvas, canvasApi, draggedNode);
+
+    const edge = createMindMapEdge(
+      canvas,
+      canvasApi,
+      newParent,
+      draggedNode,
+      mainRootNode || newParent,
+      {
+        preview: false,
+        color: newParent.color
+      }
+    );
+
+    return Boolean(edge);
+  }
+
+  function isWithinGraphBounds(
+    draggedNode,
+    allNodes,
+    paddingRatio = 0.2
+  ) {
+    if (!draggedNode) {
+      return false;
+    }
+
+    const nodes = Array.isArray(allNodes)
+      ? allNodes
+      : Array.from(allNodes || []);
+
+    const otherNodes = nodes.filter(
+      (node) =>
+        node &&
+        node.id !== draggedNode.id &&
+        node.type !== "group"
+    );
+
+    if (otherNodes.length === 0) {
+      return false;
+    }
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const node of otherNodes) {
+      const x = Number(node.x || 0);
+      const y = Number(node.y || 0);
+      const width = Math.max(1, Number(node.width) || 1);
+      const height = Math.max(1, Number(node.height) || 1);
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + width);
+      maxY = Math.max(maxY, y + height);
+    }
+
+    const graphWidth = Math.max(1, maxX - minX);
+    const graphHeight = Math.max(1, maxY - minY);
+
+    const paddingX = graphWidth * paddingRatio;
+    const paddingY = graphHeight * paddingRatio;
+
+    const center = getNodeCenter(draggedNode);
+
+    return (
+      center.x >= minX - paddingX &&
+      center.x <= maxX + paddingX &&
+      center.y >= minY - paddingY &&
+      center.y <= maxY + paddingY
+    );
+  }
+
+  function isWithinAttachmentRadius(
+    draggedNode,
+    mainRootNode,
+    radius = 500
+  ) {
+    if (!draggedNode || !mainRootNode) {
+      return false;
+    }
+
+    const draggedCenter = getNodeCenter(draggedNode);
+    const rootCenter = getNodeCenter(mainRootNode);
+
+    return (
+      Math.hypot(
+        draggedCenter.x - rootCenter.x,
+        draggedCenter.y - rootCenter.y
+      ) <= radius
+    );
+  }
+
+  module.exports = {
+    ATTACHMENT_DISTANCE,
+    applyCurvedArrowStyle,
+    classifyDropZone,
+    createMindMapEdge,
+    closestCornerToNode,
+    closestPointOnNode,
+    findClosestNodeOnRay,
+    findFirstNodeOnCornerRay,
+    findNearestAttachableNode,
+    getBranchSide,
+    getConnectionSides,
+    getNodeCorners,
+    getNodeCenter,
+    isDescendant,
+    isWithinAttachmentRadius,
+    isWithinGraphBounds,
+    nodeToNodeDistance,
+    pointToNodeDistance,
+    pointToSegmentDistance,
+    segmentNodeEntry,
+    removeIncomingParentEdges,
+    reparentSubtree
+  };
+  return module.exports;
 })();
 // </tomindmap:module tree-drag>
 // <tomindmap:module drag-preview-controller>
 var { createDragAttachmentController } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const {
-		ATTACHMENT_DISTANCE,
-		createMindMapEdge,
-		findFirstNodeOnCornerRay,
-		isDescendant,
-		reparentSubtree
-	} = typeof TreeDrag !== 'undefined' ? TreeDrag : require('./tree-drag.js');
+  const module = { exports: {} };
+  const exports = module.exports;
+  const {
+    ATTACHMENT_DISTANCE,
+    createMindMapEdge,
+    findFirstNodeOnCornerRay,
+    isDescendant,
+    reparentSubtree
+  } = typeof TreeDrag !== "undefined" ? TreeDrag : require("./tree-drag.js");
 
-	function createDragAttachmentController(
-		canvas,
-		canvasApi,
-		getForest,
-		getRootNode
-	) {
-		let activeDraggedNode = null;
-		let originalEdges = [];
-		let originalParent = null;
-		let originalRemoved = false;
-		let sessionForest = [];
-		let previewEdge = null;
-		let previewParent = null;
-		let state = 'idle';
+  function createDragAttachmentController(
+    canvas,
+    canvasApi,
+    getForest,
+    getRootNode
+  ) {
+    let activeDraggedNode = null;
+    let originalEdges = [];
+    let originalParent = null;
+    let originalRemoved = false;
+    let sessionForest = [];
+    let previewEdge = null;
+    let previewParent = null;
+    let state = "idle";
 
-		function incomingEdges(node) {
-			return (canvasApi.getIncomingEdges?.(canvas, node) || []).filter(
-				(edge) => edge !== previewEdge && !edge?.__mindMapPreview
-			);
-		}
+    function incomingEdges(node) {
+      return (canvasApi.getIncomingEdges?.(canvas, node) || [])
+        .filter((edge) => edge !== previewEdge && !edge?.__mindMapPreview);
+    }
 
-		function snapshotEdge(edge) {
-			return {
-				fromNode: edge?.from?.node || null,
-				toNode: edge?.to?.node || null,
-				fromSide: edge?.from?.side || 'right',
-				toSide: edge?.to?.side || 'left',
-				color: edge?.color
-			};
-		}
+    function snapshotEdge(edge) {
+      return {
+        fromNode: edge?.from?.node || null,
+        toNode: edge?.to?.node || null,
+        fromSide: edge?.from?.side || "right",
+        toSide: edge?.to?.side || "left",
+        color: edge?.color
+      };
+    }
 
-		function removePreview() {
-			if (previewEdge && canvasApi.removeEdge)
-				canvasApi.removeEdge(canvas, previewEdge);
-			previewEdge = null;
-			previewParent = null;
-		}
+    function removePreview() {
+      if (previewEdge && canvasApi.removeEdge)
+        canvasApi.removeEdge(canvas, previewEdge);
+      previewEdge = null;
+      previewParent = null;
+    }
 
-		function removePermanentIncoming(node) {
-			if (originalRemoved) return;
-			for (const edge of incomingEdges(node))
-				canvasApi.removeEdge?.(canvas, edge);
-			originalRemoved = originalEdges.length > 0;
-		}
+    function removePermanentIncoming(node) {
+      if (originalRemoved)
+        return;
+      for (const edge of incomingEdges(node))
+        canvasApi.removeEdge?.(canvas, edge);
+      originalRemoved = originalEdges.length > 0;
+    }
 
-		function restoreOriginal() {
-			if (!originalRemoved || !activeDraggedNode) return;
-			for (const edge of originalEdges) {
-				if (!edge.fromNode || !edge.toNode) continue;
-				canvasApi.createEdge?.(
-					canvas,
-					edge.fromNode,
-					edge.toNode,
-					edge.fromSide,
-					edge.toSide,
-					edge.color
-				);
-			}
-			originalRemoved = false;
-		}
+    function restoreOriginal() {
+      if (!originalRemoved || !activeDraggedNode)
+        return;
+      for (const edge of originalEdges) {
+        if (!edge.fromNode || !edge.toNode)
+          continue;
+        canvasApi.createEdge?.(
+          canvas,
+          edge.fromNode,
+          edge.toNode,
+          edge.fromSide,
+          edge.toSide,
+          edge.color
+        );
+      }
+      originalRemoved = false;
+    }
 
-		function resetState() {
-			activeDraggedNode = null;
-			originalEdges = [];
-			originalParent = null;
-			originalRemoved = false;
-			sessionForest = [];
-			previewEdge = null;
-			previewParent = null;
-			state = 'idle';
-		}
+    function resetState() {
+      activeDraggedNode = null;
+      originalEdges = [];
+      originalParent = null;
+      originalRemoved = false;
+      sessionForest = [];
+      previewEdge = null;
+      previewParent = null;
+      state = "idle";
+    }
 
-		function begin(draggedNode) {
-			if (activeDraggedNode) cancel();
-			activeDraggedNode = draggedNode || null;
-			sessionForest = draggedNode ? getForest?.() || [] : [];
-			originalEdges = draggedNode
-				? incomingEdges(draggedNode).map(snapshotEdge)
-				: [];
-			originalParent = originalEdges[0]?.fromNode || null;
-			originalRemoved = false;
-			state = draggedNode ? 'original' : 'idle';
-			return originalParent;
-		}
+    function begin(draggedNode) {
+      if (activeDraggedNode)
+        cancel();
+      activeDraggedNode = draggedNode || null;
+      sessionForest = draggedNode ? getForest?.() || [] : [];
+      originalEdges = draggedNode
+        ? incomingEdges(draggedNode).map(snapshotEdge)
+        : [];
+      originalParent = originalEdges[0]?.fromNode || null;
+      originalRemoved = false;
+      state = draggedNode ? "original" : "idle";
+      return originalParent;
+    }
 
-		function getAllNodes() {
-			if (canvas.nodes?.values) return Array.from(canvas.nodes.values());
-			return canvas.getData?.().nodes || [];
-		}
+    function getAllNodes() {
+      if (canvas.nodes?.values)
+        return Array.from(canvas.nodes.values());
+      return canvas.getData?.().nodes || [];
+    }
 
-		function treeNodes(root) {
-			const nodes = [];
-			const stack = root ? [root] : [];
-			while (stack.length > 0) {
-				const tree = stack.pop();
-				nodes.push(tree.canvasNode);
-				stack.push(...(tree.children || []));
-			}
-			return nodes;
-		}
+    function treeNodes(root) {
+      const nodes = [];
+      const stack = root ? [root] : [];
+      while (stack.length > 0) {
+        const tree = stack.pop();
+        nodes.push(tree.canvasNode);
+        stack.push(...(tree.children || []));
+      }
+      return nodes;
+    }
 
-		function chooseAttachmentMap(draggedNode) {
-			const maps = sessionForest
-				.map((root) => {
-					const nodes = treeNodes(root).filter(
-						(node) =>
-							node.id !== draggedNode.id &&
-							!isDescendant(
-								sessionForest,
-								draggedNode.id,
-								node.id
-							)
-					);
-					if (nodes.length === 0) return null;
-					const minX = Math.min(...nodes.map((node) => node.x));
-					const minY = Math.min(...nodes.map((node) => node.y));
-					const maxX = Math.max(
-						...nodes.map((node) => node.x + node.width)
-					);
-					const maxY = Math.max(
-						...nodes.map((node) => node.y + node.height)
-					);
-					const dx = Math.max(
-						minX - (draggedNode.x + draggedNode.width),
-						draggedNode.x - maxX,
-						0
-					);
-					const dy = Math.max(
-						minY - (draggedNode.y + draggedNode.height),
-						draggedNode.y - maxY,
-						0
-					);
-					const distance = Math.hypot(dx, dy);
-					const contains = distance <= ATTACHMENT_DISTANCE;
-					return { root: root.canvasNode, nodes, contains, distance };
-				})
-				.filter(Boolean);
+    function chooseAttachmentMap(draggedNode) {
+      const maps = sessionForest.map((root) => {
+        const nodes = treeNodes(root).filter(
+          (node) => node.id !== draggedNode.id &&
+            !isDescendant(sessionForest, draggedNode.id, node.id)
+        );
+        if (nodes.length === 0)
+          return null;
+        const minX = Math.min(...nodes.map((node) => node.x));
+        const minY = Math.min(...nodes.map((node) => node.y));
+        const maxX = Math.max(...nodes.map((node) => node.x + node.width));
+        const maxY = Math.max(...nodes.map((node) => node.y + node.height));
+        const dx = Math.max(
+          minX - (draggedNode.x + draggedNode.width),
+          draggedNode.x - maxX,
+          0
+        );
+        const dy = Math.max(
+          minY - (draggedNode.y + draggedNode.height),
+          draggedNode.y - maxY,
+          0
+        );
+        const distance = Math.hypot(dx, dy);
+        const contains = distance <= ATTACHMENT_DISTANCE;
+        return { root: root.canvasNode, nodes, contains, distance };
+      }).filter(Boolean);
 
-			// Once the dragged card is inside a real map's rectangle, standalone
-			// floating cards cannot steal its target.
-			const containingMaps = maps.filter((map) => map.contains);
-			const substantialMaps = containingMaps.filter(
-				(map) => map.nodes.length > 1
-			);
-			const candidates =
-				substantialMaps.length > 0 ? substantialMaps : containingMaps;
-			candidates.sort(
-				(a, b) =>
-					Number(b.contains) - Number(a.contains) ||
-					a.distance - b.distance ||
-					b.nodes.length - a.nodes.length
-			);
-			return candidates[0] || null;
-		}
+      // Once the dragged card is inside a real map's rectangle, standalone
+      // floating cards cannot steal its target.
+      const containingMaps = maps.filter((map) => map.contains);
+      const substantialMaps = containingMaps.filter((map) => map.nodes.length > 1);
+      const candidates = substantialMaps.length > 0 ? substantialMaps : containingMaps;
+      candidates.sort((a, b) =>
+        Number(b.contains) - Number(a.contains) ||
+        a.distance - b.distance ||
+        b.nodes.length - a.nodes.length
+      );
+      return candidates[0] || null;
+    }
 
-		function updatePreview(draggedNode) {
-			if (!draggedNode) {
-				cancel();
-				return { state: 'idle', target: null };
-			}
-			if (activeDraggedNode?.id !== draggedNode.id) begin(draggedNode);
+    function updatePreview(draggedNode) {
+      if (!draggedNode) {
+        cancel();
+        return { state: "idle", target: null };
+      }
+      if (activeDraggedNode?.id !== draggedNode.id)
+        begin(draggedNode);
 
-			const forest = sessionForest;
-			const allNodes = getAllNodes();
-			const attachmentMap = chooseAttachmentMap(draggedNode);
-			const candidate = attachmentMap?.root || null;
-			const candidateRoot = attachmentMap?.root || null;
-			const rayNodes = attachmentMap?.nodes || allNodes;
-			const rayTarget = candidate
-				? findFirstNodeOnCornerRay(
-						draggedNode,
-						rayNodes,
-						candidateRoot,
-						(rootId, targetId) =>
-							isDescendant(forest, rootId, targetId)
-					)
-				: null;
-			const targetNode = rayTarget;
-			const mainRootNode = targetNode
-				? getRootNode?.(targetNode) || targetNode
-				: null;
-			if (!targetNode) {
-				removePreview();
-				removePermanentIncoming(draggedNode);
-				state = 'detached';
-				return { state, target: null };
-			}
+      const forest = sessionForest;
+      const allNodes = getAllNodes();
+      const attachmentMap = chooseAttachmentMap(draggedNode);
+      const candidate = attachmentMap?.root || null;
+      const candidateRoot = attachmentMap?.root || null;
+      const rayNodes = attachmentMap?.nodes || allNodes;
+      const rayTarget = candidate
+        ? findFirstNodeOnCornerRay(
+          draggedNode,
+          rayNodes,
+          candidateRoot,
+          (rootId, targetId) => isDescendant(forest, rootId, targetId)
+        )
+        : null;
+      const targetNode = rayTarget;
+      const mainRootNode = targetNode
+        ? getRootNode?.(targetNode) || targetNode
+        : null;
+      if (!targetNode) {
+        removePreview();
+        removePermanentIncoming(draggedNode);
+        state = "detached";
+        return { state, target: null };
+      }
 
-			if (previewEdge && previewParent?.id === targetNode.id)
-				return {
-					state: 'preview',
-					target: targetNode,
-					incomingSide: previewEdge.to?.side || null
-				};
+      if (previewEdge && previewParent?.id === targetNode.id)
+        return { state: "preview", target: targetNode, incomingSide: previewEdge.to?.side || null };
 
-			removePreview();
-			removePermanentIncoming(draggedNode);
-			const edge = createMindMapEdge(
-				canvas,
-				canvasApi,
-				targetNode,
-				draggedNode,
-				mainRootNode,
-				{
-					preview: true,
-					color: targetNode.color,
-					curvature: 0.35
-				}
-			);
-			if (!edge) {
-				removePreview();
-				restoreOriginal();
-				state = 'original';
-				return { state, target: originalParent };
-			}
+      removePreview();
+      removePermanentIncoming(draggedNode);
+      const edge = createMindMapEdge(
+        canvas,
+        canvasApi,
+        targetNode,
+        draggedNode,
+        mainRootNode,
+        {
+          preview: true,
+          color: targetNode.color,
+          curvature: 0.35
+        }
+      );
+      if (!edge) {
+        removePreview();
+        restoreOriginal();
+        state = "original";
+        return { state, target: originalParent };
+      }
 
-			previewParent = targetNode;
-			previewEdge = edge;
-			state = 'preview';
-			return {
-				state,
-				target: targetNode,
-				incomingSide: edge.to?.side || null
-			};
-		}
+      previewParent = targetNode;
+      previewEdge = edge;
+      state = "preview";
+      return { state, target: targetNode, incomingSide: edge.to?.side || null };
+    }
 
-		function commit(draggedNode) {
-			if (!draggedNode || activeDraggedNode?.id !== draggedNode.id) {
-				cancel();
-				return { changed: false, state: 'idle', target: null };
-			}
+    function commit(draggedNode) {
+      if (!draggedNode || activeDraggedNode?.id !== draggedNode.id) {
+        cancel();
+        return { changed: false, state: "idle", target: null };
+      }
 
-			if (state === 'preview' && previewParent) {
-				const targetNode = previewParent;
-				const incomingSide = previewEdge?.to?.side || null;
-				removePreview();
-				const attached = reparentSubtree(
-					canvas,
-					canvasApi,
-					draggedNode,
-					targetNode,
-					'child',
-					sessionForest,
-					getRootNode?.(targetNode) || targetNode
-				);
-				if (!attached) {
-					restoreOriginal();
-					const result = {
-						changed: false,
-						state: 'original',
-						target: originalParent
-					};
-					resetState();
-					return result;
-				}
-				const result = {
-					changed: originalParent?.id !== targetNode.id,
-					state: 'attached',
-					target: targetNode,
-					incomingSide
-				};
-				resetState();
-				return result;
-			}
+      if (state === "preview" && previewParent) {
+        const targetNode = previewParent;
+        const incomingSide = previewEdge?.to?.side || null;
+        removePreview();
+        const attached = reparentSubtree(
+          canvas,
+          canvasApi,
+          draggedNode,
+          targetNode,
+          "child",
+          sessionForest,
+          getRootNode?.(targetNode) || targetNode
+        );
+        if (!attached) {
+          restoreOriginal();
+          const result = { changed: false, state: "original", target: originalParent };
+          resetState();
+          return result;
+        }
+        const result = {
+          changed: originalParent?.id !== targetNode.id,
+          state: "attached",
+          target: targetNode,
+          incomingSide
+        };
+        resetState();
+        return result;
+      }
 
-			if (state === 'detached') {
-				removePreview();
-				for (const edge of incomingEdges(draggedNode))
-					canvasApi.removeEdge?.(canvas, edge);
-				const result = {
-					changed: originalEdges.length > 0,
-					state: 'detached',
-					target: null
-				};
-				resetState();
-				return result;
-			}
+      if (state === "detached") {
+        removePreview();
+        for (const edge of incomingEdges(draggedNode))
+          canvasApi.removeEdge?.(canvas, edge);
+        const result = {
+          changed: originalEdges.length > 0,
+          state: "detached",
+          target: null
+        };
+        resetState();
+        return result;
+      }
 
-			// A meaningful drag that ends near the old parent keeps exactly one
-			// incoming parent edge, repairing malformed multi-parent branches too.
-			const hadSurplusParents = originalEdges.length > 1;
-			restoreOriginal();
-			if (hadSurplusParents) {
-				const keepParentId = originalEdges[0]?.fromNode?.id;
-				for (const edge of incomingEdges(draggedNode)) {
-					if (edge.from?.node?.id !== keepParentId)
-						canvasApi.removeEdge?.(canvas, edge);
-				}
-			}
-			const result = {
-				changed: hadSurplusParents,
-				state: 'original',
-				target: originalParent
-			};
-			resetState();
-			return result;
-		}
+      // A meaningful drag that ends near the old parent keeps exactly one
+      // incoming parent edge, repairing malformed multi-parent branches too.
+      const hadSurplusParents = originalEdges.length > 1;
+      restoreOriginal();
+      if (hadSurplusParents) {
+        const keepParentId = originalEdges[0]?.fromNode?.id;
+        for (const edge of incomingEdges(draggedNode)) {
+          if (edge.from?.node?.id !== keepParentId)
+            canvasApi.removeEdge?.(canvas, edge);
+        }
+      }
+      const result = {
+        changed: hadSurplusParents,
+        state: "original",
+        target: originalParent
+      };
+      resetState();
+      return result;
+    }
 
-		function cancel() {
-			removePreview();
-			restoreOriginal();
-			resetState();
-		}
+    function cancel() {
+      removePreview();
+      restoreOriginal();
+      resetState();
+    }
 
-		return {
-			begin,
-			updatePreview,
-			commit,
-			cancel
-		};
-	}
+    return {
+      begin,
+      updatePreview,
+      commit,
+      cancel
+    };
+  }
 
-	module.exports = {
-		createDragAttachmentController
-	};
-	return module.exports;
+  module.exports = {
+    createDragAttachmentController
+  };
+  return module.exports;
 })();
 // </tomindmap:module drag-preview-controller>
 // <tomindmap:module mindmap-actions>
 var MindmapActions = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
-	const treeModel =
-		(typeof require === 'function'
-			? (function () {
-					try {
-						return require('./tree-model.js');
-					} catch (_) {
-						return {};
-					}
-				})()
-			: {}) || {};
+  const module = { exports: {} };
+  const exports = module.exports;
+  const treeModel =
+  	(typeof require === 'function'
+  		? (function () {
+  				try {
+  					return require('./tree-model.js');
+  				} catch (_) {
+  					return {};
+  				}
+  			})()
+  		: {}) || {};
 
-	function getFindTreeForNode() {
-		return (
-			treeModel.findTreeForNode ||
-			(typeof findTreeForNode === 'function' ? findTreeForNode : null)
-		);
-	}
+  function getFindTreeForNode() {
+  	return (
+  		treeModel.findTreeForNode ||
+  		(typeof findTreeForNode === 'function' ? findTreeForNode : null)
+  	);
+  }
 
-	function getGetDescendants() {
-		return (
-			treeModel.getDescendants ||
-			(typeof getDescendants === 'function' ? getDescendants : null)
-		);
-	}
+  function getGetDescendants() {
+  	return (
+  		treeModel.getDescendants ||
+  		(typeof getDescendants === 'function' ? getDescendants : null)
+  	);
+  }
 
-	function separateBranch(canvas, canvasApi, node) {
-		if (!canvas || !canvasApi || !node) return false;
+  function separateBranch(canvas, canvasApi, node) {
+  	if (!canvas || !canvasApi || !node) return false;
 
-		const incoming = canvasApi.getIncomingEdges
-			? canvasApi.getIncomingEdges(canvas, node)
-			: [];
-		if (incoming.length === 0) return false;
+  	const incoming = canvasApi.getIncomingEdges
+  		? canvasApi.getIncomingEdges(canvas, node)
+  		: [];
+  	if (incoming.length === 0) return false;
 
-		for (const edge of incoming) {
-			canvasApi.removeEdge(canvas, edge);
-		}
-		return true;
-	}
+  	for (const edge of incoming) {
+  		canvasApi.removeEdge(canvas, edge);
+  	}
+  	return true;
+  }
 
-	function colorBranch(canvas, forest, node, color) {
-		if (!canvas || !node) return 0;
+  function colorBranch(canvas, forest, node, color) {
+  	if (!canvas || !node) return 0;
 
-		const findFn = getFindTreeForNode();
-		const descFn = getGetDescendants();
-		const treeNode = findFn ? findFn(forest, node.id) : null;
-		const targetNodes = [node];
-		if (treeNode && descFn) {
-			for (const descendant of descFn(treeNode)) {
-				if (descendant.canvasNode)
-					targetNodes.push(descendant.canvasNode);
-			}
-		}
+  	const findFn = getFindTreeForNode();
+  	const descFn = getGetDescendants();
+  	const treeNode = findFn ? findFn(forest, node.id) : null;
+  	const targetNodes = [node];
+  	if (treeNode && descFn) {
+  		for (const descendant of descFn(treeNode)) {
+  			if (descendant.canvasNode) targetNodes.push(descendant.canvasNode);
+  		}
+  	}
 
-		let count = 0;
-		for (const target of targetNodes) {
-			if (typeof target.setColor === 'function') {
-				target.setColor(color);
-				count++;
-			} else {
-				target.color = color;
-				count++;
-			}
-		}
-		return count;
-	}
+  	let count = 0;
+  	for (const target of targetNodes) {
+  		if (typeof target.setColor === 'function') {
+  			target.setColor(color);
+  			count++;
+  		} else {
+  			target.color = color;
+  			count++;
+  		}
+  	}
+  	return count;
+  }
 
-	function toggleSubtreeCollapse(canvas, forest, node) {
-		if (!canvas || !node) return false;
+  function toggleSubtreeCollapse(canvas, forest, node) {
+  	if (!canvas || !node) return false;
 
-		const findFn = getFindTreeForNode();
-		const descFn = getGetDescendants();
-		const treeNode = findFn ? findFn(forest, node.id) : null;
-		if (!treeNode || treeNode.children.length === 0) return false;
+  	const findFn = getFindTreeForNode();
+  	const descFn = getGetDescendants();
+  	const treeNode = findFn ? findFn(forest, node.id) : null;
+  	if (!treeNode || treeNode.children.length === 0) return false;
 
-		const data =
-			typeof node.getData === 'function'
-				? node.getData()
-				: node.unknownData || {};
-		const currentlyCollapsed = !!data.collapsed;
-		const nextState = !currentlyCollapsed;
+  	const data =
+  		typeof node.getData === 'function'
+  			? node.getData()
+  			: node.unknownData || {};
+  	const currentlyCollapsed = !!data.collapsed;
+  	const nextState = !currentlyCollapsed;
 
-		if (typeof node.setData === 'function') {
-			node.setData({ ...data, collapsed: nextState });
-		} else {
-			node.unknownData = {
-				...(node.unknownData || {}),
-				collapsed: nextState
-			};
-		}
+  	if (typeof node.setData === 'function') {
+  		node.setData({ ...data, collapsed: nextState });
+  	} else {
+  		node.unknownData = {
+  			...(node.unknownData || {}),
+  			collapsed: nextState
+  		};
+  	}
 
-		if (descFn) {
-			const descendants = descFn(treeNode);
-			for (const item of descendants) {
-				const childNode = item.canvasNode;
-				if (!childNode || !childNode.nodeEl) continue;
-				if (nextState) {
-					childNode.nodeEl.addClass('tomindmap-collapsed-hidden');
-				} else {
-					childNode.nodeEl.removeClass('tomindmap-collapsed-hidden');
-				}
-			}
-		}
-		return nextState;
-	}
+  	if (descFn) {
+  		const descendants = descFn(treeNode);
+  		for (const item of descendants) {
+  			const childNode = item.canvasNode;
+  			if (!childNode || !childNode.nodeEl) continue;
+  			if (nextState) {
+  				childNode.nodeEl.addClass('tomindmap-collapsed-hidden');
+  			} else {
+  				childNode.nodeEl.removeClass('tomindmap-collapsed-hidden');
+  			}
+  		}
+  	}
+  	return nextState;
+  }
 
-	module.exports = {
-		separateBranch,
-		colorBranch,
-		toggleSubtreeCollapse
-	};
-	return module.exports;
+  module.exports = {
+  	separateBranch,
+  	colorBranch,
+  	toggleSubtreeCollapse
+  };
+  return module.exports;
 })();
 // </tomindmap:module mindmap-actions>
 var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
@@ -9543,7 +8761,7 @@ function canvasOrderMatchesImportedMarkdown(canvas, imported) {
 	return MarkdownOrder.orderMatches(canvas, imported, getGroupIds);
 }
 function canvasTopicPreorder(canvas) {
-	return MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
+  return MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
 }
 function markdownLineRecords(markdown) {
 	const source = String(markdown || '');
@@ -9570,15 +8788,15 @@ function markdownLineRecords(markdown) {
  * and every nested source block remain byte-for-byte intact.
  */
 function reorderMarkdownTopicsPreservingSource(markdown, canvas) {
-	return MarkdownOrder.reorderPreservingSource(markdown, canvas, {
-		getGroupIds,
-		parseDocument: parseMarkdownMindMapDocument,
-		lineRecords: markdownLineRecords,
-		withMetadata: markdownWithTopicMetadata,
-		withoutLegacyComments: withoutLegacyPluginComments,
-		identityKey: topicIdentityKey,
-		identityLabel: topicIdentityLabel
-	});
+  return MarkdownOrder.reorderPreservingSource(markdown, canvas, {
+    getGroupIds,
+    parseDocument: parseMarkdownMindMapDocument,
+    lineRecords: markdownLineRecords,
+    withMetadata: markdownWithTopicMetadata,
+    withoutLegacyComments: withoutLegacyPluginComments,
+    identityKey: topicIdentityKey,
+    identityLabel: topicIdentityLabel
+  });
 }
 function patchMarkdownFromCanvasPreservingSource(
 	markdown,
@@ -10568,286 +9786,176 @@ function mindMapPdfBytes(jpeg) {
 
 // <tomindmap:module freemind>
 var { freemindToCanvas, layoutTree, parseFreeMindXml } = (() => {
-	const module = { exports: {} };
-	const exports = module.exports;
+  const module = { exports: {} };
+  const exports = module.exports;
 
-	function parseFreeMindXml(xml) {
-		const parser = new DOMParser();
-		const doc = parser.parseFromString(xml, 'text/xml');
-		const errorNode = doc.querySelector('parsererror');
-		if (errorNode) return [];
-		const mapEl = doc.querySelector('map');
-		if (!mapEl) return [];
-		const roots = [];
-		for (const child of Array.from(mapEl.children)) {
-			if (
-				child.tagName === 'node' ||
-				child.tagName === 'x-coggle-rootnode'
-			) {
-				roots.push(parseNode(child, 'right'));
-			}
-		}
-		return roots;
-	}
-	function parseNode(el, inheritedPosition) {
-		const text = el.getAttribute('TEXT') || 'Untitled';
-		const posAttr = el.getAttribute('POSITION');
-		const position =
-			posAttr === 'left'
-				? 'left'
-				: posAttr === 'right'
-					? 'right'
-					: inheritedPosition;
-		const children = [];
-		for (const child of Array.from(el.children)) {
-			if (
-				child.tagName === 'node' ||
-				child.tagName === 'x-coggle-rootnode'
-			) {
-				children.push(parseNode(child, position));
-			}
-		}
-		return { text, position, children };
-	}
-	function estimateNodeHeight(text, nodeWidth, minHeight, maxHeight) {
-		const AVG_CHAR_WIDTH = 8;
-		const LINE_HEIGHT = 22;
-		const PADDING = 20;
-		const charsPerLine = Math.max(
-			1,
-			Math.floor((nodeWidth - PADDING) / AVG_CHAR_WIDTH)
-		);
-		const paragraphs = text.split('\n');
-		let totalLines = 0;
-		for (const para of paragraphs) {
-			if (para.length === 0) {
-				totalLines += 1;
-			} else {
-				totalLines += Math.ceil(para.length / charsPerLine);
-			}
-		}
-		const estimated = totalLines * LINE_HEIGHT + PADDING;
-		return Math.min(Math.max(estimated, minHeight), maxHeight);
-	}
-	function nodeHeight(node, opts) {
-		return estimateNodeHeight(
-			node.text,
-			opts.nodeWidth,
-			opts.nodeHeight,
-			opts.maxNodeHeight
-		);
-	}
-	function subtreeHeight(node, opts) {
-		if (node.children.length === 0) return nodeHeight(node, opts);
-		let total = 0;
-		for (let i = 0; i < node.children.length; i++) {
-			if (i > 0) total += opts.verticalGap;
-			total += subtreeHeight(node.children[i], opts);
-		}
-		return Math.max(nodeHeight(node, opts), total);
-	}
-	function groupHeight(children, opts) {
-		if (children.length === 0) return 0;
-		let total = 0;
-		for (let i = 0; i < children.length; i++) {
-			if (i > 0) total += opts.verticalGap;
-			total += subtreeHeight(children[i], opts);
-		}
-		return total;
-	}
-	function layoutTree(root, startX, startY, opts, nodes, edges) {
-		const rootH = nodeHeight(root, opts);
-		const rootId = root.id || genId();
-		if (root.type === 'file' || root.file) {
-			nodes.push({
-				id: rootId,
-				type: 'file',
-				file: root.file || root.text,
-				x: startX,
-				y: startY,
-				width: opts.nodeWidth,
-				height: rootH
-			});
-		} else if (root.type === 'link' || root.url) {
-			nodes.push({
-				id: rootId,
-				type: 'link',
-				url: root.url || root.text,
-				x: startX,
-				y: startY,
-				width: opts.nodeWidth,
-				height: rootH
-			});
-		} else {
-			nodes.push({
-				id: rootId,
-				type: 'text',
-				text: root.text,
-				x: startX,
-				y: startY,
-				width: opts.nodeWidth,
-				height: rootH
-			});
-		}
-		if (root.children.length === 0) return rootH;
-		const rightChildren = root.children.filter(
-			(c) => c.position === 'right'
-		);
-		const leftChildren = root.children.filter((c) => c.position === 'left');
-		const rootCy = startY + rootH / 2;
-		layoutSide(
-			rootId,
-			rightChildren,
-			'right',
-			startX,
-			rootCy,
-			opts,
-			nodes,
-			edges
-		);
-		layoutSide(
-			rootId,
-			leftChildren,
-			'left',
-			startX,
-			rootCy,
-			opts,
-			nodes,
-			edges
-		);
-		const rightH = groupHeight(rightChildren, opts);
-		const leftH = groupHeight(leftChildren, opts);
-		return Math.max(rootH, rightH, leftH);
-	}
-	function layoutSide(
-		parentId,
-		children,
-		side,
-		parentX,
-		parentCy,
-		opts,
-		nodes,
-		edges
-	) {
-		if (children.length === 0) return;
-		const totalH = groupHeight(children, opts);
-		let childY = parentCy - totalH / 2;
-		const fromSide = side === 'right' ? 'right' : 'left';
-		const toSide = side === 'right' ? 'left' : 'right';
-		const childX =
-			side === 'right'
-				? parentX + opts.nodeWidth + opts.horizontalGap
-				: parentX - opts.nodeWidth - opts.horizontalGap;
-		for (const child of children) {
-			const childH = subtreeHeight(child, opts);
-			const childNodeY =
-				childY + childH / 2 - nodeHeight(child, opts) / 2;
-			const childId = layoutBranch(
-				child,
-				childX,
-				childNodeY,
-				side,
-				opts,
-				nodes,
-				edges
-			);
-			edges.push({
-				id: genId(),
-				fromNode: parentId,
-				fromSide,
-				fromEnd: 'none',
-				toNode: childId,
-				toSide,
-				toEnd: 'arrow'
-			});
-			childY += childH + opts.verticalGap;
-		}
-	}
-	function layoutBranch(node, x, y, side, opts, nodes, edges) {
-		const h = nodeHeight(node, opts);
-		const id = node.id || genId();
-		if (node.type === 'file' || node.file) {
-			nodes.push({
-				id,
-				type: 'file',
-				file: node.file || node.text,
-				x,
-				y,
-				width: opts.nodeWidth,
-				height: h
-			});
-		} else if (node.type === 'link' || node.url) {
-			nodes.push({
-				id,
-				type: 'link',
-				url: node.url || node.text,
-				x,
-				y,
-				width: opts.nodeWidth,
-				height: h
-			});
-		} else {
-			nodes.push({
-				id,
-				type: 'text',
-				text: node.text,
-				x,
-				y,
-				width: opts.nodeWidth,
-				height: h
-			});
-		}
-		if (node.children.length === 0) return id;
-		const fromSide = side === 'right' ? 'right' : 'left';
-		const toSide = side === 'right' ? 'left' : 'right';
-		const childX =
-			side === 'right'
-				? x + opts.nodeWidth + opts.horizontalGap
-				: x - opts.nodeWidth - opts.horizontalGap;
-		const totalH = groupHeight(node.children, opts);
-		let childY = y + h / 2 - totalH / 2;
-		for (const child of node.children) {
-			const childH = subtreeHeight(child, opts);
-			const childNodeY =
-				childY + childH / 2 - nodeHeight(child, opts) / 2;
-			const childId = layoutBranch(
-				child,
-				childX,
-				childNodeY,
-				side,
-				opts,
-				nodes,
-				edges
-			);
-			edges.push({
-				id: genId(),
-				fromNode: id,
-				fromSide,
-				fromEnd: 'none',
-				toNode: childId,
-				toSide,
-				toEnd: 'arrow'
-			});
-			childY += childH + opts.verticalGap;
-		}
-		return id;
-	}
-	function freemindToCanvas(xml, opts) {
-		const roots = parseFreeMindXml(xml);
-		if (roots.length === 0) return null;
-		const nodes = [];
-		const edges = [];
-		let currentY = 0;
-		const treeGap = opts.verticalGap * 4;
-		for (const root of roots) {
-			const height = layoutTree(root, 0, currentY, opts, nodes, edges);
-			currentY += height + treeGap;
-		}
-		return { nodes, edges, mindmap: true };
-	}
+  function parseFreeMindXml(xml) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, "text/xml");
+    const errorNode = doc.querySelector("parsererror");
+    if (errorNode)
+      return [];
+    const mapEl = doc.querySelector("map");
+    if (!mapEl)
+      return [];
+    const roots = [];
+    for (const child of Array.from(mapEl.children)) {
+      if (child.tagName === "node" || child.tagName === "x-coggle-rootnode") {
+        roots.push(parseNode(child, "right"));
+      }
+    }
+    return roots;
+  }
+  function parseNode(el, inheritedPosition) {
+    const text = el.getAttribute("TEXT") || "Untitled";
+    const posAttr = el.getAttribute("POSITION");
+    const position = posAttr === "left" ? "left" : posAttr === "right" ? "right" : inheritedPosition;
+    const children = [];
+    for (const child of Array.from(el.children)) {
+      if (child.tagName === "node" || child.tagName === "x-coggle-rootnode") {
+        children.push(parseNode(child, position));
+      }
+    }
+    return { text, position, children };
+  }
+  function estimateNodeHeight(text, nodeWidth, minHeight, maxHeight) {
+    const AVG_CHAR_WIDTH = 8;
+    const LINE_HEIGHT = 22;
+    const PADDING = 20;
+    const charsPerLine = Math.max(1, Math.floor((nodeWidth - PADDING) / AVG_CHAR_WIDTH));
+    const paragraphs = text.split("\n");
+    let totalLines = 0;
+    for (const para of paragraphs) {
+      if (para.length === 0) {
+        totalLines += 1;
+      } else {
+        totalLines += Math.ceil(para.length / charsPerLine);
+      }
+    }
+    const estimated = totalLines * LINE_HEIGHT + PADDING;
+    return Math.min(Math.max(estimated, minHeight), maxHeight);
+  }
+  function nodeHeight(node, opts) {
+    return estimateNodeHeight(node.text, opts.nodeWidth, opts.nodeHeight, opts.maxNodeHeight);
+  }
+  function subtreeHeight(node, opts) {
+    if (node.children.length === 0)
+      return nodeHeight(node, opts);
+    let total = 0;
+    for (let i = 0; i < node.children.length; i++) {
+      if (i > 0)
+        total += opts.verticalGap;
+      total += subtreeHeight(node.children[i], opts);
+    }
+    return Math.max(nodeHeight(node, opts), total);
+  }
+  function groupHeight(children, opts) {
+    if (children.length === 0)
+      return 0;
+    let total = 0;
+    for (let i = 0; i < children.length; i++) {
+      if (i > 0)
+        total += opts.verticalGap;
+      total += subtreeHeight(children[i], opts);
+    }
+    return total;
+  }
+  function layoutTree(root, startX, startY, opts, nodes, edges) {
+    const rootH = nodeHeight(root, opts);
+    const rootId = root.id || genId();
+    if (root.type === "file" || root.file) {
+      nodes.push({ id: rootId, type: "file", file: root.file || root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
+    } else if (root.type === "link" || root.url) {
+      nodes.push({ id: rootId, type: "link", url: root.url || root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
+    } else {
+      nodes.push({ id: rootId, type: "text", text: root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
+    }
+    if (root.children.length === 0)
+      return rootH;
+    const rightChildren = root.children.filter((c) => c.position === "right");
+    const leftChildren = root.children.filter((c) => c.position === "left");
+    const rootCy = startY + rootH / 2;
+    layoutSide(rootId, rightChildren, "right", startX, rootCy, opts, nodes, edges);
+    layoutSide(rootId, leftChildren, "left", startX, rootCy, opts, nodes, edges);
+    const rightH = groupHeight(rightChildren, opts);
+    const leftH = groupHeight(leftChildren, opts);
+    return Math.max(rootH, rightH, leftH);
+  }
+  function layoutSide(parentId, children, side, parentX, parentCy, opts, nodes, edges) {
+    if (children.length === 0)
+      return;
+    const totalH = groupHeight(children, opts);
+    let childY = parentCy - totalH / 2;
+    const fromSide = side === "right" ? "right" : "left";
+    const toSide = side === "right" ? "left" : "right";
+    const childX = side === "right" ? parentX + opts.nodeWidth + opts.horizontalGap : parentX - opts.nodeWidth - opts.horizontalGap;
+    for (const child of children) {
+      const childH = subtreeHeight(child, opts);
+      const childNodeY = childY + childH / 2 - nodeHeight(child, opts) / 2;
+      const childId = layoutBranch(child, childX, childNodeY, side, opts, nodes, edges);
+      edges.push({
+        id: genId(),
+        fromNode: parentId,
+        fromSide,
+        fromEnd: "none",
+        toNode: childId,
+        toSide,
+        toEnd: "arrow"
+      });
+      childY += childH + opts.verticalGap;
+    }
+  }
+  function layoutBranch(node, x, y, side, opts, nodes, edges) {
+    const h = nodeHeight(node, opts);
+    const id = node.id || genId();
+    if (node.type === "file" || node.file) {
+      nodes.push({ id, type: "file", file: node.file || node.text, x, y, width: opts.nodeWidth, height: h });
+    } else if (node.type === "link" || node.url) {
+      nodes.push({ id, type: "link", url: node.url || node.text, x, y, width: opts.nodeWidth, height: h });
+    } else {
+      nodes.push({ id, type: "text", text: node.text, x, y, width: opts.nodeWidth, height: h });
+    }
+    if (node.children.length === 0)
+      return id;
+    const fromSide = side === "right" ? "right" : "left";
+    const toSide = side === "right" ? "left" : "right";
+    const childX = side === "right" ? x + opts.nodeWidth + opts.horizontalGap : x - opts.nodeWidth - opts.horizontalGap;
+    const totalH = groupHeight(node.children, opts);
+    let childY = y + h / 2 - totalH / 2;
+    for (const child of node.children) {
+      const childH = subtreeHeight(child, opts);
+      const childNodeY = childY + childH / 2 - nodeHeight(child, opts) / 2;
+      const childId = layoutBranch(child, childX, childNodeY, side, opts, nodes, edges);
+      edges.push({
+        id: genId(),
+        fromNode: id,
+        fromSide,
+        fromEnd: "none",
+        toNode: childId,
+        toSide,
+        toEnd: "arrow"
+      });
+      childY += childH + opts.verticalGap;
+    }
+    return id;
+  }
+  function freemindToCanvas(xml, opts) {
+    const roots = parseFreeMindXml(xml);
+    if (roots.length === 0)
+      return null;
+    const nodes = [];
+    const edges = [];
+    let currentY = 0;
+    const treeGap = opts.verticalGap * 4;
+    for (const root of roots) {
+      const height = layoutTree(root, 0, currentY, opts, nodes, edges);
+      currentY += height + treeGap;
+    }
+    return { nodes, edges, mindmap: true };
+  }
 
-	module.exports = { freemindToCanvas, layoutTree, parseFreeMindXml };
-	return module.exports;
+  module.exports = { freemindToCanvas, layoutTree, parseFreeMindXml };
+  return module.exports;
 })();
 // </tomindmap:module freemind>
 
@@ -12257,6 +11365,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origDeselectAll = canvas.deselectAll.bind(canvas);
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
+		const origRemoveNode = canvas.removeNode.bind(canvas);
+		let structuralReflowQueued = false;
 		this.origCanvasMethods = {
 			requestSave: origSave,
 			createGroupNode: origCreateGroup,
@@ -12265,7 +11375,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			selectOnly: origSelectOnly,
 			deselectAll: origDeselectAll,
 			importData: origImportData,
-			removeEdge: origRemoveEdge
+			removeEdge: origRemoveEdge,
+			removeNode: origRemoveNode
 		};
 		this.interceptedCanvas = canvas;
 		canvas.deselectAll = () => {
@@ -12313,6 +11424,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		canvas.removeEdge = (...args) => {
 			const result = origRemoveEdge(...args);
 			this.canvasApi.invalidateEdgeIndex();
+			return result;
+		};
+		canvas.removeNode = (...args) => {
+			const result = origRemoveNode(...args);
+			this.canvasApi.invalidateEdgeIndex();
+			if (
+				this.isMindmapCanvas(canvas) &&
+				this.isAutoAdjustCanvas(canvas) &&
+				!structuralReflowQueued
+			) {
+				structuralReflowQueued = true;
+				this.trackedRaf(() => {
+					structuralReflowQueued = false;
+					if (!this.isMindmapCanvas(canvas)) return;
+					this.layoutEngine.layout(canvas);
+					this.updateGroupBounds(canvas);
+					canvas.requestSave();
+				});
+			}
 			return result;
 		};
 		canvas.createGroupNode = (options) => {
@@ -15551,6 +14681,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (this.origCanvasMethods.removeEdge) {
 				this.interceptedCanvas.removeEdge =
 					this.origCanvasMethods.removeEdge;
+			}
+			if (this.origCanvasMethods.removeNode) {
+				this.interceptedCanvas.removeNode =
+					this.origCanvasMethods.removeNode;
 			}
 		}
 		this.interceptedCanvas = null;

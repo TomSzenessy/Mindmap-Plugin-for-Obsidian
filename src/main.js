@@ -5292,6 +5292,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origDeselectAll = canvas.deselectAll.bind(canvas);
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
+		const origRemoveNode = canvas.removeNode.bind(canvas);
+		let structuralReflowQueued = false;
 		this.origCanvasMethods = {
 			requestSave: origSave,
 			createGroupNode: origCreateGroup,
@@ -5300,7 +5302,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			selectOnly: origSelectOnly,
 			deselectAll: origDeselectAll,
 			importData: origImportData,
-			removeEdge: origRemoveEdge
+			removeEdge: origRemoveEdge,
+			removeNode: origRemoveNode
 		};
 		this.interceptedCanvas = canvas;
 		canvas.deselectAll = () => {
@@ -5348,6 +5351,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		canvas.removeEdge = (...args) => {
 			const result = origRemoveEdge(...args);
 			this.canvasApi.invalidateEdgeIndex();
+			return result;
+		};
+		canvas.removeNode = (...args) => {
+			const result = origRemoveNode(...args);
+			this.canvasApi.invalidateEdgeIndex();
+			if (
+				this.isMindmapCanvas(canvas) &&
+				this.isAutoAdjustCanvas(canvas) &&
+				!structuralReflowQueued
+			) {
+				structuralReflowQueued = true;
+				this.trackedRaf(() => {
+					structuralReflowQueued = false;
+					if (!this.isMindmapCanvas(canvas)) return;
+					this.layoutEngine.layout(canvas);
+					this.updateGroupBounds(canvas);
+					canvas.requestSave();
+				});
+			}
 			return result;
 		};
 		canvas.createGroupNode = (options) => {
@@ -8586,6 +8608,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (this.origCanvasMethods.removeEdge) {
 				this.interceptedCanvas.removeEdge =
 					this.origCanvasMethods.removeEdge;
+			}
+			if (this.origCanvasMethods.removeNode) {
+				this.interceptedCanvas.removeNode =
+					this.origCanvasMethods.removeNode;
 			}
 		}
 		this.interceptedCanvas = null;

@@ -1,17 +1,17 @@
-/* Mindvas Plugin Styles */
+/* tomindmap Plugin Styles */
 
 /* Mindmap mode toggle button in canvas toolbar */
-.mindvas-toggle-btn,
-.mindvas-media-btn {
+.tomindmap-toggle-btn,
+.tomindmap-media-btn {
 	color: var(--text-muted);
 }
 
-.mindvas-toggle-btn:hover,
-.mindvas-media-btn:hover {
+.tomindmap-toggle-btn:hover,
+.tomindmap-media-btn:hover {
 	color: var(--text-normal);
 }
 
-.mindvas-toggle-btn.is-active {
+.tomindmap-toggle-btn.is-active {
 	color: var(--interactive-accent);
 }
 
@@ -21,13 +21,13 @@
 }
 
 /* A quiet, persistent cursor for keyboard-first navigation. */
-.canvas-node.mindvas-navigation-selected {
+.canvas-node.tomindmap-navigation-selected {
 	outline: 2px solid var(--interactive-accent);
 	outline-offset: 3px;
 	border-radius: var(--radius-m);
 }
 
-.canvas-node.mindvas-navigation-selected .canvas-node-content {
+.canvas-node.tomindmap-navigation-selected .canvas-node-content {
 	cursor: text;
 }
 
@@ -38,7 +38,7 @@
 }
 
 /* Real Markdown rendering for a one-time imported-card measurement pass. */
-.mindvas-measurement-host {
+.tomindmap-measurement-host {
 	position: fixed;
 	z-index: -1;
 	inset-block-start: 0;
@@ -53,24 +53,43 @@
  * the final Markdown block. Let Canvas's matching ::before/::after spacers
  * divide that height evenly in mind-map cards and in their hidden clones.
  */
-.mindvas-mindmap-mode .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer,
-.mindvas-measurement-host .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view > .markdown-preview-sizer {
+.tomindmap-mindmap-mode
+	.canvas-node-content.markdown-embed
+	> .markdown-embed-content
+	> .markdown-preview-view
+	> .markdown-preview-sizer,
+.tomindmap-measurement-host
+	.canvas-node-content.markdown-embed
+	> .markdown-embed-content
+	> .markdown-preview-view
+	> .markdown-preview-sizer {
 	flex: 0 0 auto;
 	box-sizing: border-box;
 	padding: var(--size-4-1);
 }
 
 /* Mind-map geometry is owned by automatic content sizing and layout. */
-.mindvas-mindmap-mode .canvas-node-resizer,
-.mindvas-mindmap-mode .canvas-node-resizers,
-.mindvas-mindmap-mode .canvas-node-resize-handle,
-.mindvas-mindmap-mode [class*="resizer"] {
+.tomindmap-mindmap-mode .canvas-node-resizer,
+.tomindmap-mindmap-mode .canvas-node-resizers,
+.tomindmap-mindmap-mode .canvas-node-resize-handle,
+.tomindmap-mindmap-mode [class*='resizer'] {
 	display: none !important;
 	pointer-events: none !important;
 }
 
-.mindvas-mindmap-mode.mindvas-drop-active::after {
-	content: "Drop to add media or a link";
+/* Mind-map dragging owns its geometry. Suppress native Canvas magnet/snap
+ * affordances during that gesture; ordinary Canvas views remain unchanged. */
+.tomindmap-mindmap-mode.tomindmap-node-dragging .canvas-node-connection-point,
+.tomindmap-mindmap-mode.tomindmap-node-dragging [class*='snap'],
+.tomindmap-mindmap-mode.tomindmap-node-dragging [class*='alignment-guide'],
+.tomindmap-mindmap-mode.tomindmap-node-dragging [class*='alignment-line'] {
+	display: none !important;
+	visibility: hidden !important;
+	pointer-events: none !important;
+}
+
+.tomindmap-mindmap-mode.tomindmap-drop-active::after {
+	content: 'Drop to add media or a link';
 	position: absolute;
 	z-index: 100;
 	inset: 18px;
@@ -86,13 +105,13 @@
 	pointer-events: none;
 }
 
-.canvas-node.mindvas-missing-media {
+.canvas-node.tomindmap-missing-media {
 	outline: 2px solid var(--color-red);
 	outline-offset: 3px;
 }
 
-.canvas-node.mindvas-missing-media::after {
-	content: attr(data-mindvas-missing-media);
+.canvas-node.tomindmap-missing-media::after {
+	content: attr(data-tomindmap-missing-media);
 	position: absolute;
 	z-index: 4;
 	inset-inline-end: 8px;
@@ -112,30 +131,31 @@
 
 /* Smooth group resize animation */
 .canvas-node.mindmap-group-animating {
-	transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-	            width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-	            height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+	transition:
+		transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+		width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+		height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Map outline sidebar panel */
-.mindvas-outline {
+.tomindmap-outline {
 	padding: 0;
 }
 
-.mindvas-outline-group .tree-item-inner {
+.tomindmap-outline-group .tree-item-inner {
 	font-weight: var(--font-semibold);
 	display: flex;
 	align-items: baseline;
 }
 
 /* Inline rename editing state */
-.mindvas-outline-group .tree-item-inner span[contenteditable="true"] {
+.tomindmap-outline-group .tree-item-inner span[contenteditable='true'] {
 	outline: 1px solid var(--interactive-accent);
 	border-radius: var(--radius-s);
 	padding: 0 4px;
 }
 
-.mindvas-outline-group-count {
+.tomindmap-outline-group-count {
 	color: var(--text-faint);
 	font-weight: normal;
 	font-size: var(--font-ui-smaller);
@@ -143,15 +163,15 @@
 	padding-inline-start: 6px;
 }
 
-.mindvas-outline .tree-item-children {
+.tomindmap-outline .tree-item-children {
 	overflow: hidden;
 }
 
-.mindvas-outline .tree-item.is-collapsed > .tree-item-children {
+.tomindmap-outline .tree-item.is-collapsed > .tree-item-children {
 	display: none;
 }
 
-.mindvas-outline .mindvas-outline-item .tree-item-inner {
+.tomindmap-outline .tomindmap-outline-item .tree-item-inner {
 	text-overflow: ellipsis;
 	overflow: hidden;
 	white-space: nowrap;
@@ -159,26 +179,30 @@
 	flex: 1;
 }
 
-.mindvas-outline .mindvas-outline-item.is-active {
+.tomindmap-outline .tomindmap-outline-item.is-active {
 	background-color: var(--background-modifier-hover);
 	border-radius: var(--radius-s);
 }
 
-.mindvas-outline .mindvas-outline-item.is-selected {
+.tomindmap-outline .tomindmap-outline-item.is-selected {
 	background-color: var(--background-modifier-active-hover);
 }
 
-.mindvas-outline .collapse-icon svg {
+.tomindmap-outline .collapse-icon svg {
 	transition: transform 100ms ease-in-out;
 	transform: rotate(-90deg);
 }
 
-.mindvas-outline .tree-item:not(.is-collapsed) > .tree-item-self .collapse-icon svg {
+.tomindmap-outline
+	.tree-item:not(.is-collapsed)
+	> .tree-item-self
+	.collapse-icon
+	svg {
 	transform: rotate(0deg);
 }
 
 /* Drag handle on TOC root items — shown on hover */
-.mindvas-outline .mindvas-outline-drag-handle {
+.tomindmap-outline .tomindmap-outline-drag-handle {
 	cursor: grab;
 	color: var(--text-faint);
 	flex-shrink: 0;
@@ -186,65 +210,67 @@
 	transition: opacity 150ms ease-in-out;
 }
 
-.mindvas-outline .mindvas-outline-item:hover .mindvas-outline-drag-handle {
+.tomindmap-outline
+	.tomindmap-outline-item:hover
+	.tomindmap-outline-drag-handle {
 	opacity: 1;
 }
 
-.mindvas-outline .mindvas-outline-drag-handle:hover {
+.tomindmap-outline .tomindmap-outline-drag-handle:hover {
 	color: var(--text-muted);
 }
 
-.mindvas-outline .mindvas-outline-branch-icon {
+.tomindmap-outline .tomindmap-outline-branch-icon {
 	color: var(--text-faint);
 	flex-shrink: 0;
 }
 
-.mindvas-outline .mindvas-outline-branch-icon svg {
+.tomindmap-outline .tomindmap-outline-branch-icon svg {
 	width: 13px;
 	height: 13px;
 }
 
 /* Dragging state */
-.mindvas-outline-item.is-dragging {
+.tomindmap-outline-item.is-dragging {
 	opacity: 0.4;
 }
 
 /* Drop target highlight */
-.mindvas-outline-group.is-drag-over,
-.mindvas-outline-ungrouped-zone.is-drag-over {
+.tomindmap-outline-group.is-drag-over,
+.tomindmap-outline-ungrouped-zone.is-drag-over {
 	background-color: var(--background-modifier-hover);
 	border-radius: var(--radius-s);
 }
 
 /* Ungrouped zone drop target */
-.mindvas-outline-ungrouped-zone {
+.tomindmap-outline-ungrouped-zone {
 	min-height: 20px;
 }
 
 /* Separator between ungrouped roots and groups */
-.mindvas-outline-ungrouped-zone:not(:empty):has(~ .tree-item) {
+.tomindmap-outline-ungrouped-zone:not(:empty):has(~ .tree-item) {
 	padding-bottom: 4px;
 	margin-bottom: 4px;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
 /* Search filter */
-.mindvas-outline-search-container {
+.tomindmap-outline-search-container {
 	padding: 4px 10px 8px;
 }
 
-.mindvas-outline .tree-item.is-hidden {
+.tomindmap-outline .tree-item.is-hidden {
 	display: none;
 }
 
-.mindvas-outline-empty {
+.tomindmap-outline-empty {
 	padding: 12px 10px;
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 	font-style: italic;
 }
 
-.mindvas-markdown-import {
+.tomindmap-markdown-import {
 	box-sizing: border-box;
 	width: 100%;
 	min-height: 260px;
@@ -252,23 +278,23 @@
 	font-family: var(--font-monospace);
 }
 
-.mindvas-export-form {
+.tomindmap-export-form {
 	display: grid;
 	gap: 14px;
 	margin: 18px 0;
 }
 
-.mindvas-export-form label {
+.tomindmap-export-form label {
 	display: grid;
 	gap: 6px;
 	font-weight: var(--font-medium);
 }
 
-.mindvas-export-form select {
+.tomindmap-export-form select {
 	width: 100%;
 }
 
-.mindvas-print-frame {
+.tomindmap-print-frame {
 	position: fixed;
 	inset: 0;
 	width: 1px;
@@ -281,12 +307,12 @@
 /* Moving a rendered note/PDF can otherwise repaint an entire embedded
  * document on every pointer event. Keep the card geometry, but temporarily
  * suppress its expensive preview until the drag ends. */
-.mindvas-media-dragging .canvas-node-content,
-.mindvas-media-dragging.canvas-node-content,
-.mindvas-media-dragging .markdown-embed,
-.mindvas-media-dragging iframe,
-.mindvas-media-dragging object,
-.mindvas-media-dragging embed {
+.tomindmap-media-dragging .canvas-node-content,
+.tomindmap-media-dragging.canvas-node-content,
+.tomindmap-media-dragging .markdown-embed,
+.tomindmap-media-dragging iframe,
+.tomindmap-media-dragging object,
+.tomindmap-media-dragging embed {
 	visibility: hidden !important;
 	pointer-events: none !important;
 }

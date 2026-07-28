@@ -40,10 +40,24 @@ function dragFixture({ withOriginalParent = true } = {}) {
   };
   if (withOriginalParent)
     canvasApi.createEdge(canvas, oldParent, dragged);
+  const forest = [
+    {
+      canvasNode: oldParent,
+      children: withOriginalParent
+        ? [{ canvasNode: dragged, children: [], parent: null }]
+        : []
+    },
+    { canvasNode: newParent, children: [] },
+    { canvasNode: otherParent, children: [] }
+  ];
+  if (withOriginalParent)
+    forest[0].children[0].parent = forest[0];
+  else
+    forest.push({ canvasNode: dragged, children: [] });
   const controller = createDragAttachmentController(
     canvas,
     canvasApi,
-    () => [],
+    () => forest,
     (node) => node.id === "dragged" && withOriginalParent ? oldParent : node
   );
   return {
@@ -58,15 +72,17 @@ function dragFixture({ withOriginalParent = true } = {}) {
   };
 }
 
-test("keeps the original arrow for a small drag near its current parent", () => {
+test("rebuilds even the old-parent arrow from current drag geometry", () => {
   const fixture = dragFixture();
   fixture.controller.begin(fixture.dragged);
   fixture.dragged.x += 12;
 
   const preview = fixture.controller.updatePreview(fixture.dragged);
-  assert.equal(preview.state, "original");
+  assert.equal(preview.state, "preview");
+  assert.equal(preview.target.id, "old");
   assert.equal(fixture.activeEdges.length, 1);
   assert.equal(fixture.activeEdges[0].from.node.id, "old");
+  assert.equal(fixture.activeEdges[0].__mindMapPreview, true);
 
   fixture.controller.cancel();
   assert.equal(fixture.activeEdges.length, 1);
@@ -83,7 +99,7 @@ test("switches immediately when a different node is the closest candidate", () =
   assert.equal(preview.target.id, "new");
   assert.equal(preview.incomingSide, "right");
   assert.equal(fixture.activeEdges.length, 1);
-  assert.equal(fixture.activeEdges[0].from.node.id, "new");
+  assert.ok(fixture.activeEdges.some((edge) => edge.from.node.id === "new" && edge.__mindMapPreview));
 });
 
 test("switches the visible arrow between prospective parents and commits only one", () => {
@@ -95,14 +111,13 @@ test("switches the visible arrow between prospective parents and commits only on
   assert.equal(preview.state, "preview");
   assert.equal(preview.target.id, "new");
   assert.equal(fixture.activeEdges.length, 1);
-  assert.equal(fixture.activeEdges[0].from.node.id, "new");
-  assert.equal(fixture.activeEdges[0].__mindMapPreview, true);
+  assert.ok(fixture.activeEdges.some((edge) => edge.from.node.id === "new" && edge.__mindMapPreview));
 
   fixture.dragged.x = 790;
   preview = fixture.controller.updatePreview(fixture.dragged);
   assert.equal(preview.target.id, "other");
   assert.equal(fixture.activeEdges.length, 1);
-  assert.equal(fixture.activeEdges[0].from.node.id, "other");
+  assert.ok(fixture.activeEdges.some((edge) => edge.from.node.id === "other" && edge.__mindMapPreview));
 
   const result = fixture.controller.commit(fixture.dragged);
   assert.equal(result.changed, true);
@@ -131,16 +146,19 @@ test("detaches beyond the fixed nearest-node distance", () => {
 test("keeps its parent when dragged across it to flip branch sides", () => {
   const fixture = dragFixture();
   fixture.controller.begin(fixture.dragged);
-  fixture.dragged.x = -300;
+  fixture.dragged.x = -180;
 
   const preview = fixture.controller.updatePreview(fixture.dragged);
-  assert.equal(preview.state, "original");
+  assert.equal(preview.state, "preview");
   assert.equal(preview.target.id, "old");
+  assert.equal(preview.incomingSide, "right");
   assert.equal(fixture.activeEdges.length, 1);
 
   const result = fixture.controller.commit(fixture.dragged);
-  assert.equal(result.state, "original");
+  assert.equal(result.state, "attached");
+  assert.equal(result.changed, false);
   assert.equal(fixture.activeEdges[0].from.node.id, "old");
+  assert.equal(fixture.activeEdges[0].to.side, "right");
 });
 
 test("previews and attaches a standalone node moved inside the fixed distance", () => {
@@ -167,8 +185,7 @@ test("restores the original arrow if preview edge creation fails", () => {
 
   const preview = fixture.controller.updatePreview(fixture.dragged);
   assert.equal(preview.state, "original");
-  // Restoration also uses createEdge, so the controller remains safely
-  // detached instead of claiming that a non-existent preview can be committed.
+  // The test deliberately makes both preview creation and restoration fail.
   assert.equal(fixture.activeEdges.length, 0);
   assert.equal(fixture.controller.commit(fixture.dragged).changed, false);
 });

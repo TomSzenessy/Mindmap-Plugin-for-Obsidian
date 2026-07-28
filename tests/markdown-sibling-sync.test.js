@@ -243,6 +243,10 @@ test("preview direction puts every child opposite the incoming arrow", () => {
   assert.equal(leftChild.x, 260);
   assert.equal(rightChild.x, 260);
   assert.ok(leftChild.y < rightChild.y);
+  for (const output of canvas.edges.values()) {
+    assert.equal(output.from.side, "left");
+    assert.equal(output.to.side, "right");
+  }
 });
 
 test("preserves the dropped side of root branches during drag reflow", () => {

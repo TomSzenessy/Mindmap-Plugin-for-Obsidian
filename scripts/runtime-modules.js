@@ -32,6 +32,12 @@ const modules = [
     declaration: "var MarkdownOrder"
   },
   {
+    name: "clipboard-markdown",
+    source: "lib/clipboard-markdown.js",
+    requireLine: 'var { normalizeClipboardMarkdown } = require("./lib/clipboard-markdown.js");',
+    declaration: "var { normalizeClipboardMarkdown }"
+  },
+  {
     name: "export",
     source: "lib/export.js",
     requireLine: 'var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = require("./lib/export.js");',

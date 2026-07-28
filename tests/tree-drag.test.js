@@ -96,7 +96,7 @@ test("uses a fixed rectangle-to-rectangle distance for local attachment", () => 
   assert.equal(findNearestAttachableNode(dragged, [far]), null);
 });
 
-test("prospective connections inherit the target branch side", () => {
+test("prospective connections follow the dragged card side of the map root", () => {
   const root = { id: "root", x: 500, y: 0, width: 200, height: 80 };
   const leftParent = { id: "left", x: 200, y: 0, width: 160, height: 60 };
   const rightParent = { id: "right", x: 840, y: 0, width: 160, height: 60 };
@@ -104,14 +104,14 @@ test("prospective connections inherit the target branch side", () => {
   const draggedLeft = { id: "dragged-left", x: 260, y: 200, width: 160, height: 60 };
 
   assert.deepEqual(getConnectionSides(draggedRight, root, leftParent), {
-    branchSide: "left",
-    fromSide: "left",
-    toSide: "right"
-  });
-  assert.deepEqual(getConnectionSides(draggedLeft, root, rightParent), {
     branchSide: "right",
     fromSide: "right",
     toSide: "left"
+  });
+  assert.deepEqual(getConnectionSides(draggedLeft, root, rightParent), {
+    branchSide: "left",
+    fromSide: "left",
+    toSide: "right"
   });
   assert.equal(getConnectionSides(draggedRight, root, root).branchSide, "right");
 });

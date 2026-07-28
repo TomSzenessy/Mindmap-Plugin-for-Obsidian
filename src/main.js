@@ -2594,9 +2594,35 @@ function wrapSvgText(text, width, fontSize) {
   }
   return result.slice(0, 12);
 }
-function printableNodeHtml(node) {
-  if (!node.contentEl)
+function safeCssValue(value, fallback = "") {
+  return value && value !== "rgba(0, 0, 0, 0)" && value !== "transparent" ? value : fallback;
+}
+function nearestPaintedBackground(element, fallback = "#ffffff") {
+  const ownerWindow = element?.ownerDocument?.defaultView;
+  for (let current = element; current && ownerWindow; current = current.parentElement) {
+    const color = ownerWindow.getComputedStyle(current).backgroundColor;
+    if (safeCssValue(color))
+      return color;
+  }
+  return fallback;
+}
+function computedStyleText(element) {
+  const ownerWindow = element?.ownerDocument?.defaultView;
+  if (!ownerWindow)
     return "";
+  const style = ownerWindow.getComputedStyle(element);
+  let result = "";
+  for (let index = 0; index < style.length; index++) {
+    const property = style[index];
+    const value = style.getPropertyValue(property);
+    if (value)
+      result += `${property}:${value};`;
+  }
+  return result;
+}
+function printableNodeSnapshot(node) {
+  if (!node.contentEl)
+    return null;
   let source = null;
   try {
     source = node.contentEl.querySelector("iframe")?.contentDocument?.querySelector(".markdown-preview-sizer") || null;
@@ -2605,8 +2631,15 @@ function printableNodeHtml(node) {
   }
   source = source || node.contentEl.querySelector(".markdown-preview-sizer") || node.contentEl.querySelector(".markdown-preview-view");
   if (!source)
-    return "";
+    return null;
   const clone = source.cloneNode(true);
+  const originals = [source, ...source.querySelectorAll("*")];
+  const clones = [clone, ...clone.querySelectorAll("*")];
+  for (let index = 0; index < Math.min(originals.length, clones.length); index++) {
+    const styleText = computedStyleText(originals[index]);
+    if (styleText)
+      clones[index].setAttribute("style", styleText);
+  }
   for (const unsafe of Array.from(clone.querySelectorAll("script,style,button,.canvas-node-resizer,.canvas-node-connection-point")))
     unsafe.remove();
   for (const element of Array.from(clone.querySelectorAll("*"))) {
@@ -2615,7 +2648,36 @@ function printableNodeHtml(node) {
         element.removeAttribute(attribute.name);
     }
   }
-  return clone.innerHTML;
+  const sourceRect = source.getBoundingClientRect();
+  return {
+    html: clone.outerHTML,
+    rect: sourceRect
+  };
+}
+function edgeAnchor(record, side) {
+  switch (side) {
+    case "top":
+      return [record.x + record.width / 2, record.y];
+    case "bottom":
+      return [record.x + record.width / 2, record.y + record.height];
+    case "left":
+      return [record.x, record.y + record.height / 2];
+    default:
+      return [record.x + record.width, record.y + record.height / 2];
+  }
+}
+function edgeCurve(from, to, fromSide, toSide) {
+  const [x1, y1] = edgeAnchor(from, fromSide);
+  const [x2, y2] = edgeAnchor(to, toSide);
+  if (fromSide === "top" || fromSide === "bottom" || toSide === "top" || toSide === "bottom") {
+    const middle = (y1 + y2) / 2;
+    return `M ${x1} ${y1} C ${x1} ${middle}, ${x2} ${middle}, ${x2} ${y2}`;
+  }
+  const middle = (x1 + x2) / 2;
+  return `M ${x1} ${y1} C ${middle} ${y1}, ${middle} ${y2}, ${x2} ${y2}`;
+}
+function exportMarkerId(color) {
+  return `arrow-${String(color || "default").replace(/[^a-z0-9_-]/gi, "_")}`;
 }
 function canvasPrintDocument(canvas, scope) {
   const data = canvas.getData();
@@ -2637,6 +2699,16 @@ function canvasPrintDocument(canvas, scope) {
     if (scope === "viewport" && (!domRect || domRect.right < wrapperRect.left || domRect.left > wrapperRect.right || domRect.bottom < wrapperRect.top || domRect.top > wrapperRect.bottom))
       continue;
     const viewportMode = scope === "viewport";
+    const rendered = nodeData.type === "group" ? null : printableNodeSnapshot(node);
+    const logicalScale = viewportMode ? 1 : domRect && node.width ? domRect.width / node.width : 1;
+    const visualEl = node.nodeEl?.querySelector?.(".canvas-node-container") || node.nodeEl;
+    const nodeStyle = visualEl && visualEl.ownerDocument?.defaultView?.getComputedStyle(visualEl);
+    const contentRect = rendered && domRect ? {
+      x: (viewportMode ? domRect.left - wrapperRect.left : node.x) + (rendered.rect.left - domRect.left) / logicalScale,
+      y: (viewportMode ? domRect.top - wrapperRect.top : node.y) + (rendered.rect.top - domRect.top) / logicalScale,
+      width: rendered.rect.width / logicalScale,
+      height: rendered.rect.height / logicalScale
+    } : null;
     records.push({
       id: node.id,
       x: viewportMode ? domRect.left - wrapperRect.left : node.x,
@@ -2644,9 +2716,18 @@ function canvasPrintDocument(canvas, scope) {
       width: viewportMode ? domRect.width : node.width,
       height: viewportMode ? domRect.height : node.height,
       text: nodeData.type === "group" ? nodeData.label || "Group" : node.text || "",
-      renderedHtml: nodeData.type === "group" ? "" : printableNodeHtml(node),
+      renderedHtml: rendered?.html || "",
+      contentRect,
       color: node.color || nodeData.color || "",
-      group: nodeData.type === "group"
+      group: nodeData.type === "group",
+      fill: safeCssValue(nodeStyle?.backgroundColor, nearestPaintedBackground(node.nodeEl)),
+      stroke: safeCssValue(nodeStyle?.borderColor, ""),
+      strokeWidth: parseFloat(nodeStyle?.borderWidth) || 2,
+      radius: parseFloat(nodeStyle?.borderRadius) || 0,
+      textColor: safeCssValue(nodeStyle?.color, "var(--text-normal, #1e293b)"),
+      fontFamily: nodeStyle?.fontFamily || "system-ui, sans-serif",
+      fontSize: parseFloat(nodeStyle?.fontSize) || 14,
+      lineHeight: parseFloat(nodeStyle?.lineHeight) || 20
     });
   }
   if (records.length === 0)
@@ -2657,7 +2738,7 @@ function canvasPrintDocument(canvas, scope) {
     const from = byId.get(edge.fromNode);
     const to = byId.get(edge.toNode);
     if (from && to)
-      edges.push({ from, to, color: edge.color || "" });
+      edges.push({ from, to, color: edge.color || "", fromSide: edge.fromSide, toSide: edge.toSide });
   }
   let minX;
   let minY;
@@ -2688,34 +2769,38 @@ function canvasPrintDocument(canvas, scope) {
     "6": "#3b82f6"
   };
   const colorOf = (value, fallback) => palette[value] || (/^#|^rgb|^hsl/.test(value) ? value : fallback);
-  const edgeSvg = edges.map(({ from, to, color }) => {
-    const x1 = from.x + from.width / 2;
-    const y1 = from.y + from.height / 2;
-    const x2 = to.x + to.width / 2;
-    const y2 = to.y + to.height / 2;
-    return `<path d="M ${x1} ${y1} C ${(x1 + x2) / 2} ${y1}, ${(x1 + x2) / 2} ${y2}, ${x2} ${y2}" fill="none" stroke="${escapeXml(colorOf(color, "#94a3b8"))}" stroke-width="2" marker-end="url(#arrow)"/>`;
+  const edgeSvg = edges.map(({ from, to, color, fromSide, toSide }) => {
+    const stroke = colorOf(color, "#94a3b8");
+    return `<path d="${edgeCurve(from, to, fromSide, toSide)}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2" marker-end="url(#${exportMarkerId(color)})"/>`;
   }).join("");
   const nodeSvg = records.map((record) => {
-    const stroke = colorOf(record.color, record.group ? "#94a3b8" : "#64748b");
+    const stroke = record.stroke || colorOf(record.color, record.group ? "#94a3b8" : "#64748b");
     if (record.group) {
-      return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="14" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2" stroke-dasharray="8 6"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="14" font-family="system-ui, sans-serif" fill="#475569">${escapeXml(getRootTitle(record.text))}</text></g>`;
+      return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(getRootTitle(record.text))}</text></g>`;
     }
-    const fontSize = Math.max(10, Math.min(16, record.height / 4));
+    const fontSize = record.fontSize;
     if (record.renderedHtml) {
       const fallbackLines = wrapSvgText(record.text, record.width, fontSize);
-      const fallbackLineHeight = fontSize * 1.25;
+      const fallbackLineHeight = record.lineHeight;
       const fallbackY = record.y + Math.max(18, (record.height - fallbackLines.length * fallbackLineHeight) / 2 + fontSize);
       const fallbackSpans = fallbackLines.map((line, index) => `<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : fallbackLineHeight}">${escapeXml(line)}</tspan>`).join("");
-      return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="10" fill="#ffffff" stroke="${escapeXml(stroke)}" stroke-width="2"/><text data-mindvas-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="system-ui, -apple-system, sans-serif" fill="#0f172a">${fallbackSpans}</text><foreignObject x="${record.x + 8}" y="${record.y + 6}" width="${Math.max(1, record.width - 16)}" height="${Math.max(1, record.height - 12)}"><div xmlns="http://www.w3.org/1999/xhtml" class="mindvas-pdf-card markdown-rendered">${record.renderedHtml}</div></foreignObject></g>`;
+      const box = record.contentRect || { x: record.x, y: record.y, width: record.width, height: record.height };
+      return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text data-mindvas-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="mindvas-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
     }
     const lines = wrapSvgText(record.text, record.width, fontSize);
-    const lineHeight = fontSize * 1.25;
+    const lineHeight = record.lineHeight;
     const textY = record.y + Math.max(18, (record.height - lines.length * lineHeight) / 2 + fontSize);
     const tspans = lines.map((line, index) => `<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`).join("");
-    return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="10" fill="#ffffff" stroke="${escapeXml(stroke)}" stroke-width="2"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="system-ui, -apple-system, sans-serif" fill="#0f172a">${tspans}</text></g>`;
+    return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
   }).join("");
   const title = canvas.view && canvas.view.file ? canvas.view.file.basename : "Mind map";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:landscape;margin:8mm}html,body{margin:0;width:100%;height:100%;background:white}svg{display:block;width:100vw;height:100vh}.mindvas-pdf-card{box-sizing:border-box;width:100%;height:100%;overflow:hidden;color:#0f172a;font:14px/1.45 system-ui,-apple-system,sans-serif}.mindvas-pdf-card>:first-child{margin-top:0}.mindvas-pdf-card>:last-child{margin-bottom:0}.mindvas-pdf-card p{margin:.35em 0}.mindvas-pdf-card pre{overflow:hidden;padding:7px;background:#f1f5f9;border-radius:5px;white-space:pre-wrap}.mindvas-pdf-card code{font-family:ui-monospace,SFMono-Regular,monospace;background:#f1f5f9}.mindvas-pdf-card table{width:100%;border-collapse:collapse}.mindvas-pdf-card th,.mindvas-pdf-card td{padding:3px 6px;border:1px solid #cbd5e1}.mindvas-pdf-card img,.mindvas-pdf-card video,.mindvas-pdf-card iframe,.mindvas-pdf-card object{max-width:100%;max-height:100%}.mindvas-pdf-card ul,.mindvas-pdf-card ol{margin:.3em 0;padding-left:1.4em}.mindvas-pdf-card a{color:#2563eb;text-decoration:underline}@media print{svg{width:100%;height:100%}}</style></head><body><svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${Math.max(1, maxX - minX)} ${Math.max(1, maxY - minY)}" preserveAspectRatio="xMidYMid meet"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#94a3b8"/></marker></defs><rect x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" fill="#ffffff"/>${edgeSvg}${nodeSvg}</svg></body></html>`;
+  const wrapperStyle = canvas.wrapperEl.ownerDocument?.defaultView?.getComputedStyle(canvas.wrapperEl);
+  const background = safeCssValue(wrapperStyle?.backgroundColor, nearestPaintedBackground(canvas.wrapperEl));
+  const markerDefs = [...new Set(["", ...edges.map((edge) => edge.color || "")])].map((color) => {
+    const stroke = colorOf(color, "#94a3b8");
+    return `<marker id="${exportMarkerId(color)}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="${escapeXml(stroke)}"/></marker>`;
+  }).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>@page{size:landscape;margin:8mm}html,body{margin:0;width:100%;height:100%;background:${escapeXml(background)}}svg{display:block;width:100vw;height:100vh}.mindvas-pdf-card{box-sizing:border-box;width:100%;height:100%;overflow:hidden}@media print{svg{width:100%;height:100%}}</style></head><body><svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${Math.max(1, maxX - minX)} ${Math.max(1, maxY - minY)}" preserveAspectRatio="xMidYMid meet"><defs>${markerDefs}</defs><rect x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" fill="${escapeXml(background)}"/>${edgeSvg}${nodeSvg}</svg></body></html>`;
 }
 function pdfSvgFromDocument(html, fallbackOnly = false) {
   const match = String(html || "").match(/<svg\b[\s\S]*<\/svg>/i);
@@ -4446,10 +4531,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       for (const { node, estimated, targetWidth, sizer } of entries) {
         const width = Math.min(maxWidth, Math.max(minWidth, Math.round(targetWidth || estimated.width)));
         const intrinsicHeight = this.liveSizing.measureIntrinsicHeight(sizer);
+        const oneLineHeight = this.liveSizing.minimumTextHeight(sizer);
         const height = Math.min(
           maxHeight,
           Math.max(
-            1,
+            oneLineHeight,
             intrinsicHeight || this.liveSizing.measureContentHeight(sizer) || fallbackHeight
           )
           + calibrationChromeHeight

@@ -122,6 +122,27 @@ test("intrinsic height uses the complete rendered border box", () => {
   );
 });
 
+test("empty text cards retain one rendered line plus their live insets", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+  const sizer = {
+    ownerDocument: {
+      defaultView: {
+        getComputedStyle: () => ({
+          fontSize: "18px",
+          lineHeight: "27px",
+          paddingTop: "4px",
+          paddingBottom: "6px"
+        })
+      }
+    }
+  };
+
+  assert.equal(controller.minimumTextHeight(sizer), 37);
+});
+
 test("live vertical growth equals the actual clipped overflow", () => {
   const controller = new LiveSizingController(
     { settings: DEFAULT_SETTINGS },

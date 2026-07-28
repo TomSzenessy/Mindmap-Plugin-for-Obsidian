@@ -164,7 +164,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Arrow corridor buffer").setDesc("Extra tolerance around the straight navigation line. Outside it, the directional wedge adapts to the relevant viewport corners.").addText(
+    new import_obsidian3.Setting(containerEl).setName("Arrow corridor buffer").setDesc("Extra tolerance around the straight navigation line. Outside it, the directional wedge uses the corners of the complete map bounds.").addText(
       (text) => text.setValue(String(this.plugin.settings.navigationCrossAxisBuffer)).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num >= 0) {

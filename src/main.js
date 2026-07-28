@@ -218,7 +218,7 @@ function collectDescendants(canvas, canvasApi, nodeId) {
   }
   return result;
 }
-function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
+function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd, enabled = () => true) {
   var _a, _b, _c;
   let draggedNode = null;
   let cachedDescendants = null;
@@ -259,6 +259,8 @@ function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
     dragStartY = 0;
   }
   const downHandler = (e) => {
+    if (!enabled())
+      return;
     if (draggedNode)
       clearDragSession();
     const node = findNodeFromEvent(canvas, e);
@@ -267,6 +269,10 @@ function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
     }
   };
   const moveHandler = (e) => {
+    if (!enabled()) {
+      clearDragSession();
+      return;
+    }
     if (e.buttons === 0)
       return;
     if (!draggedNode) {
@@ -284,6 +290,10 @@ function registerSubtreeDragHandler(canvas, canvasApi, onDragEnd) {
   const upHandler = () => {
     if (!draggedNode)
       return;
+    if (!enabled()) {
+      clearDragSession();
+      return;
+    }
     const completedNode = draggedNode;
     const moved = Math.abs(completedNode.x - dragStartX) > 0.5 || Math.abs(completedNode.y - dragStartY) > 0.5;
     canvas.requestSave();
@@ -342,10 +352,12 @@ function identifyStrangers(canvas, canvasApi, group, groupIds) {
   }
   return Array.from(strangerIds).map((id) => insideNodes.get(id));
 }
-function registerGroupDragHandler(canvas, canvasApi) {
+function registerGroupDragHandler(canvas, canvasApi, enabled = () => true) {
   var _a, _b;
   const frozenNodes = [];
   const downHandler = (e) => {
+    if (!enabled())
+      return;
     if (!e.altKey)
       return;
     const node = findNodeFromEvent(canvas, e);
@@ -3625,6 +3637,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     }
     this.injectToggleButton(canvas);
     const onCardPointerDown = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       if (event.button !== 0)
         return;
       const target = event.target;
@@ -3642,17 +3656,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
     this.cleanupKeyboardHandler = this.keyboardHandler.attachToCanvas(canvas);
     this.cleanupClickHandler = this.navigation.registerClickHandler(canvas);
-    this.cleanupDragHandler = registerDragEndHandler(canvas);
+    this.cleanupDragHandler = registerDragEndHandler(canvas, () => this.isMindmapCanvas(canvas));
     this.cleanupSubtreeDragHandler = registerSubtreeDragHandler(
       canvas,
       this.canvasApi,
       (node) => {
         this.markMarkdownOrderDirty(canvas);
         this.handleAutoAdjustDrag(canvas, node);
-      }
+      },
+      () => this.isMindmapCanvas(canvas)
     );
-    this.cleanupGroupDragHandler = registerGroupDragHandler(canvas, this.canvasApi);
-    const onDragEnd = () => this.trackedRaf(() => this.updateGroupBounds(canvas));
+    this.cleanupGroupDragHandler = registerGroupDragHandler(
+      canvas,
+      this.canvasApi,
+      () => this.isMindmapCanvas(canvas)
+    );
+    const onDragEnd = () => {
+      if (this.isMindmapCanvas(canvas))
+        this.trackedRaf(() => this.updateGroupBounds(canvas));
+    };
     canvas.wrapperEl.addEventListener("pointerup", onDragEnd);
     this.cleanupGroupBoundsHandler = () => canvas.wrapperEl.removeEventListener("pointerup", onDragEnd);
     const syncOutlineSelection = () => {
@@ -3686,6 +3708,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       canvas.wrapperEl.removeEventListener("keydown", onCanvasKeydown);
     };
     const onInsertNodeClick = (e) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       if (!e.altKey)
         return;
       const target = e.target;
@@ -3757,6 +3781,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     canvas.wrapperEl.addEventListener("click", onInsertNodeClick, true);
     this.cleanupInsertNodeHandler = () => canvas.wrapperEl.removeEventListener("click", onInsertNodeClick, true);
     const onRichContentClick = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       const target = event.target;
       if (!target || target.tagName !== "INPUT" || target.type !== "checkbox" || !target.closest(".task-list-item"))
         return;
@@ -3790,6 +3816,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
     canvas.wrapperEl.addEventListener("click", onRichContentClick, true);
     const onMediaLoadError = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       const target = event.target;
       if (!target || !["IMG", "AUDIO", "VIDEO", "SOURCE", "IFRAME", "OBJECT", "EMBED"].includes(target.tagName))
         return;
@@ -5206,6 +5234,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
 
     const updateHover = (event) => {
+      if (!this.isMindmapCanvas(canvas)) {
+        clearHover();
+        return;
+      }
       if (!supports(event)) {
         clearHover();
         return;
@@ -5233,6 +5265,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
       }
     };
     const onDrop = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       if (!supports(event))
         return;
       event.preventDefault();
@@ -5348,6 +5382,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     );
 
     const onPointerMove = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       if (!draggedNode || !dragStartPos || !isSingleCardDrag)
         return;
       if (Math.hypot(draggedNode.x - dragStartPos.x, draggedNode.y - dragStartPos.y) <= 10)
@@ -5366,11 +5402,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
 
     const onPointerUp = (event) => {
-      cancelPreviewFrame();
       ownerDocument.removeEventListener("pointermove", onPointerMove, true);
       ownerDocument.removeEventListener("pointerup", onPointerUp, true);
       ownerDocument.removeEventListener("mousemove", onPointerMove, true);
       ownerDocument.removeEventListener("mouseup", onPointerUp, true);
+      if (!this.isMindmapCanvas(canvas)) {
+        cancelPreviewFrame();
+        dragAttachment.cancel();
+        draggedNode = null;
+        dragStartPos = null;
+        isSingleCardDrag = false;
+        resizingNode = null;
+        return;
+      }
+      cancelPreviewFrame();
 
       if (resizingNode) {
         const resized = resizingNode;
@@ -5492,6 +5537,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
 
     const onPointerDown = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       dragAttachment.cancel();
       const node = findNodeFromEvent(canvas, event);
       const groupIds = getGroupIds(canvas);
@@ -5518,6 +5565,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
     };
 
     const blockNonFileResizing = (event) => {
+      if (!this.isMindmapCanvas(canvas))
+        return;
       const target = event.target;
       const HTMLElementClass = target?.ownerDocument?.defaultView?.HTMLElement;
       if (!target || !HTMLElementClass || !(target instanceof HTMLElementClass)) return;

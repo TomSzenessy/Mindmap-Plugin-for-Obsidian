@@ -50,6 +50,7 @@ var { normalizeClipboardMarkdown } = require('./lib/clipboard-markdown.js');
 var {
 	createExportMindMapModal,
 	rasterizeSvg,
+	renderHtmlAsVectorPdf,
 	saveToDownloads
 } = require('./lib/export.js');
 var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
@@ -8331,23 +8332,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return;
 		}
-		const ownerDocument = canvas.wrapperEl.ownerDocument || document;
 		try {
-			let svgInfo = pdfSvgFromDocument(html, false);
+			const svgInfo = pdfSvgFromDocument(html, false);
 			if (!svgInfo) throw new Error('Could not build the mind map SVG');
-			let jpeg;
-			try {
-				jpeg = await renderSvgAsJpeg(svgInfo, ownerDocument);
-			} catch (richError) {
-				console.warn(
-					'ToMindMap: rich PDF rendering failed; using text fallback',
-					richError
-				);
-				svgInfo = pdfSvgFromDocument(html, true);
-				if (!svgInfo) throw richError;
-				jpeg = await renderSvgAsJpeg(svgInfo, ownerDocument);
-			}
-			const pdf = mindMapPdfBytes(jpeg);
+			const pdf = await renderHtmlAsVectorPdf(html, svgInfo);
 			const base =
 				canvas.view && canvas.view.file
 					? canvas.view.file.basename

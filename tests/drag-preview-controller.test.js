@@ -189,3 +189,39 @@ test("restores the original arrow if preview edge creation fails", () => {
   assert.equal(fixture.activeEdges.length, 0);
   assert.equal(fixture.controller.commit(fixture.dragged).changed, false);
 });
+
+test("a dominant buffered map cannot be stolen by a nearer floating tree", () => {
+  const fixture = dragFixture({ withOriginalParent: false });
+  const mainRoot = { id: "main-root", x: 500, y: 0, width: 100, height: 60 };
+  const mainLeaf = { id: "main-leaf", x: 760, y: 0, width: 100, height: 60 };
+  const mainLeaf2 = { id: "main-leaf-2", x: 760, y: 100, width: 100, height: 60 };
+  const floatingRoot = { id: "floating", x: 405, y: 0, width: 100, height: 60 };
+  fixture.dragged.x = 350;
+  fixture.canvas.nodes = new Map(
+    [mainRoot, mainLeaf, mainLeaf2, floatingRoot, fixture.dragged]
+      .map((node) => [node.id, node])
+  );
+  const forest = [
+    {
+      canvasNode: mainRoot,
+      children: [
+        { canvasNode: mainLeaf, children: [] },
+        { canvasNode: mainLeaf2, children: [] }
+      ]
+    },
+    { canvasNode: floatingRoot, children: [] },
+    { canvasNode: fixture.dragged, children: [] }
+  ];
+  const controller = createDragAttachmentController(
+    fixture.canvas,
+    fixture.canvasApi,
+    () => forest,
+    (node) => node.id === mainRoot.id || node.id.startsWith("main-")
+      ? mainRoot
+      : node
+  );
+  controller.begin(fixture.dragged);
+  const preview = controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.equal(preview.target.id, "main-root");
+});

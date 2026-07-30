@@ -11,6 +11,7 @@ const {
   findClosestNodeOnRay,
   findFirstNodeOnCornerRay,
   findNearestAttachableNode,
+  findNearestNodeOnBranch,
   getConnectionSides,
   isDescendant,
   isWithinAttachmentRadius,
@@ -140,5 +141,46 @@ test("selects the first card intersected by the corner-to-root segment", () => {
   assert.equal(
     findFirstNodeOnCornerRay(dragged, [root, offRayButNear, onRay], root)?.id,
     "on-ray"
+  );
+});
+
+test("targets the nearest strictly inward card on the same branch only", () => {
+  const root = { id: "root", x: 500, y: 100, width: 200, height: 100 };
+  const draggedLeft = { id: "drag-left", x: 100, y: 300, width: 100, height: 60 };
+  const leftNear = { id: "left-near", x: 240, y: 310, width: 120, height: 60 };
+  const leftFar = { id: "left-far", x: 400, y: 300, width: 80, height: 60 };
+  const overlaps = { id: "overlaps", x: 190, y: 300, width: 120, height: 60 };
+  const outward = { id: "outward", x: -80, y: 300, width: 120, height: 60 };
+  const opposite = { id: "opposite", x: 760, y: 300, width: 120, height: 60 };
+  assert.equal(
+    findNearestNodeOnBranch(
+      draggedLeft,
+      [root, leftFar, overlaps, outward, opposite, leftNear],
+      root
+    )?.id,
+    "left-near"
+  );
+
+  assert.equal(
+    findNearestNodeOnBranch(
+      draggedLeft,
+      [root, overlaps, outward, opposite],
+      root
+    )?.id,
+    "root",
+    "the central root remains eligible on the branch axis"
+  );
+
+  const draggedRight = { id: "drag-right", x: 1100, y: 300, width: 100, height: 60 };
+  const rightNear = { id: "right-near", x: 940, y: 310, width: 120, height: 60 };
+  const rightFar = { id: "right-far", x: 720, y: 300, width: 120, height: 60 };
+  const rightOverlap = { id: "right-overlap", x: 1040, y: 300, width: 120, height: 60 };
+  assert.equal(
+    findNearestNodeOnBranch(
+      draggedRight,
+      [root, leftNear, rightFar, rightOverlap, rightNear],
+      root
+    )?.id,
+    "right-near"
   );
 });

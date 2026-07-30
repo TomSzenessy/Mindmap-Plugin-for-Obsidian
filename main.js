@@ -1195,7 +1195,7 @@ var { normalizeClipboardMarkdown } = (() => {
 })();
 // </tomindmap:module clipboard-markdown>
 // <tomindmap:module export>
-var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = (() => {
+var { createExportMindMapModal, rasterizeSvg, renderHtmlAsVectorPdf, saveToDownloads } = (() => {
   const module = { exports: {} };
   const exports = module.exports;
   function createExportMindMapModal(Modal) {
@@ -1314,6 +1314,65 @@ var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = (() => {
   	}
   }
 
+  function vectorPdfPageSize(svgInfo) {
+      const aspect = Math.max(0.05, Math.min(20, svgInfo.width / svgInfo.height));
+      // Electron custom page sizes use microns. Twelve inches keeps even large
+      // maps readable while preserving the exact SVG aspect ratio on one page.
+      const longestSide = 304800;
+      return aspect >= 1
+          ? { width: longestSide, height: longestSide / aspect }
+          : { width: longestSide * aspect, height: longestSide };
+  }
+
+  /**
+   * Ask Chromium to print the inline SVG directly. Unlike the old JPEG-backed
+   * PDF path, paths, borders, arrows, and text remain vector primitives.
+   */
+  async function renderHtmlAsVectorPdf(html, svgInfo, electronApi = null) {
+      let electron = electronApi;
+      if (!electron && typeof require === 'function')
+          electron = require('electron');
+      let BrowserWindow = electron?.BrowserWindow || electron?.remote?.BrowserWindow;
+      if (!BrowserWindow && typeof require === 'function') {
+          try {
+              BrowserWindow = require('@electron/remote').BrowserWindow;
+          } catch (_) {
+              // The caller gets a useful desktop-runtime error below.
+          }
+      }
+      if (!BrowserWindow)
+          throw new Error('Electron BrowserWindow is unavailable');
+
+      const pageSize = vectorPdfPageSize(svgInfo);
+      const printWindow = new BrowserWindow({
+          show: false,
+          width: 1200,
+          height: Math.max(300, Math.round(1200 / (svgInfo.width / svgInfo.height))),
+          webPreferences: {
+              javascript: false,
+              nodeIntegration: false,
+              contextIsolation: true,
+              sandbox: true
+          }
+      });
+      try {
+          await printWindow.loadURL(
+              `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
+          );
+          const pdf = await printWindow.webContents.printToPDF({
+              printBackground: true,
+              displayHeaderFooter: false,
+              preferCSSPageSize: false,
+              pageSize,
+              margins: { top: 0, bottom: 0, left: 0, right: 0 }
+          });
+          return new Uint8Array(pdf);
+      } finally {
+          if (!printWindow.isDestroyed())
+              printWindow.destroy();
+      }
+  }
+
   function safeBaseName(value) {
   	return (
   		String(value || 'Mind map')
@@ -1342,10 +1401,12 @@ var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = (() => {
   }
 
   module.exports = {
-  	createExportMindMapModal,
-  	rasterizeSvg,
-  	safeBaseName,
-  	saveToDownloads
+      createExportMindMapModal,
+      rasterizeSvg,
+      renderHtmlAsVectorPdf,
+      safeBaseName,
+      saveToDownloads,
+      vectorPdfPageSize
   };
   return module.exports;
 })();
@@ -5144,6 +5205,81 @@ var TreeDrag = (() => {
   }
 
   /**
+   * Pick the visually nearest card inward on the same map branch.
+   *
+   * Left branch: the candidate's left edge must be strictly beyond the dragged
+   * card's right edge. Right branch mirrors this using candidate.right <
+   * dragged.left. This full-bounds gate prevents vertically nearby or
+   * horizontally overlapping cards from stealing the preview.
+   */
+  function findNearestNodeOnBranch(
+    draggedNode,
+    allNodes,
+    mainRootNode,
+    isDescendantFn = null
+  ) {
+    if (!draggedNode || !mainRootNode)
+      return null;
+    const branchSide = getBranchSide(draggedNode, mainRootNode);
+    const rootCenter = getNodeCenter(mainRootNode);
+    const onLeftBranch = branchSide === "left";
+    const draggedLeft = Number(draggedNode.x || 0);
+    const draggedRight = draggedLeft +
+      Math.max(1, Number(draggedNode.width) || 1);
+    let bestNode = null;
+    let bestDistance = Infinity;
+    let bestHorizontalGap = Infinity;
+
+    for (const node of Array.isArray(allNodes) ? allNodes : Array.from(allNodes || [])) {
+      const type = node?.unknownData?.type || node?.type;
+      if (
+        !node ||
+        node.id === draggedNode.id ||
+        type === "group" ||
+        (isDescendantFn && isDescendantFn(draggedNode.id, node.id))
+      ) {
+        continue;
+      }
+      const center = getNodeCenter(node);
+      const isMainRoot = node.id === mainRootNode.id;
+      const isSameBranch = isMainRoot || (onLeftBranch
+        ? center.x < rootCenter.x
+        : center.x >= rootCenter.x);
+      const targetLeft = Number(node.x || 0);
+      const targetRight = targetLeft + Math.max(1, Number(node.width) || 1);
+      const isStrictlyInward = onLeftBranch
+        ? targetLeft > draggedRight
+        : targetRight < draggedLeft;
+      if (!isSameBranch || !isStrictlyInward)
+        continue;
+
+      const horizontalGap = onLeftBranch
+        ? targetLeft - draggedRight
+        : draggedLeft - targetRight;
+      const draggedTop = Number(draggedNode.y || 0);
+      const draggedBottom = draggedTop + Math.max(1, Number(draggedNode.height) || 1);
+      const targetTop = Number(node.y || 0);
+      const targetBottom = targetTop + Math.max(1, Number(node.height) || 1);
+      const verticalGap = Math.max(
+        targetTop - draggedBottom,
+        draggedTop - targetBottom,
+        0
+      );
+      const distance = Math.hypot(horizontalGap, verticalGap);
+      if (
+        distance < bestDistance - 0.0001 ||
+        Math.abs(distance - bestDistance) <= 0.0001 &&
+          horizontalGap < bestHorizontalGap
+      ) {
+        bestNode = node;
+        bestDistance = distance;
+        bestHorizontalGap = horizontalGap;
+      }
+    }
+    return bestNode;
+  }
+
+  /**
    * Find the first valid node encountered while moving from the dragged node
    * toward the main root.
    *
@@ -5554,6 +5690,7 @@ var TreeDrag = (() => {
     findClosestNodeOnRay,
     findFirstNodeOnCornerRay,
     findNearestAttachableNode,
+    findNearestNodeOnBranch,
     getBranchSide,
     getConnectionSides,
     getNodeCorners,
@@ -5578,7 +5715,7 @@ var { createDragAttachmentController } = (() => {
   const {
     ATTACHMENT_DISTANCE,
     createMindMapEdge,
-    findFirstNodeOnCornerRay,
+    findNearestNodeOnBranch,
     isDescendant,
     reparentSubtree
   } = typeof TreeDrag !== "undefined" ? TreeDrag : require("./tree-drag.js");
@@ -5614,6 +5751,7 @@ var { createDragAttachmentController } = (() => {
     }
 
     function removePreview() {
+      previewParent?.nodeEl?.removeClass?.("tomindmap-reparent-target");
       if (previewEdge && canvasApi.removeEdge)
         canvasApi.removeEdge(canvas, previewEdge);
       previewEdge = null;
@@ -5721,9 +5859,11 @@ var { createDragAttachmentController } = (() => {
       const substantialMaps = containingMaps.filter((map) => map.nodes.length > 1);
       const candidates = substantialMaps.length > 0 ? substantialMaps : containingMaps;
       candidates.sort((a, b) =>
-        Number(b.contains) - Number(a.contains) ||
-        a.distance - b.distance ||
-        b.nodes.length - a.nodes.length
+        // Inside overlapping buffered rectangles, the dominant tree owns the
+        // gesture. This prevents a small floating tree/card embedded in the
+        // visual footprint of the main map from stealing the dragged branch.
+        b.nodes.length - a.nodes.length ||
+        a.distance - b.distance
       );
       return candidates[0] || null;
     }
@@ -5743,12 +5883,14 @@ var { createDragAttachmentController } = (() => {
       const candidateRoot = attachmentMap?.root || null;
       const rayNodes = attachmentMap?.nodes || allNodes;
       const rayTarget = candidate
-        ? findFirstNodeOnCornerRay(
-          draggedNode,
-          rayNodes,
-          candidateRoot,
-          (rootId, targetId) => isDescendant(forest, rootId, targetId)
-        )
+        ? attachmentMap.nodes.length === 1
+          ? candidate
+          : findNearestNodeOnBranch(
+            draggedNode,
+            rayNodes,
+            candidateRoot,
+            (rootId, targetId) => isDescendant(forest, rootId, targetId)
+          )
         : null;
       const targetNode = rayTarget;
       const mainRootNode = targetNode
@@ -5786,6 +5928,7 @@ var { createDragAttachmentController } = (() => {
       }
 
       previewParent = targetNode;
+      previewParent?.nodeEl?.addClass?.("tomindmap-reparent-target");
       previewEdge = edge;
       state = "preview";
       return { state, target: targetNode, incomingSide: edge.to?.side || null };
@@ -14404,23 +14547,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return;
 		}
-		const ownerDocument = canvas.wrapperEl.ownerDocument || document;
 		try {
-			let svgInfo = pdfSvgFromDocument(html, false);
+			const svgInfo = pdfSvgFromDocument(html, false);
 			if (!svgInfo) throw new Error('Could not build the mind map SVG');
-			let jpeg;
-			try {
-				jpeg = await renderSvgAsJpeg(svgInfo, ownerDocument);
-			} catch (richError) {
-				console.warn(
-					'ToMindMap: rich PDF rendering failed; using text fallback',
-					richError
-				);
-				svgInfo = pdfSvgFromDocument(html, true);
-				if (!svgInfo) throw richError;
-				jpeg = await renderSvgAsJpeg(svgInfo, ownerDocument);
-			}
-			const pdf = mindMapPdfBytes(jpeg);
+			const pdf = await renderHtmlAsVectorPdf(html, svgInfo);
 			const base =
 				canvas.view && canvas.view.file
 					? canvas.view.file.basename

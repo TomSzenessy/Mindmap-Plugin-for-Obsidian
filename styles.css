@@ -88,6 +88,18 @@
 	pointer-events: none !important;
 }
 
+.tomindmap-mindmap-mode .canvas-node.tomindmap-reparent-target {
+	outline: 3px solid color-mix(in srgb, var(--interactive-accent) 88%, white);
+	outline-offset: 5px;
+	border-radius: var(--radius-m);
+	filter: drop-shadow(
+		0 0 10px color-mix(in srgb, var(--interactive-accent) 42%, transparent)
+	);
+	transition:
+		outline-color 80ms ease,
+		filter 80ms ease;
+}
+
 .tomindmap-mindmap-mode.tomindmap-drop-active::after {
 	content: 'Drop to add media or a link';
 	position: absolute;

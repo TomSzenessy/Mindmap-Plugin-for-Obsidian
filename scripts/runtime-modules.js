@@ -41,7 +41,7 @@ const modules = [
     name: "export",
     source: "lib/export.js",
     requireLine: 'var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = require("./lib/export.js");',
-    declaration: "var { createExportMindMapModal, rasterizeSvg, saveToDownloads }"
+    declaration: "var { createExportMindMapModal, rasterizeSvg, renderHtmlAsVectorPdf, saveToDownloads }"
   },
   {
     name: "tree-drag",

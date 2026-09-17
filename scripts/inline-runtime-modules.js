@@ -50,12 +50,14 @@ let main = fs.readFileSync(sourcePath, "utf8");
 for (const definition of modules) {
   const block = moduleBlock(definition);
   if (main.includes(definition.requireLine)) {
-    main = main.replace(definition.requireLine, block);
+    // A replacement callback keeps `$&`, `$1`, and similar sequences inside
+    // bundled third-party source literal instead of treating them as tokens.
+    main = main.replace(definition.requireLine, () => block);
   } else {
     const importPattern = runtimeImportPattern(definition);
     if (!importPattern.test(main))
       throw new Error(`Could not find runtime import for ${definition.name}`);
-    main = main.replace(importPattern, block);
+    main = main.replace(importPattern, () => block);
   }
 }
 

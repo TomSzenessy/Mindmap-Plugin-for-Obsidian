@@ -27,6 +27,17 @@
 	border-radius: var(--radius-m);
 }
 
+/* The automatic central topic reads as the map's anchor before it is titled. */
+.tomindmap-mindmap-mode .canvas-node.tomindmap-root-topic {
+	border-radius: var(--radius-m);
+	box-shadow: 0 0 0 2px
+		color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+}
+
+.tomindmap-mindmap-mode .canvas-node.tomindmap-root-topic .canvas-node-content {
+	font-weight: var(--font-semibold);
+}
+
 .canvas-node.tomindmap-navigation-selected .canvas-node-content {
 	cursor: text;
 }
@@ -327,4 +338,32 @@
 .tomindmap-media-dragging embed {
 	visibility: hidden !important;
 	pointer-events: none !important;
+}
+
+/* Symmetric, centred labels for plain mind-map topic cards.
+ * The plugin flags plain text cards with .tomindmap-plain-card. Obsidian
+ * renders them as a .markdown-embed whose .markdown-preview-view reserves a
+ * stable scrollbar gutter (scrollbar-gutter: stable), which shifts the label
+ * off-centre. Drop the gutter and centre the label so it sits evenly between
+ * the left/right edges. Media/file/group cards keep their own layout. */
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-plain-card
+	.canvas-node-content.markdown-embed
+	> .markdown-embed-content
+	> .markdown-preview-view {
+	scrollbar-gutter: auto !important;
+	overflow: hidden !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-plain-card
+	.canvas-node-content.markdown-embed
+	> .markdown-embed-content
+	> .markdown-preview-view
+	> .markdown-preview-sizer {
+	box-sizing: border-box;
+	width: 100% !important;
+	max-width: 100% !important;
+	margin: 0 !important;
+	text-align: center !important;
 }

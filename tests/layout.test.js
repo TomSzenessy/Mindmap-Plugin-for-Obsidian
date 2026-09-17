@@ -263,3 +263,94 @@ test("balances root sides by rendered branch height, not a contiguous split", ()
   );
   assert.ok(Math.abs(rightHeight - leftHeight) <= 20);
 });
+
+test("rebalances the surrounding root branches while keeping a dragged branch on its dropped side", () => {
+  const engine = new LayoutEngine({ verticalGap: 20 });
+  const branches = [
+    tree("right-a", [], 220),
+    tree("right-b", [], 180),
+    tree("right-c", [], 60),
+    tree("moved-left", [], 60)
+  ];
+  const root = tree("root", branches);
+  root.canvasNode.x = 500;
+  root.canvasNode.width = 200;
+  branches[0].canvasNode.x = 800;
+  branches[1].canvasNode.x = 800;
+  branches[2].canvasNode.x = 800;
+  branches[3].canvasNode.x = 200;
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(
+    root,
+    false,
+    { nodeId: "moved-left", direction: "left" }
+  );
+
+  assert.ok(leftChildren.includes(branches[3]));
+  assert.ok(leftChildren.some((branch) => branch !== branches[3]));
+  assert.ok(rightChildren.length > 0);
+  const rightHeight = rightChildren.reduce(
+    (sum, child) => sum + engine.measureSubtreeHeight(child),
+    0
+  );
+  const leftHeight = leftChildren.reduce(
+    (sum, child) => sum + engine.measureSubtreeHeight(child),
+    0
+  );
+  assert.ok(Math.abs(rightHeight - leftHeight) <= 100);
+});
+
+test("cascades each root branch outward after one branch crosses the root", () => {
+  const makeNode = (id, x, y = 0) => ({
+    id,
+    x,
+    y,
+    width: 180,
+    height: 60,
+    moveTo(position) {
+      this.x = position.x;
+      this.y = position.y;
+    }
+  });
+  const root = makeNode("root", 0);
+  const moved = makeNode("moved", -260);
+  const movedLeaf = makeNode("moved-leaf", 0);
+  const other = makeNode("other", 260);
+  const otherLeaf = makeNode("other-leaf", 0);
+  const nodes = [root, moved, movedLeaf, other, otherLeaf];
+  const connect = (id, parent, child) => ({
+    id,
+    from: { node: parent, side: "right" },
+    to: { node: child, side: "left" }
+  });
+  const edges = [
+    connect("root-moved", root, moved),
+    connect("moved-leaf", moved, movedLeaf),
+    connect("root-other", root, other),
+    connect("other-leaf", other, otherLeaf)
+  ];
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map(edges.map((edge) => [edge.id, edge])),
+    getData: () => ({
+      nodes: nodes.map((node) => ({ id: node.id, type: "text" })),
+      edges: edges.map((edge) => ({
+        id: edge.id,
+        fromNode: edge.from.node.id,
+        toNode: edge.to.node.id
+      }))
+    }),
+    requestFrame() {},
+    requestSave() {}
+  };
+  const engine = new LayoutEngine({ horizontalGap: 80, verticalGap: 20, animate: false });
+
+  engine.layout(canvas, {
+    branchDirectionOverride: { nodeId: moved.id, direction: "left" }
+  });
+
+  assert.ok(moved.x < root.x);
+  assert.ok(movedLeaf.x < moved.x);
+  assert.ok(other.x > root.x);
+  assert.ok(otherLeaf.x > other.x);
+});

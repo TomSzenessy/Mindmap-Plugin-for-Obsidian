@@ -35,6 +35,10 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require('obsidian');
 var {
+	removeEmptyNodeOnEditExit,
+	isBlankMindmapCanvas,
+	isRootTopicNode,
+	deriveCanvasTitle,
 	flushCanvasView,
 	reflowCanvasAfterMove
 } = require('./lib/canvas-session.js');
@@ -49,13 +53,21 @@ var MarkdownOrder = require('./lib/markdown-order.js');
 var { normalizeClipboardMarkdown } = require('./lib/clipboard-markdown.js');
 var {
 	createExportMindMapModal,
+	embedDocumentAssets,
+	paginatedPdfDocument,
 	rasterizeSvg,
 	renderHtmlAsVectorPdf,
-	saveToDownloads
+	saveToDownloads,
+	visibleCardPaint
 } = require('./lib/export.js');
+var { renderSvgToPdf } = require("./lib/vector-pdf-bundle.js");
 var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
 
 var { CanvasAPI, findNodeFromEvent, genId } = require('./lib/canvas-api.js');
+
+/** Canvas palette color reserved for the automatic central topic. */
+var ROOT_TOPIC_COLOR = '6';
+var ROOT_TOPIC_CLASS = 'tomindmap-root-topic';
 
 // src/mindmap/tree-model.ts
 var {
@@ -113,6 +125,32 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 					.setValue(this.plugin.settings.defaultMindmapMode)
 					.onChange(async (value) => {
 						this.plugin.settings.defaultMindmapMode = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new import_obsidian3.Setting(containerEl)
+			.setName('Create a central topic on blank canvases')
+			.setDesc(
+				'Open an empty mindmap canvas with an editable, distinctly colored central topic already selected.'
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoCreateRootTopic)
+					.onChange(async (value) => {
+						this.plugin.settings.autoCreateRootTopic = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new import_obsidian3.Setting(containerEl)
+			.setName('Rename canvas from central topic')
+			.setDesc(
+				'Rename the Canvas file to match its central topic after the title is edited.'
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.renameCanvasFromRootTopic)
+					.onChange(async (value) => {
+						this.plugin.settings.renameCanvasFromRootTopic = value;
 						await this.plugin.saveSettings();
 					})
 			);
@@ -3651,13 +3689,29 @@ function canvasPrintDocument(canvas, scope) {
 			return `<path d="${edgeCurve(from, to, fromSide, toSide)}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2" marker-end="url(#${exportMarkerId(color)})"/>`;
 		})
 		.join('');
+	const wrapperStyle =
+		canvas.wrapperEl.ownerDocument?.defaultView?.getComputedStyle(
+			canvas.wrapperEl
+		);
+	const background = safeCssValue(
+		wrapperStyle?.backgroundColor,
+		nearestPaintedBackground(canvas.wrapperEl)
+	);
 	const nodeSvg = records
 		.map((record) => {
-			const stroke =
-				record.stroke ||
-				colorOf(record.color, record.group ? '#94a3b8' : '#64748b');
+			const accent = colorOf(
+				record.color,
+				record.group ? '#94a3b8' : '#64748b'
+			);
+			const paint = visibleCardPaint(
+				record.fill,
+				record.stroke,
+				background,
+				accent
+			);
+			const stroke = paint.stroke;
 			if (record.group) {
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(getRootTitle(record.text))}</text></g>`;
+				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(getRootTitle(record.text))}</text></g>`;
 			}
 			const fontSize = record.fontSize;
 			if (record.renderedHtml) {
@@ -3688,7 +3742,7 @@ function canvasPrintDocument(canvas, scope) {
 					width: record.width,
 					height: record.height
 				};
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
+				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
 			}
 			const lines = wrapSvgText(record.text, record.width, fontSize);
 			const lineHeight = record.lineHeight;
@@ -3704,21 +3758,13 @@ function canvasPrintDocument(canvas, scope) {
 						`<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
 				)
 				.join('');
-			return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(record.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
+			return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
 		})
 		.join('');
 	const title =
 		canvas.view && canvas.view.file
 			? canvas.view.file.basename
 			: 'Mind map';
-	const wrapperStyle =
-		canvas.wrapperEl.ownerDocument?.defaultView?.getComputedStyle(
-			canvas.wrapperEl
-		);
-	const background = safeCssValue(
-		wrapperStyle?.backgroundColor,
-		nearestPaintedBackground(canvas.wrapperEl)
-	);
 	const markerDefs = [
 		...new Set(['', ...edges.map((edge) => edge.color || '')])
 	]
@@ -5223,12 +5269,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.cleanupMediaDropHandler = this.registerMediaDropHandler(canvas);
 		this.cleanupNodeDragReparentHandler =
 			this.registerNodeDragReparentHandler(canvas);
-		this.autoResizeHandle = registerAutoResize(
-			canvas,
-			{
-				enabled: () => this.isMindmapCanvas(canvas)
-			},
-			(canvas2, editedNode) => {
+		const handleEditExit = (canvas2, editedNode) => {
+				const finalized = removeEmptyNodeOnEditExit(
+					canvas2,
+					editedNode,
+					this.canvasApi
+				);
+				if (finalized.removed) {
+					this.layoutEngine.layout(canvas2);
+					this.updateGroupBounds(canvas2);
+					if (this.settings.autoColor)
+						this.branchColors.applyColors(canvas2);
+					this.markMarkdownOrderDirty(canvas2);
+					if (finalized.parent)
+						this.canvasApi.selectForNavigation(
+							canvas2,
+							finalized.parent,
+							this.settings.navigationZoomPadding
+						);
+					void this.flushCanvasToMarkdown(canvas2);
+					return true;
+				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (
@@ -5237,25 +5298,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					) {
 						return;
 					}
+					void this.renameCanvasFromRootTopic(canvas2, editedNode);
 					this.resizeNodesWhenRendered(canvas2, [editedNode]);
 				});
-			}
+				return false;
+		};
+		this.autoResizeHandle = registerAutoResize(
+			canvas,
+			{
+				enabled: () => this.isMindmapCanvas(canvas)
+			},
+			handleEditExit
 		);
 		this.keyboardHandler.onBeforeLeaveNode = () => {
 			var _a2;
 			(_a2 = this.autoResizeHandle) == null ? void 0 : _a2.finalizeNode();
-			const node = this.canvasApi.getSelectedNode(canvas);
-			if (
-				(node == null ? void 0 : node.isEditing) &&
-				this.isAutoAdjustCanvas(canvas) &&
-				this.isMindmapCanvas(canvas)
-			) {
-				this.waitForPreview(node, () => {
-					if (this.canvasApi.getActiveCanvas() !== canvas) return;
-					this.resizeNodesWhenRendered(canvas, [node]);
-				});
-			}
 		};
+		this.keyboardHandler.onAfterFinishEditing = handleEditExit;
 		if (this.settings.mouseNavigation) {
 			const onPointerDown = (e) => {
 				if (e.button === 3) {
@@ -5460,6 +5519,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		} else {
 			this.hideOutline();
 		}
+		this.trackedTimeout(() => this.ensureRootTopic(canvas), 120);
 		const canvasFile = canvas.view && canvas.view.file;
 		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
 		if (canvasFile && markdownPath) {
@@ -5738,6 +5798,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				return /* @__PURE__ */ new Map();
 			const calibrationChromeHeight =
 				this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
+			const calibrationChromeWidth =
+				this.liveSizing.getPreviewChromeWidth(calibrationNode) || 0;
 			host = measurementDocument.createElement('div');
 			host.className = 'tomindmap-measurement-host';
 			Object.assign(host.style, {
@@ -5772,7 +5834,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						const estimated = this.getAutoNodeSize(node);
 						const targetWidth = Math.max(
 							minWidth,
-							Math.min(maxWidth, estimated.width)
+							Math.min(
+								maxWidth,
+								Math.max(Number(node.width) || 0, estimated.width)
+							)
 						);
 						const initialHeight = String(node.text || '').trim()
 							? Math.max(1, Number(estimated.floorHeight) || 0)
@@ -5851,6 +5916,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							node,
 							shell,
 							card,
+							content,
+							embedContent,
 							sizer,
 							estimated,
 							targetWidth,
@@ -5878,7 +5945,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				for (const [property, value] of declarations)
 					element.style.setProperty(property, value, 'important');
 			};
-			for (const { sizer } of entries) {
+			for (const entry of entries) {
+				const { shell, content, embedContent, card, sizer, estimated } =
+					entry;
 				for (const element of Array.from(
 					sizer.querySelectorAll('table')
 				)) {
@@ -5901,8 +5970,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			if (probedStyles.length > 0) await nextFrame();
 			for (const entry of entries) {
-				const { card, sizer, estimated, shell } = entry;
-				let intrinsicWidth = 0;
+				const { card, sizer, estimated } = entry;
+				let intrinsicWidth =
+					estimated.contentKind === 'text'
+						? this.liveSizing.measureIntrinsicWidth(sizer) +
+							calibrationChromeWidth
+						: 0;
 				for (const element of [
 					sizer,
 					...Array.from(sizer.querySelectorAll('*'))
@@ -5936,21 +6009,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 								)
 						);
 				}
-				const width = Math.min(
-					maxWidth,
-					Math.max(
-						minWidth,
-						estimated.width,
-						Math.ceil(intrinsicWidth / 10) * 10 || 0
-					)
-				);
-				entry.targetWidth = width;
-				shell.style.width = `${width}px`;
-				shell.style.setProperty('--canvas-node-width', `${width}px`);
+				entry.intrinsicWidth = intrinsicWidth;
 			}
 			for (const [element, styleText] of probedStyles) {
 				if (styleText === null) element.removeAttribute('style');
 				else element.setAttribute('style', styleText);
+			}
+			for (const entry of entries) {
+				const { estimated, shell } = entry;
+				const width = estimated.contentKind === 'text'
+					? Math.min(maxWidth, Math.max(minWidth, estimated.width))
+					: Math.min(
+							maxWidth,
+							Math.max(
+								minWidth,
+								estimated.width,
+								Math.ceil(entry.intrinsicWidth / 10) * 10 || 0
+							)
+						);
+				entry.targetWidth = width;
+				shell.style.width = `${width}px`;
+				shell.style.setProperty('--canvas-node-width', `${width}px`);
 			}
 			// Resolve any remaining horizontal overflow after restoring the real
 			// wrapping rules. All cards advance together, so this remains batched.
@@ -7024,6 +7103,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	updateNodeTypeAttributes(canvas) {
 		if (!canvas || !canvas.nodes) return;
+		const edgeIndex = canvas.edges
+			? this.canvasApi.getEdgeIndex(canvas)
+			: { incoming: new Map(), outgoing: new Map() };
 		for (const node of canvas.nodes.values()) {
 			if (!node || !node.nodeEl) continue;
 			const type = node.file
@@ -7066,6 +7148,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 				ancestor = ancestor.parentElement;
 			}
+			const isRootTopic =
+				type === 'text' &&
+				!edgeIndex.incoming.has(node.id);
 			for (const element of new Set([
 				node.nodeEl,
 				shell,
@@ -7082,6 +7167,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						'tomindmap-resizable-content',
 						type !== 'text'
 					);
+					element.toggleClass(ROOT_TOPIC_CLASS, isRootTopic);
 				} else {
 					element.classList?.toggle(
 						'tomindmap-plain-card',
@@ -7090,6 +7176,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					element.classList?.toggle(
 						'tomindmap-resizable-content',
 						type !== 'text'
+					);
+					element.classList?.toggle(
+						ROOT_TOPIC_CLASS,
+						isRootTopic
 					);
 				}
 			}
@@ -7563,7 +7653,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						? directionFromParent(selected)
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: true,
+						preserveRootSides: false,
 						branchDirectionOverride: branchDirection
 							? {
 									nodeId: selected.id,
@@ -7615,7 +7705,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 								directionFromParent(nodeToMove)
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: true,
+						preserveRootSides: false,
 						branchDirectionOverride: branchDirection
 							? {
 									nodeId: nodeToMove.id,
@@ -7673,7 +7763,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					? directionFromParent(nodeToMove)
 					: liveBranchDirection || directionFromParent(nodeToMove);
 				this.layoutEngine.layout(canvas, {
-					preserveRootSides: true,
+					preserveRootSides: false,
 					branchDirectionOverride: {
 						nodeId: nodeToMove.id,
 						direction: branchDirection
@@ -7872,6 +7962,85 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			clientX: rect.left + rect.width / 2,
 			clientY: rect.top + rect.height / 2
 		});
+	}
+	/**
+	 * Seed an empty mindmap canvas with a selected, editable central topic.
+	 * The pending-creation flag is cleared so the deliberately blank root
+	 * survives the automatic cleanup that removes abandoned child cards.
+	 */
+	ensureRootTopic(canvas) {
+		if (this.unloaded) return false;
+		if (!this.settings.autoCreateRootTopic) return false;
+		if (!canvas || this.canvasApi.getActiveCanvas() !== canvas) return false;
+		if (!this.isMindmapCanvas(canvas)) return false;
+		if (!isBlankMindmapCanvas(canvas)) return false;
+		const width = this.settings.defaultNodeWidth;
+		const height = this.settings.defaultNodeHeight;
+		const center = this.canvasViewportCenter(canvas);
+		const node = this.canvasApi.createTextNode(
+			canvas,
+			Math.round(center.x - width / 2),
+			Math.round(center.y - height / 2),
+			'',
+			width,
+			height
+		);
+		if (!node) return false;
+		delete node.__tomindmapPendingCreation;
+		if (typeof node.setColor === 'function') node.setColor(ROOT_TOPIC_COLOR);
+		this.markRootTopic(node, true);
+		this.canvasApi.invalidateEdgeIndex();
+		this.updateNodeTypeAttributes(canvas);
+		canvas.selectOnly(node);
+		canvas.requestSave();
+		this.trackedTimeout(() => {
+			if (this.unloaded) return;
+			if (this.canvasApi.getActiveCanvas() !== canvas) return;
+			if (!canvas.nodes.has(node.id)) return;
+			node.startEditing();
+		}, 60);
+		return true;
+	}
+	markRootTopic(node, isRoot) {
+		const element = node?.nodeEl;
+		if (!element || typeof element.toggleClass !== 'function') return;
+		element.toggleClass(ROOT_TOPIC_CLASS, isRoot);
+	}
+	/**
+	 * Rename a Canvas file after its central topic is titled. Only a lone
+	 * root topic drives the name so a canvas holding several maps keeps its
+	 * own filename, and an existing file is never overwritten.
+	 */
+	async renameCanvasFromRootTopic(canvas, node) {
+		if (this.unloaded) return false;
+		if (!this.settings.renameCanvasFromRootTopic) return false;
+		if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+		const file = canvas.view?.file;
+		if (!file || file.extension !== 'canvas') return false;
+		if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
+		// A canvas may hold floating cards beside its map. Rename only when this
+		// root is the single branching map, so several real maps never fight
+		// over the filename.
+		const forest = buildForest(canvas);
+		const competingMaps = forest.filter(
+			(tree) =>
+				tree.canvasNode?.id !== node.id &&
+				(tree.children?.length || 0) > 0
+		);
+		if (competingMaps.length > 0) return false;
+		const title = deriveCanvasTitle(node.text);
+		if (!title || title === file.basename) return false;
+		const folder = file.parent?.path ? `${file.parent.path}/` : '';
+		const target = `${folder}${title}.canvas`;
+		if (target === file.path) return false;
+		if (this.app.vault.getAbstractFileByPath(target)) return false;
+		try {
+			await this.app.fileManager.renameFile(file, target);
+			return true;
+		} catch (error) {
+			console.error('ToMindMap: could not rename the Canvas file', error);
+			return false;
+		}
 	}
 	openMediaFilePicker(canvas) {
 		const input = document.createElement('input');
@@ -8274,8 +8443,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const html = canvasPrintDocument(canvas, scope);
 			if (!html)
 				throw new Error('Nothing is available in that export area');
+			const embedded = await embedDocumentAssets(
+				html,
+				this.exportAssetResolvers()
+			);
 			if (request.format === 'svg') {
-				const svg = pdfSvgFromDocument(html, false);
+				const svg = pdfSvgFromDocument(embedded, false);
 				if (!svg) throw new Error('Could not build SVG');
 				const filename = await saveToDownloads(
 					base,
@@ -8291,7 +8464,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (request.format === 'png') {
 				const ownerDocument =
 					canvas.wrapperEl.ownerDocument || document;
-				let svg = pdfSvgFromDocument(html, false);
+				let svg = pdfSvgFromDocument(embedded, false);
 				if (!svg) throw new Error('Could not build image');
 				let bytes;
 				try {
@@ -8301,7 +8474,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						'ToMindMap: rich image rendering failed; using portable text SVG',
 						error
 					);
-					svg = pdfSvgFromDocument(html, true);
+					svg = pdfSvgFromDocument(embedded, true);
 					if (!svg) throw error;
 					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png');
 				}
@@ -8333,9 +8506,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return;
 		}
 		try {
-			const svgInfo = pdfSvgFromDocument(html, false);
+			const embedded = await embedDocumentAssets(
+				html,
+				this.exportAssetResolvers()
+			);
+			// Use the exact same canonical SVG as the SVG export. The PDF renderer
+			// embeds that vector document directly instead of rebuilding the map.
+			const svgInfo = pdfSvgFromDocument(embedded, false);
 			if (!svgInfo) throw new Error('Could not build the mind map SVG');
-			const pdf = await renderHtmlAsVectorPdf(html, svgInfo);
+			const pdfLayout = paginatedPdfDocument(embedded, svgInfo);
+			const pdf = await renderHtmlAsVectorPdf(embedded, svgInfo, null, {
+				document: pdfLayout,
+				ownerDocument: canvas.wrapperEl.ownerDocument || document
+			});
 			const base =
 				canvas.view && canvas.view.file
 					? canvas.view.file.basename
@@ -8350,8 +8533,45 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			new import_obsidian5.Notice(`Saved PDF to Downloads: ${filename}`);
 		} catch (error) {
 			console.error('ToMindMap: PDF export failed', error);
-			new import_obsidian5.Notice('Could not save the PDF to Downloads');
+			const detail = error instanceof Error ? `: ${error.message}` : '';
+			new import_obsidian5.Notice(`Could not export PDF${detail}`);
 		}
+	}
+	/**
+	 * Resolvers that let the export pipeline inline every image and attachment
+	 * referenced by the cards, so PDFs, SVGs, and PNGs match the live canvas.
+	 */
+	exportAssetResolvers() {
+		const vault = this.app.vault;
+		return {
+			readVaultFile: async (path) => {
+				const file = vault.getAbstractFileByPath(path);
+				if (!(file instanceof import_obsidian5.TFile)) return null;
+				try {
+					const buffer = await vault.adapter.readBinary(file.path);
+					return buffer;
+				} catch (error) {
+					console.warn(
+						`ToMindMap: could not read "${path}" for export`,
+						error
+					);
+					return null;
+				}
+			},
+			fetchUrl: async (url) => {
+				try {
+					const response = await fetch(url);
+					if (!response.ok) return null;
+					return new Uint8Array(await response.arrayBuffer());
+				} catch (error) {
+					console.warn(
+						`ToMindMap: could not fetch "${url}" for export`,
+						error
+					);
+					return null;
+				}
+			}
+		};
 	}
 	/**
 	 * Import a FreeMind .mm file and create a .canvas file.

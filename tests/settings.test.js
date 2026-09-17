@@ -5,6 +5,11 @@ const test = require("node:test");
 
 const { DEFAULT_SETTINGS, normalizeSettings } = require("../lib/settings.js");
 
+test("uses a compact automatic width floor for short labels", () => {
+  assert.equal(DEFAULT_SETTINGS.minNodeWidth, 80);
+  assert.equal(normalizeSettings({}).minNodeWidth, 80);
+});
+
 test("normalizes malformed and legacy settings into coherent bounds", () => {
   const settings = normalizeSettings({
     autoColor: "yes",

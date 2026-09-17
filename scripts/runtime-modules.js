@@ -38,10 +38,16 @@ const modules = [
     declaration: "var { normalizeClipboardMarkdown }"
   },
   {
+    name: "vector-pdf",
+    source: "lib/vector-pdf-bundle.js",
+    requireLine: 'var { renderSvgToPdf } = require("./lib/vector-pdf-bundle.js");',
+    declaration: "var { renderSvgToPdf }"
+  },
+  {
     name: "export",
     source: "lib/export.js",
     requireLine: 'var { createExportMindMapModal, rasterizeSvg, saveToDownloads } = require("./lib/export.js");',
-    declaration: "var { createExportMindMapModal, rasterizeSvg, renderHtmlAsVectorPdf, saveToDownloads }"
+    declaration: "var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, rasterizeSvg, renderHtmlAsVectorPdf, saveToDownloads, visibleCardPaint }"
   },
   {
     name: "tree-drag",
@@ -64,8 +70,8 @@ const modules = [
   {
     name: "canvas-session",
     source: "lib/canvas-session.js",
-    requireLine: 'var { flushCanvasView, reflowCanvasAfterMove } = require("./lib/canvas-session.js");',
-    declaration: "var { flushCanvasView, reflowCanvasAfterMove }"
+    requireLine: 'var { finalizeNewTextNode, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = require("./lib/canvas-session.js");',
+    declaration: "var { removeEmptyNodeOnEditExit, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove }"
   },
   {
     name: "canvas-api",

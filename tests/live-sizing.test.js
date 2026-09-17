@@ -66,7 +66,7 @@ test("live estimates carry the PDF height floor through both sizing passes", () 
   assert.ok(estimate.width >= 640);
   assert.ok(estimate.height >= 480);
   assert.equal(estimate.floorHeight, 480);
-  assert.ok(CARD_LAYOUT_VERSION >= 31);
+  assert.ok(CARD_LAYOUT_VERSION >= 38);
 });
 
 test("reports settled only after the final layout pass", () => {
@@ -140,6 +140,60 @@ test("intrinsic height uses the complete rendered border box", () => {
     }),
     682
   );
+});
+
+test("intrinsic width uses the unwrapped rendered border box", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+
+  assert.equal(
+    controller.measureIntrinsicWidth({
+      getBoundingClientRect: () => ({ width: 117.2 })
+    }),
+    118
+  );
+});
+
+test("prefers horizontal cards over narrow multi-line columns", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+
+  const shortPhrase = controller.estimate("Neon Farben (Haut)");
+  const longerPhrase = controller.estimate(
+    "2€ für getränke, 1.50 für Softdrinks"
+  );
+
+  assert.ok(shortPhrase.width > shortPhrase.height);
+  assert.ok(shortPhrase.height <= 72);
+  assert.ok(longerPhrase.width > longerPhrase.height);
+  assert.ok(longerPhrase.height <= 72);
+});
+
+test("keeps ordinary short labels on one compact horizontal line", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+
+  assert.ok(controller.estimate("(Mahsa)").width >= 110);
+  assert.ok(controller.estimate("1 Schicht").width >= 120);
+  assert.ok(controller.estimate("EWH Meeting").width >= 140);
+  assert.ok(controller.estimate("5").width < 100);
+});
+
+test("wraps long labels when that materially reduces total card area", () => {
+  const controller = new LiveSizingController(
+    { settings: DEFAULT_SETTINGS },
+    () => new Set()
+  );
+  const result = controller.estimate("EWH Party T1 am 9ten Oktobeer");
+
+  assert.ok(result.width < 300);
+  assert.ok(result.height <= 72);
 });
 
 test("empty text cards retain one rendered line plus their live insets", () => {

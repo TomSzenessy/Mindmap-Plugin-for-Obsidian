@@ -36,6 +36,7 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require('obsidian');
 var {
 	removeEmptyNodeOnEditExit,
+	pruneEmptyLeafTopics,
 	isBlankMindmapCanvas,
 	isRootTopicNode,
 	deriveCanvasTitle,
@@ -5275,16 +5276,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					editedNode,
 					this.canvasApi
 				);
-				if (finalized.removed) {
+				const pruned = pruneEmptyLeafTopics(canvas2, this.canvasApi);
+				if (finalized.removed || pruned.length > 0) {
 					this.layoutEngine.layout(canvas2);
 					this.updateGroupBounds(canvas2);
 					if (this.settings.autoColor)
 						this.branchColors.applyColors(canvas2);
 					this.markMarkdownOrderDirty(canvas2);
-					if (finalized.parent)
+					const focus =
+						finalized.parent ||
+						pruned[pruned.length - 1]?.parent ||
+						null;
+					if (focus && canvas2.nodes.has(focus.id))
 						this.canvasApi.selectForNavigation(
 							canvas2,
-							finalized.parent,
+							focus,
 							this.settings.navigationZoomPadding
 						);
 					void this.flushCanvasToMarkdown(canvas2);
@@ -5425,6 +5431,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.trackedRaf(() => {
 					structuralReflowQueued = false;
 					if (!this.isMindmapCanvas(canvas)) return;
+					pruneEmptyLeafTopics(canvas, this.canvasApi);
 					this.layoutEngine.layout(canvas);
 					this.updateGroupBounds(canvas);
 					canvas.requestSave();

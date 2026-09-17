@@ -35,7 +35,7 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require('obsidian');
 // <tomindmap:module canvas-session>
-var { removeEmptyNodeOnEditExit, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = (() => {
+var { removeEmptyNodeOnEditExit, pruneEmptyLeafTopics, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = (() => {
   const module = { exports: {} };
   const exports = module.exports;
   /**
@@ -120,6 +120,56 @@ var { removeEmptyNodeOnEditExit, isBlankMindmapCanvas, isRootTopicNode, deriveCa
     );
   }
 
+  /** A plain text topic, as opposed to a group, file, or link card. */
+  function isPlainTextTopic(node) {
+    return Boolean(
+      node &&
+      !isGroupNode(node) &&
+      !node.file &&
+      !node.url &&
+      typeof node.text === "string"
+    );
+  }
+
+  /**
+   * Remove blank topic cards that no longer carry a branch. Deleting a child can
+   * leave its parent as an empty leaf, so the sweep repeats until nothing else
+   * changes. Cards still being edited are never touched, and a lone blank card is
+   * kept so the automatic central topic survives until it is titled.
+   */
+  function pruneEmptyLeafTopics(canvas, canvasApi) {
+    const removed = [];
+    if (!canvas || typeof canvas.nodes?.values !== "function")
+      return removed;
+    for (let guard = 0; guard < 50; guard++) {
+      const topics = Array.from(canvas.nodes.values()).filter(isPlainTextTopic);
+      if (topics.length <= 1)
+        break;
+      let changed = false;
+      for (const node of topics) {
+        if (node.isEditing)
+          continue;
+        // A card that is still being created is owned by the edit-exit path, so
+        // a concurrent sweep must not delete it before editing can begin.
+        if (node.__tomindmapPendingCreation)
+          continue;
+        if (String(node.text ?? "").trim())
+          continue;
+        if ((canvasApi?.getChildNodes?.(canvas, node) || []).length > 0)
+          continue;
+        const parent = canvasApi?.getParentNode?.(canvas, node) || null;
+        canvasApi?.removeNode?.(canvas, node);
+        removed.push({ node, parent });
+        changed = true;
+      }
+      if (!changed)
+        break;
+    }
+    if (removed.length > 0)
+      canvas.requestSave?.();
+    return removed;
+  }
+
   /** A mindmap canvas is blank until it holds at least one non-group card. */
   function isBlankMindmapCanvas(canvas) {
     if (!canvas || typeof canvas.nodes?.values !== "function")
@@ -174,6 +224,7 @@ var { removeEmptyNodeOnEditExit, isBlankMindmapCanvas, isRootTopicNode, deriveCa
   module.exports = {
     finalizeNewTextNode,
     removeEmptyNodeOnEditExit,
+    pruneEmptyLeafTopics,
     isBlankMindmapCanvas,
     isRootTopicNode,
     deriveCanvasTitle,
@@ -43250,7 +43301,9 @@ var { createDragAttachmentController } = (() => {
     ATTACHMENT_DISTANCE,
     createMindMapEdge,
     findNearestNodeOnBranch,
+    getConnectionSides,
     isDescendant,
+    nodeToNodeDistance,
     reparentSubtree
   } = typeof TreeDrag !== "undefined" ? TreeDrag : require("./tree-drag.js");
 
@@ -43382,24 +43435,38 @@ var { createDragAttachmentController } = (() => {
           draggedNode.y - maxY,
           0
         );
-        const distance = Math.hypot(dx, dy);
-        const contains = distance <= ATTACHMENT_DISTANCE;
-        return { root: root.canvasNode, nodes, contains, distance };
+        const boxDistance = Math.hypot(dx, dy);
+        let nodeDistance = Infinity;
+        for (const node of nodes)
+          nodeDistance = Math.min(
+            nodeDistance,
+            nodeToNodeDistance(draggedNode, node)
+          );
+        return {
+          root: root.canvasNode,
+          nodes,
+          nodeDistance,
+          boxDistance,
+          contains: boxDistance <= ATTACHMENT_DISTANCE
+        };
       }).filter(Boolean);
 
-      // Once the dragged card is inside a real map's rectangle, standalone
-      // floating cards cannot steal its target.
-      const containingMaps = maps.filter((map) => map.contains);
-      const substantialMaps = containingMaps.filter((map) => map.nodes.length > 1);
-      const candidates = substantialMaps.length > 0 ? substantialMaps : containingMaps;
-      candidates.sort((a, b) =>
-        // Inside overlapping buffered rectangles, the dominant tree owns the
-        // gesture. This prevents a small floating tree/card embedded in the
-        // visual footprint of the main map from stealing the dragged branch.
-        b.nodes.length - a.nodes.length ||
-        a.distance - b.distance
+      // Rank by the closest actual card, not by the map's buffered rectangle.
+      // A floating card the cursor is sitting on must win over a large map whose
+      // bounding box merely reaches the cursor; otherwise the preview sticks to
+      // the branch it came from until the whole map is left behind.
+      const candidates = maps.filter(
+        (map) =>
+          map.contains || map.nodeDistance <= ATTACHMENT_DISTANCE
       );
-      return candidates[0] || null;
+      if (candidates.length === 0) return null;
+      candidates.sort(
+        (a, b) =>
+          a.nodeDistance - b.nodeDistance ||
+          b.nodes.length - a.nodes.length ||
+          a.boxDistance - b.boxDistance
+      );
+      return candidates[0];
     }
 
     function updatePreview(draggedNode) {
@@ -43437,8 +43504,21 @@ var { createDragAttachmentController } = (() => {
         return { state, target: null };
       }
 
-      if (previewEdge && previewParent?.id === targetNode.id)
-        return { state: "preview", target: targetNode, incomingSide: previewEdge.to?.side || null };
+      if (previewEdge && previewParent?.id === targetNode.id) {
+        // The target can stay the same while the dragged card crosses to the
+        // other side of it. Rebuild the arrow so it flips sides immediately
+        // instead of holding the side it first attached with.
+        const desired = getConnectionSides(draggedNode, mainRootNode);
+        const sideHeld =
+          previewEdge.from?.side === desired.fromSide &&
+          previewEdge.to?.side === desired.toSide;
+        if (sideHeld)
+          return {
+            state: "preview",
+            target: targetNode,
+            incomingSide: previewEdge.to?.side || null
+          };
+      }
 
       removePreview();
       removePermanentIncoming(draggedNode);
@@ -49012,16 +49092,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					editedNode,
 					this.canvasApi
 				);
-				if (finalized.removed) {
+				const pruned = pruneEmptyLeafTopics(canvas2, this.canvasApi);
+				if (finalized.removed || pruned.length > 0) {
 					this.layoutEngine.layout(canvas2);
 					this.updateGroupBounds(canvas2);
 					if (this.settings.autoColor)
 						this.branchColors.applyColors(canvas2);
 					this.markMarkdownOrderDirty(canvas2);
-					if (finalized.parent)
+					const focus =
+						finalized.parent ||
+						pruned[pruned.length - 1]?.parent ||
+						null;
+					if (focus && canvas2.nodes.has(focus.id))
 						this.canvasApi.selectForNavigation(
 							canvas2,
-							finalized.parent,
+							focus,
 							this.settings.navigationZoomPadding
 						);
 					void this.flushCanvasToMarkdown(canvas2);
@@ -49162,6 +49247,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.trackedRaf(() => {
 					structuralReflowQueued = false;
 					if (!this.isMindmapCanvas(canvas)) return;
+					pruneEmptyLeafTopics(canvas, this.canvasApi);
 					this.layoutEngine.layout(canvas);
 					this.updateGroupBounds(canvas);
 					canvas.requestSave();

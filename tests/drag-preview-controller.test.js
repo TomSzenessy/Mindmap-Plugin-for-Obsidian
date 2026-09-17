@@ -190,7 +190,7 @@ test("restores the original arrow if preview edge creation fails", () => {
   assert.equal(fixture.controller.commit(fixture.dragged).changed, false);
 });
 
-test("a dominant buffered map cannot be stolen by a nearer floating tree", () => {
+test("a floating card the drag sits on wins over a large map's buffer", () => {
   const fixture = dragFixture({ withOriginalParent: false });
   const mainRoot = { id: "main-root", x: 500, y: 0, width: 100, height: 60 };
   const mainLeaf = { id: "main-leaf", x: 760, y: 0, width: 100, height: 60 };
@@ -223,5 +223,27 @@ test("a dominant buffered map cannot be stolen by a nearer floating tree", () =>
   controller.begin(fixture.dragged);
   const preview = controller.updatePreview(fixture.dragged);
   assert.equal(preview.state, "preview");
-  assert.equal(preview.target.id, "main-root");
+  assert.equal(preview.target.id, "floating");
+});
+
+test("flips the preview arrow when the drag crosses its parent", () => {
+  const fixture = dragFixture();
+  fixture.oldParent.x = 500;
+  fixture.dragged.x = 700;
+  fixture.newParent.x = 5000;
+  fixture.otherParent.x = 9000;
+  fixture.controller.begin(fixture.dragged);
+
+  let preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.target.id, "old");
+  assert.equal(preview.incomingSide, "left");
+
+  fixture.dragged.x = 300;
+  preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.equal(preview.target.id, "old");
+  assert.equal(preview.incomingSide, "right");
+  assert.equal(fixture.activeEdges.length, 1);
+  assert.equal(fixture.activeEdges[0].from.side, "left");
+  assert.equal(fixture.activeEdges[0].to.side, "right");
 });

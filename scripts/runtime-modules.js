@@ -70,8 +70,8 @@ const modules = [
   {
     name: "canvas-session",
     source: "lib/canvas-session.js",
-    requireLine: 'var { finalizeNewTextNode, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = require("./lib/canvas-session.js");',
-    declaration: "var { removeEmptyNodeOnEditExit, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove }"
+    requireLine: 'var { finalizeNewTextNode, pruneEmptyLeafTopics, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = require("./lib/canvas-session.js");',
+    declaration: "var { removeEmptyNodeOnEditExit, pruneEmptyLeafTopics, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove }"
   },
   {
     name: "canvas-api",

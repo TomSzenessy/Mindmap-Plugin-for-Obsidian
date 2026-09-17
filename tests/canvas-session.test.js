@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
   finalizeNewTextNode,
   removeEmptyNodeOnEditExit,
+  pruneEmptyLeafTopics,
   isBlankMindmapCanvas,
   isRootTopicNode,
   deriveCanvasTitle,
@@ -92,6 +93,112 @@ test("keeps non-empty cards and group cards", () => {
     ),
     { removed: false, parent: null }
   );
+});
+
+function specCanvas(spec) {
+  const nodes = new Map(
+    Object.entries(spec).map(([id, data]) => [
+      id,
+      { id, text: "", ...data }
+    ])
+  );
+  const canvas = { nodes, requestSave() {} };
+  const canvasApi = {
+    getParentNode: (_canvas, node) => {
+      const parentId = spec[node.id]?.parent;
+      return parentId ? nodes.get(parentId) || null : null;
+    },
+    getChildNodes: (_canvas, node) =>
+      Object.entries(spec)
+        .filter(([, data]) => data.parent === node.id)
+        .map(([id]) => nodes.get(id))
+        .filter(Boolean),
+    removeNode: (_canvas, node) => {
+      nodes.delete(node.id);
+    }
+  };
+  return { canvas, canvasApi, nodes };
+}
+
+test("removes blank leaves and cascades to a parent left empty", () => {
+  const spec = {
+    root: { text: "Root" },
+    middle: { text: "", parent: "root" },
+    leaf: { text: "", parent: "middle" }
+  };
+  const { canvas, canvasApi, nodes } = specCanvas(spec);
+
+  const removed = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.deepEqual(
+    removed.map((entry) => entry.node.id),
+    ["leaf", "middle"]
+  );
+  assert.equal(nodes.has("root"), true);
+  assert.equal(nodes.has("middle"), false);
+  assert.equal(nodes.has("leaf"), false);
+});
+
+test("keeps blank cards that still carry children and non-empty cards", () => {
+  const spec = {
+    root: { text: "Root" },
+    parent: { text: "", parent: "root" },
+    child: { text: "Child", parent: "parent" },
+    titled: { text: "Titled", parent: "root" }
+  };
+  const { canvas, canvasApi, nodes } = specCanvas(spec);
+
+  const removed = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.deepEqual(removed, []);
+  assert.equal(nodes.size, 4);
+});
+
+test("never removes the lone blank central topic or a card being edited", () => {
+  const lone = specCanvas({ root: { text: "" } });
+  assert.deepEqual(
+    pruneEmptyLeafTopics(lone.canvas, lone.canvasApi),
+    []
+  );
+  assert.equal(lone.nodes.has("root"), true);
+
+  const editing = specCanvas({
+    root: { text: "Root" },
+    draft: { text: "", parent: "root", isEditing: true },
+    pending: {
+      text: "",
+      parent: "root",
+      __tomindmapPendingCreation: true
+    }
+  });
+  assert.deepEqual(
+    pruneEmptyLeafTopics(editing.canvas, editing.canvasApi),
+    []
+  );
+  assert.equal(editing.nodes.has("draft"), true);
+  assert.equal(editing.nodes.has("pending"), true);
+});
+
+test("ignores group, file, and link cards when pruning", () => {
+  const spec = {
+    root: { text: "Root" },
+    spare: { text: "", parent: "root" },
+    group: { label: "Group", unknownData: { type: "group" } },
+    file: { file: "image.png" },
+    link: { url: "https://example.com" }
+  };
+  const { canvas, canvasApi, nodes } = specCanvas(spec);
+
+  const removed = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.deepEqual(
+    removed.map((entry) => entry.node.id),
+    ["spare"]
+  );
+  assert.equal(nodes.has("group"), true);
+  assert.equal(nodes.has("file"), true);
+  assert.equal(nodes.has("link"), true);
+  assert.equal(nodes.has("root"), true);
 });
 
 test("treats a canvas without topics as blank but ignores groups", () => {

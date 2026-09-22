@@ -1,6 +1,6 @@
 {
   "name": "tomindmap",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "Keyboard-first mind mapping for Obsidian Canvas",
   "scripts": {

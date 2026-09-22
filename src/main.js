@@ -96,6 +96,8 @@ var {
 
 var { KeyboardHandler, Navigation } = require('./lib/keyboard-navigation.js');
 
+var { TouchControlsController, createGestureTracker, dispatchTouchAction } = require('./lib/touch-controls.js');
+
 // src/settings.ts
 var import_obsidian3 = require('obsidian');
 var { DEFAULT_SETTINGS, normalizeSettings } = require('./lib/settings.js');
@@ -283,6 +285,22 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 					.setValue(this.plugin.settings.mouseNavigation)
 					.onChange(async (value) => {
 						this.plugin.settings.mouseNavigation = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new import_obsidian3.Setting(containerEl)
+			.setName('Touch controls')
+			.setDesc(
+				'Floating touch toolbar (edit, add child, add sibling, more) with long-press menus and double-tap editing. Auto shows it on touch-primary devices.'
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('auto', 'Auto')
+					.addOption('on', 'Always on')
+					.addOption('off', 'Off')
+					.setValue(this.plugin.settings.touchControls)
+					.onChange(async (value) => {
+						this.plugin.settings.touchControls = value;
 						await this.plugin.saveSettings();
 					})
 			);
@@ -3944,6 +3962,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.cleanupDragHandler = null;
 		this.cleanupSubtreeDragHandler = null;
 		this.cleanupGroupDragHandler = null;
+		this.cleanupTouchHandler = null;
+		this.touchController = null;
 		this.autoResizeHandle = null;
 		this.interceptedCanvas = null;
 		this.toggleBtnEl = null;
@@ -4782,6 +4802,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.cleanupKeyboardHandler();
 			this.cleanupKeyboardHandler = null;
 		}
+		if (this.cleanupTouchHandler) {
+			this.cleanupTouchHandler();
+			this.cleanupTouchHandler = null;
+		}
 		if (this.cleanupPreviewGeometryHandler) {
 			this.cleanupPreviewGeometryHandler();
 			this.cleanupPreviewGeometryHandler = null;
@@ -4903,6 +4927,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.cleanupKeyboardHandler();
 			this.cleanupKeyboardHandler = null;
 		}
+		if (this.cleanupTouchHandler) {
+			this.cleanupTouchHandler();
+			this.cleanupTouchHandler = null;
+		}
 		if (this.cleanupPreviewGeometryHandler) {
 			this.cleanupPreviewGeometryHandler();
 			this.cleanupPreviewGeometryHandler = null;
@@ -4991,6 +5019,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 		this.cleanupKeyboardHandler =
 			this.keyboardHandler.attachToCanvas(canvas);
+		this.cleanupTouchHandler = null;
+		if (this.isTouchUiEnabled()) {
+			this.touchController = new TouchControlsController({
+				canvas,
+				actions: this.keyboardHandler,
+				Menu: import_obsidian5.Menu,
+				setIcon: import_obsidian5.setIcon,
+				isEnabled: () =>
+					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
+				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
+				buildMenuItems: (menu, node) => {
+					this.app.workspace.trigger('canvas:node-menu', menu, node);
+				}
+			});
+			this.cleanupTouchHandler = this.touchController.attach();
+		}
 		this.cleanupClickHandler = this.navigation.registerClickHandler(canvas);
 		// Card movement, subtree movement, attachment preview, and commit are
 		// deliberately owned by registerNodeDragReparentHandler. Multiple gesture
@@ -7329,6 +7373,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			wrapper.removeEventListener('dragleave', onDragLeave, true);
 			wrapper.removeEventListener('drop', onDrop, true);
 		};
+	}
+	isTouchUiEnabled() {
+		const mode = this.settings?.touchControls || 'auto';
+		if (mode === 'on') return true;
+		if (mode === 'off') return false;
+		if (typeof window === 'undefined' || !window.matchMedia) return false;
+		return (
+			window.matchMedia('(pointer: coarse)').matches &&
+			!window.matchMedia('(pointer: fine)').matches
+		);
 	}
 	registerNodeDragReparentHandler(canvas) {
 		const wrapper = canvas.wrapperEl;

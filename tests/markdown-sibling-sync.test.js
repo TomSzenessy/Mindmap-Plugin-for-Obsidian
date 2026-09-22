@@ -26,6 +26,10 @@ module.exports.__test = {
   const sandbox = {
     Blob,
     URL,
+    TextDecoder,
+    TextEncoder,
+    atob,
+    btoa,
     clearInterval,
     clearTimeout,
     console,

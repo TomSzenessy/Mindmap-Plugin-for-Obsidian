@@ -46,3 +46,15 @@ test("returns a fresh settings object and leaves defaults immutable", () => {
   assert.equal(second.horizontalGap, DEFAULT_SETTINGS.horizontalGap);
   assert.equal(DEFAULT_SETTINGS.horizontalGap, 80);
 });
+
+test("touch controls default to auto and clamp to known modes", () => {
+  assert.equal(DEFAULT_SETTINGS.touchControls, "auto");
+  assert.equal(normalizeSettings({}).touchControls, "auto");
+  assert.equal(normalizeSettings({ touchControls: "on" }).touchControls, "on");
+  assert.equal(normalizeSettings({ touchControls: "off" }).touchControls, "off");
+  assert.equal(
+    normalizeSettings({ touchControls: "sometimes" }).touchControls,
+    "auto"
+  );
+  assert.equal(normalizeSettings({ touchControls: 7 }).touchControls, "auto");
+});

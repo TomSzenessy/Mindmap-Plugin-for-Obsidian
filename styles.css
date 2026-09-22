@@ -367,3 +367,50 @@
 	margin: 0 !important;
 	text-align: center !important;
 }
+
+/* ---- Touch controls (floating mobile mindmap toolbar) ---- */
+.tomindmap-touch-toolbar {
+	position: absolute;
+	left: 50%;
+	bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+	transform: translateX(-50%);
+	z-index: 30;
+	gap: 6px;
+	padding: 8px 10px;
+	border-radius: 999px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+.tomindmap-touch-btn {
+	appearance: none;
+	width: 46px;
+	height: 46px;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--text-normal);
+	cursor: pointer;
+	touch-action: none;
+}
+.tomindmap-touch-btn:hover {
+	background: var(--background-modifier-hover);
+}
+.tomindmap-touch-btn:active {
+	background: var(--background-modifier-active-hover);
+	transform: scale(0.94);
+}
+.tomindmap-touch-btn svg {
+	width: 22px;
+	height: 22px;
+}

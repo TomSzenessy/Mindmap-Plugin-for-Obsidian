@@ -101,7 +101,13 @@ const modules = [
     name: "freemind",
     source: "lib/freemind.js",
     requireLine: 'var { freemindToCanvas, layoutTree, parseFreeMindXml } = require("./lib/freemind.js");',
-    declaration: "var { freemindToCanvas, layoutTree, parseFreeMindXml }"
+    declaration: 'var { freemindToCanvas, layoutTree, parseFreeMindXml }'
+  },
+  {
+    name: "touch-controls",
+    source: "lib/touch-controls.js",
+    requireLine: 'var { TouchControlsController, createGestureTracker, dispatchTouchAction } = require(\'./lib/touch-controls.js\');',
+    declaration: 'var { TouchControlsController, createGestureTracker, dispatchTouchAction }'
   }
 ];
 

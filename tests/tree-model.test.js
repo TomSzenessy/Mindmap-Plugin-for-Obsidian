@@ -98,6 +98,19 @@ test("ignores transient drag preview edges when deriving hierarchy", () => {
   assert.equal(draggedTree.parent.canvasNode.id, "root");
 });
 
+test("can omit collapsed descendants from layout forests", () => {
+  const canvas = makeCanvas(["root", "hidden", "visible"], [
+    ["root", "hidden"],
+    ["root", "visible"]
+  ]);
+  canvas.nodes.get("hidden").nodeEl = {
+    classList: { contains: (className) => className === "tomindmap-collapsed-hidden" }
+  };
+  const forest = buildForest(canvas, { includeHidden: false });
+  assert.deepEqual(getDescendants(forest[0]).map((node) => node.canvasNode.id), ["visible"]);
+  assert.equal(findTreeForNode(forest, "hidden"), null);
+});
+
 test("handles very deep maps without recursive tree-model overflow", () => {
   const size = 12000;
   const ids = Array.from({ length: size }, (_, index) => `n${index}`);

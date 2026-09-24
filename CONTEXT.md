@@ -13,6 +13,12 @@ _Avoid_: Converted file when the empty-content guarantee matters.
 **Branch export note**: A single Markdown file named from the branch root that contains the exported hierarchy of that branch. It is different from a clean note because its body preserves the branch structure.
 _Avoid_: Clean note when the Markdown hierarchy is present.
 
+**Missing linked topic**: A generated file card whose target no longer exists. It remains a file card until the user explicitly chooses to restore it as a normal topic.
+_Avoid_: Automatically recovered topic when the user has not chosen that action.
+
+**Collapsed subtree**: A topic whose descendants and their connecting edges are hidden from the interactive Canvas without being removed from the saved hierarchy.
+_Avoid_: Deleted branch when the underlying structure should remain recoverable.
+
 **Nested mind map**: A separate Canvas file containing a moved topic and its descendants. Its parent retains a title-only linked card at the original location.
 _Avoid_: Embedded map when the content is a separate file.
 

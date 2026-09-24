@@ -379,12 +379,43 @@
 	text-align: center !important;
 }
 
+/* Collapsed subtrees remain in the saved graph, but their cards are hidden
+ * from the interactive Canvas and from automatic layout. */
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-hidden {
+	display: none !important;
+	pointer-events: none !important;
+}
+
 /* Generated note and nested-map cards keep the map compact while remaining
  * ordinary Canvas file links. The native preview is hidden only for cards the
  * plugin explicitly marks, so user-created file previews remain untouched. */
 .tomindmap-mindmap-mode .canvas-node.tomindmap-title-only-card {
 	position: relative;
 	overflow: visible;
+}
+
+/* Canvas renders a second filename label above file cards. Generated cards
+ * already show their title inside the card, so suppress only that duplicate
+ * native label; ordinary file cards keep Obsidian's native affordance. */
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
+	.canvas-node-label {
+	display: none !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card::before {
+	content: '↗';
+	position: absolute;
+	z-index: 2;
+	inset-block-start: 8px;
+	inset-inline-end: 10px;
+	color: var(--text-muted);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	line-height: 1;
+	opacity: 0.85;
+	pointer-events: none;
 }
 
 .tomindmap-mindmap-mode
@@ -402,6 +433,8 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	box-sizing: border-box;
+	padding-inline: 12px 26px;
 	overflow: hidden;
 	color: var(--text-normal);
 	font-family: var(--font-interface);

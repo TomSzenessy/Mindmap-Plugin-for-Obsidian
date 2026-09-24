@@ -39321,11 +39321,21 @@ var {
    * Canvas itself permits both, so malformed surplus edges are ignored in their
    * stable insertion order instead of making layout recurse forever.
    */
-  function buildForest(canvas) {
+  function isCollapsedCanvasNodeHidden(node) {
+    return !!(
+      node?.nodeEl?.hasClass?.("tomindmap-collapsed-hidden") ||
+      node?.nodeEl?.classList?.contains?.("tomindmap-collapsed-hidden")
+    );
+  }
+
+  function buildForest(canvas, options = {}) {
+    const includeHidden = options.includeHidden !== false;
     const groupIds = getGroupIds(canvas);
     const nodeMap = new Map();
     for (const canvasNode of canvas.nodes.values()) {
       if (groupIds.has(canvasNode.id))
+        continue;
+      if (!includeHidden && isCollapsedCanvasNodeHidden(canvasNode))
         continue;
       nodeMap.set(canvasNode.id, {
         id: canvasNode.id,
@@ -39957,7 +39967,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * laid out independently, centered around their own root.
      */
     layout(canvas, options = {}) {
-      const forest = buildForest(canvas);
+      const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
       const nestedDirections = new Map();
@@ -40011,7 +40021,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * outside this parent's subtree is untouched.
      */
     layoutChildren(canvas, parentNodeId, directionOverride = null, options = {}) {
-      const forest = buildForest(canvas);
+      const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
       const parentTreeNode = findTreeForNode(forest, parentNodeId);
@@ -40497,7 +40507,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       const group = canvas.nodes.get(groupId);
       if (!group)
         return;
-      const forest = buildForest(canvas);
+      const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
       const roots = forest.filter((root) => {
@@ -40771,7 +40781,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Apply auto-coloring to all branches.
      */
     applyColors(canvas) {
-      const forest = buildForest(canvas);
+      const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
       for (const root of forest) {
@@ -44431,6 +44441,73 @@ var MindmapActions = (() => {
   		: [treeNode];
   }
 
+  function setCanvasNodeClass(node, className, enabled) {
+  	const element = node?.nodeEl;
+  	if (!element) return;
+  	if (typeof element.toggleClass === 'function') {
+  		element.toggleClass(className, enabled);
+  	} else {
+  		element.classList?.toggle(className, enabled);
+  	}
+  }
+
+  function setCanvasEdgeHidden(edge, hidden) {
+  	for (const element of [
+  		edge?.lineGroupEl,
+  		edge?.lineEndGroupEl,
+  		edge?.el,
+  		edge?.edgeEl
+  	]) {
+  		if (element?.style) element.style.display = hidden ? 'none' : '';
+  	}
+  }
+
+  /**
+   * Apply persisted collapse state to node elements and edge line groups. The
+   * layout engine can then omit hidden descendants without changing the saved
+   * graph, while exports and the outline still see the complete hierarchy.
+   */
+  function syncCollapsedVisibility(canvas) {
+  	if (!canvas?.nodes || !treeModel.buildForest) return 0;
+  	const nodes = Array.from(canvas.nodes.values());
+  	for (const node of nodes)
+  		setCanvasNodeClass(node, 'tomindmap-collapsed-hidden', false);
+  	for (const edge of canvas.edges?.values?.() || [])
+  		setCanvasEdgeHidden(edge, false);
+
+  	const forest = treeModel.buildForest(canvas, { includeHidden: true });
+  	const hiddenIds = new Set();
+  	const getData = (node) => {
+  		try {
+  			return typeof node.getData === 'function'
+  				? node.getData() || {}
+  				: node.unknownData || {};
+  		} catch (_) {
+  			return {};
+  		}
+  	};
+  	const descFn = getGetDescendants();
+  	const visit = (treeNode) => {
+  		if (getData(treeNode.canvasNode).collapsed && descFn) {
+  			for (const descendant of descFn(treeNode)) {
+  				const child = descendant.canvasNode;
+  				if (!child) continue;
+  				hiddenIds.add(child.id);
+  				setCanvasNodeClass(child, 'tomindmap-collapsed-hidden', true);
+  			}
+  		}
+  		for (const child of treeNode.children) visit(child);
+  	};
+  	for (const root of forest) visit(root);
+  	for (const edge of canvas.edges?.values?.() || []) {
+  		const fromId = edge.from?.node?.id;
+  		const toId = edge.to?.node?.id;
+  		if (hiddenIds.has(fromId) || hiddenIds.has(toId))
+  			setCanvasEdgeHidden(edge, true);
+  	}
+  	return hiddenIds.size;
+  }
+
   function separateBranch(canvas, canvasApi, node) {
   	if (!canvas || !canvasApi || !node) return false;
 
@@ -44495,7 +44572,9 @@ var MindmapActions = (() => {
   		};
   	}
 
-  	if (descFn) {
+  	if (canvas.nodes?.values) {
+  		syncCollapsedVisibility(canvas);
+  	} else if (descFn) {
   		const descendants = descFn(treeNode);
   		for (const item of descendants) {
   			const childNode = item.canvasNode;
@@ -44520,7 +44599,8 @@ var MindmapActions = (() => {
   	nextTopicFilePath,
   	nextTopicNotePath,
   	isTextTopicNode,
-  	getTopicBranch
+  	getTopicBranch,
+  	syncCollapsedVisibility
   };
   return module.exports;
 })();
@@ -46156,6 +46236,7 @@ function applyTitleOnlyCardMarker(node, kind, title) {
 	shell.toggleClass?.('tomindmap-title-only-card', true);
 	shell.setAttribute?.('data-tomindmap-card-title', marker);
 	shell.setAttribute?.('data-tomindmap-card-kind', kind);
+	shell.setAttribute?.('aria-label', `${marker} — open linked file`);
 }
 
 function nodeIsConvertibleTopic(canvas, node) {
@@ -49154,6 +49235,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							);
 					});
 				}
+				const missingLinkedPath = canvasNodeFilePath(node);
+				const missingLinkedTopic =
+					canvas &&
+					this.isMindmapCanvas(canvas) &&
+					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY] &&
+					!!missingLinkedPath &&
+					!this.app.vault.getAbstractFileByPath(missingLinkedPath);
+				if (missingLinkedTopic) {
+					menu.addItem((item) => {
+						item.setTitle('Convert to normal topic')
+							.setIcon('file-minus')
+							.onClick(() =>
+								this.convertLinkedNodeToNormalTopic(canvas, node)
+							);
+					});
+				}
 				const parentLink = canvas?.getData?.()?.[TOMINMAP_PARENT];
 				const parentForest = canvas ? buildForest(canvas) : [];
 				const parentTree = canvas
@@ -49757,6 +49854,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return;
 		}
 		const canvasData = canvas.getData();
+		if (this.isMindmapCanvas(canvas))
+			MindmapActions.syncCollapsedVisibility(canvas);
 		const pendingResizeIds = new Set(
 			Array.isArray(canvasData.mindmapPendingResize)
 				? canvasData.mindmapPendingResize
@@ -50385,6 +50484,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						return;
 					// Virtualized cards can materialize after the first frame, so keep
 					// their interaction classes current without touching saved geometry.
+					MindmapActions.syncCollapsedVisibility(canvas);
 					this.updateNodeTypeAttributes(canvas);
 					refreshPreviewGeometry();
 				}, delay);
@@ -50423,6 +50523,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		)) {
 			const view = leaf.view;
 			if (view instanceof OutlineView) {
+				for (const node of canvas.nodes.values()) {
+					const collapsed = canvasNodeUnknownData(node).collapsed;
+					if (collapsed === true) view.collapsedNodes.add(node.id);
+					else if (collapsed === false)
+						view.collapsedNodes.delete(node.id);
+				}
 				view.zoomPadding = this.settings.navigationZoomPadding;
 				view.onForestLayout = (c, groupId) => {
 					this.layoutEngine.layoutForest(c, groupId);
@@ -51564,6 +51670,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		try {
 			canvas.setData(reconciled);
 			this.canvasApi.invalidateEdgeIndex();
+			if (this.isMindmapCanvas(canvas))
+				MindmapActions.syncCollapsedVisibility(canvas);
 			if (
 				this.isAutoAdjustCanvas(canvas) &&
 				this.isMindmapCanvas(canvas)
@@ -51688,6 +51796,69 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 		}
 	}
+	convertLinkedNodeToNormalTopic(canvas, node) {
+		if (
+			!canvas ||
+			!node ||
+			!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY] ||
+			!canvasNodeFilePath(node)
+		)
+			return false;
+		const filePath = canvasNodeFilePath(node);
+		if (!filePath || this.app.vault.getAbstractFileByPath(filePath)) return false;
+		const oldData = canvasNodeUnknownData(node);
+		const title = titleOnlyCardTitle(node);
+		let textNode = null;
+		try {
+			textNode = this.canvasApi.createTextNode(
+				canvas,
+				Number(node.x) || 0,
+				Number(node.y) || 0,
+				title,
+				Number(node.width) || this.settings.defaultNodeWidth,
+				Number(node.height) || this.settings.defaultNodeHeight
+			);
+			if (!textNode) return false;
+			if (oldData.collapsed !== undefined)
+				setCanvasNodeUnknownData(textNode, { collapsed: oldData.collapsed });
+			if (node.color && typeof textNode.setColor === 'function')
+				textNode.setColor(node.color);
+			const replacements = new Map([[node.id, textNode]]);
+			this.cloneEdgesAroundReplacedNodes(
+				canvas,
+				[node],
+				replacements,
+				true
+			);
+			const wasSelected = canvas.selection?.has?.(node);
+			this.canvasApi.removeNode(canvas, node);
+			this.canvasApi.invalidateEdgeIndex();
+			if (wasSelected) {
+				canvas.deselectAll?.();
+				canvas.select?.(textNode);
+			}
+			if (this.isMindmapCanvas(canvas)) {
+				this.layoutEngine.layout(canvas);
+				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
+			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
+			canvas.requestSave();
+			this.refreshOutline(canvas);
+			new import_obsidian5.Notice('Converted the missing link to a normal topic');
+			return true;
+		} catch (error) {
+			console.error('ToMindMap: missing-link conversion failed', error);
+			if (textNode) {
+				try {
+					this.canvasApi.removeNode(canvas, textNode);
+				} catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not convert the missing link');
+			return false;
+		}
+	}
+
 	async handleSyncedFileDelete(file) {
 		const path = file.path;
 		if (this.markdownSyncIndex.has(path)) {
@@ -52421,9 +52592,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						'data-tomindmap-card-kind',
 						nodeData[TOMINMAP_CARD_KIND] || 'note'
 					);
+					element.setAttribute(
+						'aria-label',
+						`${nodeData[TOMINMAP_CARD_TITLE] || titleOnlyCardTitle(node)} — open linked file`
+					);
 				} else {
 					element.removeAttribute('data-tomindmap-card-title');
 					element.removeAttribute('data-tomindmap-card-kind');
+					element.removeAttribute('aria-label');
 				}
 				if (typeof element.toggleClass === 'function') {
 					element.toggleClass(

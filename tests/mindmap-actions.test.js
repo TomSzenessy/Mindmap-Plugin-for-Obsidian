@@ -13,7 +13,8 @@ const {
 	nextTopicFilePath,
 	nextTopicNotePath,
 	isTextTopicNode,
-	getTopicBranch
+	getTopicBranch,
+	syncCollapsedVisibility
 } = require('../lib/mindmap-actions.js');
 
 test('separates branch by removing parent edges', () => {
@@ -139,4 +140,44 @@ test('toggles subtree collapse state', () => {
 	assert.equal(newState, true);
 	assert.equal(rootNode.data.collapsed, true);
 	assert.equal(childNode.class, 'tomindmap-collapsed-hidden');
+});
+
+test('syncs persisted collapse state to nodes and edge groups', () => {
+	const makeNode = (id, data = {}) => {
+		const node = {
+			id,
+			data,
+			nodeEl: {
+				classes: new Set(),
+				toggleClass(className, enabled) {
+					if (enabled) this.classes.add(className);
+					else this.classes.delete(className);
+				}
+			},
+			getData() {
+				return this.data;
+			}
+		};
+		return node;
+	};
+	const root = makeNode('root', { collapsed: true });
+	const child = makeNode('child');
+	const edge = {
+		from: { node: root },
+		to: { node: child },
+		lineGroupEl: { style: {} },
+		lineEndGroupEl: { style: {} }
+	};
+	const canvas = {
+		nodes: new Map([[root.id, root], [child.id, child]]),
+		edges: new Map([['edge', edge]]),
+		getData: () => ({ nodes: [{ id: 'root', type: 'text' }, { id: 'child', type: 'text' }] })
+	};
+	assert.equal(syncCollapsedVisibility(canvas), 1);
+	assert.equal(child.nodeEl.classes.has('tomindmap-collapsed-hidden'), true);
+	assert.equal(edge.lineGroupEl.style.display, 'none');
+	root.data.collapsed = false;
+	assert.equal(syncCollapsedVisibility(canvas), 0);
+	assert.equal(child.nodeEl.classes.has('tomindmap-collapsed-hidden'), false);
+	assert.equal(edge.lineGroupEl.style.display, '');
 });

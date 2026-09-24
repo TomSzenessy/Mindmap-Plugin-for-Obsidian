@@ -93,7 +93,7 @@ jobs:
             styles.css \
             data.json
 
-      - name: Create or refresh GitHub release
+      - name: Create or repair GitHub release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -101,17 +101,29 @@ jobs:
           set -euo pipefail
           tag="${{ steps.package.outputs.tag }}"
           archive="tomindmap-${tag}.zip"
+          required_assets=(manifest.json main.js styles.css data.json "$archive")
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists; leaving the immutable release unchanged."
-            echo "Bump package.json and manifest.json to publish the next version."
+            existing_assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
+            missing_assets=()
+            for asset in "${required_assets[@]}"; do
+              if ! grep -Fxq "$asset" <<< "$existing_assets"; then
+                missing_assets+=("$asset")
+              fi
+            done
+            if ((${#missing_assets[@]} > 0)); then
+              gh release upload "$tag" "${missing_assets[@]}" --clobber
+              echo "Repaired missing release assets for $tag."
+            else
+              echo "Release $tag already has all required assets; leaving it unchanged."
+            fi
           elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            gh release create "$tag" "$archive" \
+            gh release create "$tag" "${required_assets[@]}" \
               --verify-tag \
               --title "ToMindMap $tag" \
               --generate-notes
           else
-            gh release create "$tag" "$archive" \
+            gh release create "$tag" "${required_assets[@]}" \
               --title "ToMindMap $tag" \
               --generate-notes
           fi

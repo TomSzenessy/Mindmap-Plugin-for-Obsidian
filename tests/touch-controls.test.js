@@ -6,6 +6,7 @@ const test = require('node:test');
 const {
 	createGestureTracker,
 	dispatchTouchAction,
+	TouchControlsController,
 	TOOLBAR_ACTIONS,
 	MENU_ACTIONS,
 	ACTION_TITLES
@@ -40,6 +41,28 @@ test('two quick taps on the same node fire tap then double tap', () => {
 		['tap', 'n1'],
 		['doubletap', 'n1']
 	]);
+});
+
+test('touch double tap can open a generated file card', () => {
+	let opened = 0;
+	let edited = 0;
+	const node = { id: 'card', isEditing: false };
+	const controller = new TouchControlsController({
+		canvas: { nodes: new Map([[node.id, node]]), selection: new Set() },
+		actions: { startEditing: () => edited++ },
+		isTopicNode: () => true,
+		onDoubleTap: () => {
+			opened++;
+			return true;
+		}
+	});
+	controller.refresh = () => {};
+	controller.tracker.pointerDown(node.id, 0, 0);
+	controller.tracker.pointerUp(1000);
+	controller.tracker.pointerDown(node.id, 0, 0);
+	controller.tracker.pointerUp(1100);
+	assert.equal(opened, 1);
+	assert.equal(edited, 0);
 });
 
 test('double tap requires the same target within the window', () => {

@@ -317,6 +317,17 @@
 	width: 100%;
 }
 
+.tomindmap-export-form .tomindmap-export-nested-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: var(--font-normal);
+}
+
+.tomindmap-export-form .tomindmap-export-nested-toggle input {
+	margin: 0;
+}
+
 .tomindmap-print-frame {
 	position: fixed;
 	inset: 0;
@@ -366,6 +377,46 @@
 	max-width: 100% !important;
 	margin: 0 !important;
 	text-align: center !important;
+}
+
+/* Generated note and nested-map cards keep the map compact while remaining
+ * ordinary Canvas file links. The native preview is hidden only for cards the
+ * plugin explicitly marks, so user-created file previews remain untouched. */
+.tomindmap-mindmap-mode .canvas-node.tomindmap-title-only-card {
+	position: relative;
+	overflow: visible;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
+	.canvas-node-content {
+	visibility: hidden !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card::after {
+	content: attr(data-tomindmap-card-title);
+	position: absolute;
+	z-index: 1;
+	inset: 10px 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
+	color: var(--text-normal);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-medium);
+	font-weight: var(--font-medium);
+	line-height: 1.35;
+	text-align: center;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	pointer-events: none;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card[data-tomindmap-card-kind='nested-map']::after {
+	font-weight: var(--font-semibold);
 }
 
 /* ---- Touch controls (floating mobile mindmap toolbar) ---- */

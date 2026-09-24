@@ -1,0 +1,117 @@
+name: Verify and release
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build distributable
+        run: npm run build
+
+      - name: Run verification suite
+        run: npm run check
+
+      - name: Confirm version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          lock_version="$(node -p "require('./package-lock.json').version")"
+          test "$package_version" = "$manifest_version"
+          test "$package_version" = "$lock_version"
+          test "$package_version" != "0.0.0"
+
+      - name: Ensure generated files are committed
+        run: git diff --exit-code -- main.js lib/vector-pdf-bundle.js
+
+  release:
+    name: Publish GitHub release
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Rebuild verified distributable
+        run: npm run build
+
+      - name: Re-run verification before publishing
+        run: npm run check
+
+      - name: Package plugin files
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+          zip -q -r "tomindmap-${version}.zip" \
+            manifest.json \
+            main.js \
+            styles.css \
+            data.json
+
+      - name: Create or refresh GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.package.outputs.tag }}"
+          archive="tomindmap-${tag}.zip"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" --clobber
+            echo "Release $tag already exists; refreshed its plugin asset."
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            gh release create "$tag" "$archive" \
+              --verify-tag \
+              --title "ToMindMap $tag" \
+              --generate-notes
+          else
+            gh release create "$tag" "$archive" \
+              --title "ToMindMap $tag" \
+              --generate-notes
+          fi

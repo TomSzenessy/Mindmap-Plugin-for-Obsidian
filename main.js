@@ -1485,6 +1485,13 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
   				if (value === 'selection' && !this.selectionAvailable)
   					option.disabled = true;
   			}
+  			const nestedLabel = form.createEl('label', {
+  				cls: 'tomindmap-export-nested-toggle'
+  			});
+  			const includeNested = nestedLabel.createEl('input', {
+  				type: 'checkbox'
+  			});
+  			nestedLabel.createSpan({ text: 'Include nested maps' });
   			const hint = form.createDiv({ cls: 'setting-item-description' });
   			const refresh = () => {
   				const markdown = format.value === 'markdown';
@@ -1498,8 +1505,14 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
   							? 'PDF exports the complete area as a vector graphic fitted onto one page.'
   							: 'The exported file is saved to your Downloads folder.'
   				);
+  				if (includeNested.checked) {
+  					hint.setText(
+  						'Nested maps are expanded in place before the export is rendered.'
+  					);
+  				}
   			};
   			format.addEventListener('change', refresh);
+  			includeNested.addEventListener('change', refresh);
   			refresh();
   			const actions = contentEl.createDiv({
   				cls: 'modal-button-container'
@@ -1511,7 +1524,11 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
   			});
   			cancel.addEventListener('click', () => this.close());
   			submit.addEventListener('click', () => {
-  				const request = { format: format.value, scope: scope.value };
+  				const request = {
+  					format: format.value,
+  					scope: scope.value,
+  					includeNestedMaps: includeNested.checked
+  				};
   				this.close();
   				void this.onExport(request);
   			});
@@ -38955,6 +38972,42 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   		return item;
   	}
   	/**
+  	 * Create a file-backed node at a given position.
+  	 */
+  	createFileNode(canvas, file, x, y, width = 260, height = 60) {
+  		if (typeof canvas.createFileNode === 'function') {
+  			const node = canvas.createFileNode({
+  				pos: { x, y },
+  				size: { width, height },
+  				file,
+  				focus: false,
+  				save: false
+  			});
+  			if (node) {
+  				if (!canvas.nodes.has(node.id) && typeof canvas.addNode === 'function')
+  					canvas.addNode(node);
+  				return node;
+  			}
+  		}
+  		const id = genId();
+  		while (canvas.nodes.has(id)) id = genId();
+  		canvas.importData({
+  			nodes: [
+  				{
+  					id,
+  					type: 'file',
+  					file: typeof file === 'string' ? file : file.path,
+  					x,
+  					y,
+  					width,
+  					height
+  				}
+  			],
+  			edges: []
+  		});
+  		return canvas.nodes.get(id) || null;
+  	}
+  	/**
   	 * Create a text node at a given position.
   	 */
   	createTextNode(canvas, x, y, text = '', width = 260, height = 60) {
@@ -38977,9 +39030,10 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   		toNode,
   		fromSide = 'right',
   		toSide = 'left',
-  		color
+  		color,
+  		options = {}
   	) {
-  		let id = genId();
+  		let id = options.id || genId();
   		while (canvas.edges.has(id)) id = genId();
   		canvas.importData({
   			edges: [
@@ -38987,17 +39041,43 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   					id,
   					fromNode: fromNode.id,
   					fromSide,
-  					fromEnd: 'none',
+  					fromEnd: options.fromEnd || 'none',
   					toNode: toNode.id,
   					toSide,
-  					toEnd: 'arrow',
-  					...(color ? { color } : {})
+  					toEnd: options.toEnd || 'arrow',
+  					...(color || options.color
+  						? { color: color || options.color }
+  						: {}),
+  					...(options.label !== undefined
+  						? { label: options.label }
+  						: {})
   				}
   			],
   			nodes: []
   		});
   		this.invalidateEdgeIndex();
   		return canvas.edges.get(id) || null;
+  	}
+  	/**
+  	 * Recreate an existing edge after one endpoint has been replaced.
+  	 */
+  	cloneEdge(canvas, edge, replacements) {
+  		const fromNode = replacements.get(edge.from?.node?.id) || edge.from?.node;
+  		const toNode = replacements.get(edge.to?.node?.id) || edge.to?.node;
+  		if (!fromNode || !toNode) return null;
+  		return this.createEdge(
+  			canvas,
+  			fromNode,
+  			toNode,
+  			edge.from?.side || 'right',
+  			edge.to?.side || 'left',
+  			edge.color,
+  			{
+  				fromEnd: edge.from?.end,
+  				toEnd: edge.to?.end,
+  				label: edge.label
+  			}
+  		);
   	}
   	/**
   	 * Remove an edge.
@@ -42435,6 +42515,7 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   		this.Menu = options.Menu || null;
   		this.setIcon = options.setIcon || null;
   		this.buildMenuItems = options.buildMenuItems || (() => {});
+  		this.onDoubleTap = options.onDoubleTap || null;
   		this.isTopicNode =
   			options.isTopicNode ||
   			((node) => !!node && !!node.nodeEl && typeof node.setText === 'function');
@@ -42446,7 +42527,9 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			onDoubleTap: ({ target }) => {
   				const node = this.resolveNode(target);
   				if (node && !node.isEditing) {
-  					dispatchTouchAction('edit', this.actions, this.canvas, node);
+  					if (!this.onDoubleTap || !this.onDoubleTap(node)) {
+  						dispatchTouchAction('edit', this.actions, this.canvas, node);
+  					}
   					this.refresh();
   				}
   			},
@@ -44256,6 +44339,98 @@ var MindmapActions = (() => {
   	);
   }
 
+  /**
+   * Read the first meaningful line of a topic as a clean display title.
+   * Conversion targets file basenames, not Markdown documents, so heading and
+   * list markers are intentionally removed while ordinary punctuation is kept.
+   */
+  function topicTitleFromText(text) {
+  	const source = String(text || '')
+  		.replace(/\r\n?/g, '\n')
+  		.replace(/<!--\s*tomindmap:id=[A-Za-z0-9_-]+\s*-->/gi, '')
+  		.trim();
+  	const firstLine = source.split('\n').find((line) => line.trim()) || '';
+  	const title = firstLine
+  		.replace(
+  			/^!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/,
+  			(_match, target, alias) => alias || target
+  		)
+  		.replace(/^!\[([^\]]*)\]\([^)]*\)/, '$1')
+  		.replace(/^#{1,6}\s+/, '')
+  		.replace(/^[-+*]\s+/, '')
+  		.replace(/^\[[ xX]\]\s+/, '')
+  		.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+  		.replace(/[*_~`]/g, '')
+  		.replace(/\\([\\`*_[\]{}()#+.!>-])/g, '$1')
+  		.trim();
+  	return title || 'Untitled';
+  }
+
+  function topicTitleFromNode(node) {
+  	return topicTitleFromText(
+  		node?.text ?? node?.unknownData?.text ?? node?.label ?? ''
+  	);
+  }
+
+  /** Keep generated note names portable across the platforms Obsidian supports. */
+  function safeTopicFilename(title) {
+  	const value = String(topicTitleFromText(title) || 'Untitled')
+  		.replace(/[\u0000-\u001f\u007f]/g, '')
+  		.replace(/[\\/:*?"<>|]/g, '-')
+  		.replace(/\s+/g, ' ')
+  		.trim()
+  		.replace(/[. ]+$/g, '')
+  		.slice(0, 120)
+  		.trim();
+  	return value || 'Untitled';
+  }
+
+  function nextTopicFilePath(
+  	folderPath,
+  	title,
+  	extension = 'md',
+  	pathExists
+  ) {
+  	const folder = String(folderPath || '')
+  		.replace(/^\/+|\/+$/g, '')
+  		.replace(/\\/g, '/');
+  	const base = safeTopicFilename(title);
+  	const suffixExtension = String(extension || 'md').replace(/^\.+/, '');
+  	const exists = typeof pathExists === 'function' ? pathExists : () => false;
+  	let index = 0;
+  	let candidate;
+  	do {
+  		const suffix = index === 0 ? '' : ` ${index}`;
+  		const basename = `${base}${suffix}`;
+  		candidate = folder
+  			? `${folder}/${basename}.${suffixExtension}`
+  			: `${basename}.${suffixExtension}`;
+  		index++;
+  	} while (exists(candidate));
+  	return candidate;
+  }
+
+  function nextTopicNotePath(folderPath, title, pathExists) {
+  	return nextTopicFilePath(folderPath, title, 'md', pathExists);
+  }
+
+  function isTextTopicNode(node, groupIds = new Set()) {
+  	if (!node || groupIds.has(node.id)) return false;
+  	if (node.file || node.filePath || node.url) return false;
+  	const type = node.type || node.unknownData?.type;
+  	return type !== 'group' && type !== 'file' && type !== 'link';
+  }
+
+  function getTopicBranch(forest, node, includeDescendants = true) {
+  	const findFn = getFindTreeForNode();
+  	const descFn = getGetDescendants();
+  	const treeNode = findFn ? findFn(forest, node?.id) : null;
+  	if (!treeNode) return [];
+  	return includeDescendants && descFn
+  		? [treeNode, ...descFn(treeNode)]
+  		: [treeNode];
+  }
+
   function separateBranch(canvas, canvasApi, node) {
   	if (!canvas || !canvasApi || !node) return false;
 
@@ -44338,7 +44513,14 @@ var MindmapActions = (() => {
   module.exports = {
   	separateBranch,
   	colorBranch,
-  	toggleSubtreeCollapse
+  	toggleSubtreeCollapse,
+  	topicTitleFromText,
+  	topicTitleFromNode,
+  	safeTopicFilename,
+  	nextTopicFilePath,
+  	nextTopicNotePath,
+  	isTextTopicNode,
+  	getTopicBranch
   };
   return module.exports;
 })();
@@ -45332,7 +45514,7 @@ var OutlineView = class extends import_obsidian4.ItemView {
 						if (node.file) {
 							const vaultName = this.app.vault.getName();
 							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(node.file)}`
+								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
 							);
 						} else if (node.url) {
 							void navigator.clipboard.writeText(node.url);
@@ -45436,7 +45618,7 @@ var OutlineView = class extends import_obsidian4.ItemView {
 						if (node.file) {
 							const vaultName = this.app.vault.getName();
 							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(node.file)}`
+								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
 							);
 						} else if (node.url) {
 							void navigator.clipboard.writeText(node.url);
@@ -45841,6 +46023,7 @@ function canvasNodeFilePath(node) {
 	const values = [
 		node?.unknownData?.file,
 		node?.file,
+		node?.filePath,
 		node?.getData?.()?.file
 	];
 	for (const value of values) {
@@ -45918,6 +46101,108 @@ function getRootTitle(text) {
 			.replace(/^[-+*]\s+/, '')
 			.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') || 'Untitled'
 	);
+}
+
+const TOMINMAP_TITLE_ONLY = 'tomindmapTitleOnly';
+const TOMINMAP_CARD_KIND = 'tomindmapCardKind';
+const TOMINMAP_CARD_TITLE = 'tomindmapCardTitle';
+const TOMINMAP_PARENT = 'mindmapParent';
+
+function canvasNodeUnknownData(node) {
+	if (!node) return {};
+	try {
+		if (typeof node.getData === 'function') return node.getData() || {};
+	} catch (_) {}
+	return node.unknownData || {};
+}
+
+function setCanvasNodeUnknownData(node, patch) {
+	if (!node) return;
+	const data = canvasNodeUnknownData(node);
+	if (typeof node.setData === 'function') node.setData({ ...data, ...patch });
+	else node.unknownData = { ...data, ...patch };
+}
+
+function canvasFolderPath(canvas) {
+	return canvas?.view?.file?.parent?.path || '';
+}
+
+function canvasPathFor(canvas) {
+	return canvas?.view?.file?.path || '';
+}
+
+function titleOnlyCardTitle(node) {
+	const data = canvasNodeUnknownData(node);
+	if (data[TOMINMAP_CARD_TITLE]) return data[TOMINMAP_CARD_TITLE];
+	const filePath = canvasNodeFilePath(node);
+	if (filePath) {
+		const basename = filePath.split('/').pop() || filePath;
+		return basename.replace(/\.[^.]+$/, '') || 'Untitled';
+	}
+	return MindmapActions.topicTitleFromNode(node);
+}
+
+function applyTitleOnlyCardMarker(node, kind, title) {
+	if (!node) return;
+	setCanvasNodeUnknownData(node, {
+		[TOMINMAP_TITLE_ONLY]: true,
+		[TOMINMAP_CARD_KIND]: kind,
+		[TOMINMAP_CARD_TITLE]: title || titleOnlyCardTitle(node)
+	});
+	const marker = title || titleOnlyCardTitle(node);
+	const shell =
+		node.nodeEl?.closest?.('.canvas-node') || node.nodeEl;
+	if (!shell) return;
+	shell.toggleClass?.('tomindmap-title-only-card', true);
+	shell.setAttribute?.('data-tomindmap-card-title', marker);
+	shell.setAttribute?.('data-tomindmap-card-kind', kind);
+}
+
+function nodeIsConvertibleTopic(canvas, node) {
+	return MindmapActions.isTextTopicNode(node, getGroupIds(canvas));
+}
+
+function findNativeCanvasMenuItem(menu, titlePattern) {
+	if (!menu || !Array.isArray(menu.items)) return null;
+	return (
+		menu.items.find((item) => {
+			const text = String(
+				item?.titleEl?.textContent ||
+					item?.title ||
+					item?.title__ ||
+					''
+			).trim();
+			return titlePattern.test(text);
+		}) || null
+	);
+}
+
+function replaceNativeCanvasMenuItem(menu, titlePattern, title, icon, onClick) {
+	const item = findNativeCanvasMenuItem(menu, titlePattern);
+	if (!item || typeof item.onClick !== 'function') return false;
+	item.setTitle(title).setIcon(icon).onClick(onClick);
+	return true;
+}
+
+function serializedBranchData(canvas, branchNodes, rootNode) {
+	const data = canvas.getData();
+	const byId = new Map((data.nodes || []).map((item) => [item.id, item]));
+	const rootRecord = byId.get(rootNode.id) || {};
+	const rootX = Number(rootRecord.x ?? rootNode.x) || 0;
+	const rootY = Number(rootRecord.y ?? rootNode.y) || 0;
+	const ids = new Set(branchNodes.map((item) => item.id));
+	const nodes = branchNodes
+		.map((item) => byId.get(item.id))
+		.filter(Boolean)
+		.map((item) => ({
+			...item,
+			x: (Number(item.x) || 0) - rootX,
+			y: (Number(item.y) || 0) - rootY
+		}));
+	const edges = (data.edges || []).filter(
+		(edge) => ids.has(edge.fromNode) && ids.has(edge.toNode)
+	);
+	return { nodes, edges };
 }
 
 // src/import/markdown-mindmap.ts
@@ -47806,7 +48091,8 @@ function canvasPrintDocument(canvas, scope) {
 	const selectedIds = new Set();
 	if (scope === 'selection') {
 		for (const item of canvas.selection) {
-			if (item && 'nodeEl' in item) selectedIds.add(item.id);
+			if (typeof item === 'string') selectedIds.add(item);
+			else if (item && 'nodeEl' in item) selectedIds.add(item.id);
 		}
 	}
 	const records = [];
@@ -47827,8 +48113,17 @@ function canvasPrintDocument(canvas, scope) {
 		)
 			continue;
 		const viewportMode = scope === 'viewport';
+		const titleOnly = !!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY];
 		const rendered =
-			nodeData.type === 'group' ? null : printableNodeSnapshot(node);
+			nodeData.type === 'group' || titleOnly
+				? null
+				: printableNodeSnapshot(node);
+		const displayText =
+			nodeData.type === 'group'
+				? nodeData.label || 'Group'
+				: titleOnly
+					? titleOnlyCardTitle(node)
+					: node.text || canvasNodeMarkdownText(nodeData);
 		const logicalScale = viewportMode
 			? 1
 			: domRect && node.width
@@ -47863,10 +48158,7 @@ function canvasPrintDocument(canvas, scope) {
 			y: viewportMode ? domRect.top - wrapperRect.top : node.y,
 			width: viewportMode ? domRect.width : node.width,
 			height: viewportMode ? domRect.height : node.height,
-			text:
-				nodeData.type === 'group'
-					? nodeData.label || 'Group'
-					: node.text || '',
+			text: displayText,
 			renderedHtml: rendered?.html || '',
 			contentRect,
 			color: node.color || nodeData.color || '',
@@ -48375,6 +48667,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.mediaBtnEl = null;
 		this.cleanupToggleHandler = null;
 		this.cleanupCardSelectionHandler = null;
+		this.cleanupCardDoubleClickHandler = null;
 		this.cleanupGroupBoundsHandler = null;
 		this.cleanupSelectionSyncHandler = null;
 		this.cleanupInsertNodeHandler = null;
@@ -48788,7 +49081,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							if (node.file) {
 								const vaultName = this.app.vault.getName();
 								void navigator.clipboard.writeText(
-									`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(node.file)}`
+									`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
 								);
 							} else if (node.url) {
 								void navigator.clipboard.writeText(node.url);
@@ -48800,6 +49093,85 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							new import_obsidian5.Notice('Node link copied');
 						});
 				});
+				if (
+					canvas &&
+					this.isMindmapCanvas(canvas) &&
+					nodeIsConvertibleTopic(canvas, node)
+				) {
+					const conversionForest = buildForest(canvas);
+					const conversionTree = findTreeForNode(
+						conversionForest,
+						node.id
+					);
+					const hasBranch = !!(
+						conversionTree && conversionTree.children.length > 0
+					);
+					const convertDefaultNotes = () =>
+						void this.convertTopicToCleanNotes(
+							canvas,
+							node,
+							hasBranch
+						);
+					const defaultTitle = hasBranch
+						? 'Convert branch to Markdown file'
+						: 'Convert to clean note';
+					const replacedNativeConvert = replaceNativeCanvasMenuItem(
+						menu,
+						/^Convert to file(?:\.{3}|…)$/i,
+						defaultTitle,
+						hasBranch ? 'file-text' : 'file-plus',
+						convertDefaultNotes
+					);
+					if (!replacedNativeConvert) {
+						menu.addItem((item) => {
+							item.setTitle(defaultTitle)
+								.setIcon(hasBranch ? 'file-text' : 'file-plus')
+								.onClick(convertDefaultNotes);
+						});
+					}
+					if (hasBranch) {
+						menu.addItem((item) => {
+							item.setTitle('Convert this topic to empty note')
+								.setIcon('file-plus')
+								.onClick(() =>
+									void this.convertTopicToCleanNotes(
+										canvas,
+										node,
+										false
+									)
+								);
+						});
+					}
+					menu.addItem((item) => {
+						item.setTitle(
+							hasBranch
+								? 'Convert branch to nested mind map'
+								: 'Convert to nested mind map'
+						)
+							.setIcon('network')
+							.onClick(() =>
+								void this.convertTopicToNestedMindMap(canvas, node)
+							);
+					});
+				}
+				const parentLink = canvas?.getData?.()?.[TOMINMAP_PARENT];
+				const parentForest = canvas ? buildForest(canvas) : [];
+				const parentTree = canvas
+					? findTreeForNode(parentForest, node.id)
+					: null;
+				if (
+					parentLink &&
+					parentTree &&
+					!parentTree.parent
+				) {
+					menu.addItem((item) => {
+						item.setTitle('Go to parent node')
+							.setIcon('arrow-up-left')
+							.onClick(() =>
+								void this.openParentMindMap(canvas, parentLink)
+							);
+					});
+				}
 				if (canvas) {
 					const groupIds = getGroupIds(canvas);
 					const selectedTopics = Array.from(
@@ -49227,6 +49599,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.cleanupCardSelectionHandler();
 			this.cleanupCardSelectionHandler = null;
 		}
+		if (this.cleanupCardDoubleClickHandler) {
+			this.cleanupCardDoubleClickHandler();
+			this.cleanupCardDoubleClickHandler = null;
+		}
 		if (this.autoResizeHandle) {
 			this.autoResizeHandle.cleanup();
 			this.autoResizeHandle = null;
@@ -49352,6 +49728,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.cleanupCardSelectionHandler();
 			this.cleanupCardSelectionHandler = null;
 		}
+		if (this.cleanupCardDoubleClickHandler) {
+			this.cleanupCardDoubleClickHandler();
+			this.cleanupCardDoubleClickHandler = null;
+		}
 		if (this.autoResizeHandle) {
 			this.autoResizeHandle.cleanup();
 			this.autoResizeHandle = null;
@@ -49422,6 +49802,31 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				true
 			);
 		};
+		const onCardDoubleClick = (event) => {
+			if (!this.isMindmapCanvas(canvas)) return;
+			const node = findNodeFromEvent(canvas, event);
+			if (!node || !canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return;
+			const filePath = canvasNodeFilePath(node);
+			const file = this.app.vault.getAbstractFileByPath(filePath);
+			if (!(file instanceof import_obsidian5.TFile)) return;
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation?.();
+			canvas.selectOnly(node);
+			void this.app.workspace.getLeaf(false).openFile(file);
+		};
+		canvas.wrapperEl.addEventListener(
+			'dblclick',
+			onCardDoubleClick,
+			true
+		);
+		this.cleanupCardDoubleClickHandler = () => {
+			canvas.wrapperEl.removeEventListener(
+				'dblclick',
+				onCardDoubleClick,
+				true
+			);
+		};
 		this.cleanupKeyboardHandler =
 			this.keyboardHandler.attachToCanvas(canvas);
 		this.cleanupTouchHandler = null;
@@ -49433,6 +49838,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				setIcon: import_obsidian5.setIcon,
 				isEnabled: () =>
 					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
+				isTopicNode: (node) =>
+					nodeIsConvertibleTopic(canvas, node) ||
+					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
+				onDoubleTap: (node) => {
+					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
+					const file = this.app.vault.getAbstractFileByPath(
+						canvasNodeFilePath(node)
+					);
+					if (!(file instanceof import_obsidian5.TFile)) return false;
+					void this.app.workspace.getLeaf(false).openFile(file);
+					return true;
+				},
 				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
 				buildMenuItems: (menu, node) => {
 					this.app.workspace.trigger('canvas:node-menu', menu, node);
@@ -51210,7 +51627,45 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 		});
 	}
+	async updateNestedParentReferences(oldPath, newPath) {
+		if (!oldPath || !newPath || oldPath === newPath) return;
+		const canvasFiles = (this.app.vault.getFiles?.() || []).filter(
+			(file) =>
+				file instanceof import_obsidian5.TFile &&
+				file.extension === 'canvas' &&
+				file.path !== newPath
+		);
+		for (const file of canvasFiles) {
+			const openCanvas = this.getOpenCanvasByPath(file.path);
+			if (openCanvas) {
+				const data = openCanvas.getData();
+				if (data.mindmapParent?.canvas !== oldPath) continue;
+				data.mindmapParent.canvas = newPath;
+				openCanvas.setData(data);
+				openCanvas.requestSave();
+				continue;
+			}
+			try {
+				const raw = await this.app.vault.cachedRead(file);
+				const data = JSON.parse(raw);
+				if (data.mindmapParent?.canvas !== oldPath) continue;
+				data.mindmapParent.canvas = newPath;
+				await this.app.vault.modify(file, JSON.stringify(data, null, '\t'));
+			} catch (error) {
+				console.warn(
+					`ToMindMap: could not update parent link in ${file.path}`,
+					error
+				);
+			}
+		}
+	}
 	async handleSyncedFileRename(file, oldPath) {
+		if (
+			file instanceof import_obsidian5.TFile &&
+			file.extension === 'canvas'
+		) {
+			await this.updateNestedParentReferences(oldPath, file.path);
+		}
 		if (this.markdownSyncIndex.has(oldPath)) {
 			const canvasPaths = Array.from(this.markdownSyncIndex.get(oldPath));
 			this.markdownSyncIndex.delete(oldPath);
@@ -51251,6 +51706,345 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (String(path).toLowerCase().endsWith('.canvas'))
 			this.unindexCanvas(path);
 	}
+	async createCleanNoteForTopic(canvas, node, title, content = '') {
+		const folder = canvasFolderPath(canvas);
+		const path = MindmapActions.nextTopicFilePath(
+			folder,
+			title,
+			'md',
+			(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+		);
+		return this.app.vault.create(path, content);
+	}
+
+	createTitleOnlyFileCard(canvas, file, sourceNode, kind, title) {
+		const width = Number(sourceNode?.width) || this.settings.defaultNodeWidth;
+		const height =
+			Number(sourceNode?.height) || this.settings.defaultNodeHeight;
+		const card = this.canvasApi.createFileNode(
+			canvas,
+			file,
+			Number(sourceNode?.x) || 0,
+			Number(sourceNode?.y) || 0,
+			width,
+			height
+		);
+		if (!card) throw new Error('Canvas could not create a file card');
+		const sourceData = canvasNodeUnknownData(sourceNode);
+		const patch = {
+			...(sourceData.collapsed !== undefined
+				? { collapsed: sourceData.collapsed }
+				: {})
+		};
+		setCanvasNodeUnknownData(card, patch);
+		if (sourceNode?.color && typeof card.setColor === 'function')
+			card.setColor(sourceNode.color);
+		applyTitleOnlyCardMarker(card, kind, title);
+		return card;
+	}
+
+	cloneEdgesAroundReplacedNodes(
+		canvas,
+		oldNodes,
+		replacements,
+		includeInternal,
+		onlyNodeId = null
+	) {
+		const oldIds = new Set(oldNodes.map((node) => node.id));
+		const edges = Array.from(canvas.edges?.values?.() || []);
+		for (const edge of edges) {
+			const fromId = edge.from?.node?.id;
+			const toId = edge.to?.node?.id;
+			const touchesOld = onlyNodeId
+				? fromId === onlyNodeId || toId === onlyNodeId
+				: oldIds.has(fromId) || oldIds.has(toId);
+			if (!touchesOld) continue;
+			if (!includeInternal && oldIds.has(fromId) && oldIds.has(toId))
+				continue;
+			this.canvasApi.cloneEdge(canvas, edge, replacements);
+		}
+	}
+
+	async convertTopicBranchToMarkdownFile(canvas, node) {
+		if (!canvas || !node || !nodeIsConvertibleTopic(canvas, node)) {
+			new import_obsidian5.Notice('Select a text topic to convert');
+			return [];
+		}
+		const forest = buildForest(canvas);
+		const treeNode = findTreeForNode(forest, node.id);
+		if (!treeNode || treeNode.children.length === 0) return [];
+		const branch = MindmapActions.getTopicBranch(forest, node, true).map(
+			(item) => item.canvasNode
+		);
+		const title = MindmapActions.topicTitleFromNode(node);
+		const exported = portableMindMapMarkdown(canvas, [treeNode]);
+		const content = exported.trim() ? exported : `# ${title}\n`;
+		let file = null;
+		let card = null;
+		try {
+			file = await this.createCleanNoteForTopic(
+				canvas,
+				node,
+				title,
+				content
+			);
+			card = this.createTitleOnlyFileCard(
+				canvas,
+				file,
+				node,
+				'branch-note',
+				title
+			);
+			const replacements = new Map([[node.id, card]]);
+			this.cloneEdgesAroundReplacedNodes(
+				canvas,
+				branch,
+				replacements,
+				false,
+				node.id
+			);
+			for (const topic of branch.slice().reverse())
+				this.canvasApi.removeNode(canvas, topic);
+			this.canvasApi.invalidateEdgeIndex();
+			if (canvas.selection?.has?.(node)) {
+				canvas.deselectAll?.();
+				canvas.select?.(card);
+			}
+			this.markMarkdownOrderDirty(canvas);
+			if (this.isMindmapCanvas(canvas)) {
+				this.layoutEngine.layout(canvas);
+				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
+			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
+			canvas.requestSave();
+			this.refreshOutline(canvas);
+			new import_obsidian5.Notice(
+				`Exported branch to "${file.path}"`
+			);
+			return [file];
+		} catch (error) {
+			console.error('ToMindMap: branch Markdown export failed', error);
+			if (card) {
+				try {
+					this.canvasApi.removeNode(canvas, card);
+				} catch (_) {}
+			}
+			if (file) {
+				try {
+					await this.app.vault.delete(file);
+				} catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not export the branch as Markdown');
+			return [];
+		}
+	}
+
+	async convertTopicToCleanNotes(canvas, node, includeDescendants = false) {
+		if (!canvas || !node || !nodeIsConvertibleTopic(canvas, node)) {
+			new import_obsidian5.Notice('Select a text topic to convert');
+			return [];
+		}
+		const forest = buildForest(canvas);
+		if (includeDescendants) {
+			const treeNode = findTreeForNode(forest, node.id);
+			if (treeNode && treeNode.children.length > 0)
+				return this.convertTopicBranchToMarkdownFile(canvas, node);
+		}
+		const branch = MindmapActions.getTopicBranch(
+			forest,
+			node,
+			includeDescendants
+		)
+			.map((item) => item.canvasNode)
+			.filter((item) => nodeIsConvertibleTopic(canvas, item));
+		if (branch.length === 0) return [];
+		const createdFiles = [];
+		const createdCards = [];
+		const replacements = new Map();
+		try {
+			for (const topic of branch) {
+				const title = MindmapActions.topicTitleFromNode(topic);
+				const file = await this.createCleanNoteForTopic(canvas, topic, title);
+				createdFiles.push(file);
+				const card = this.createTitleOnlyFileCard(
+					canvas,
+					file,
+					topic,
+					'note',
+					title
+				);
+				createdCards.push(card);
+				replacements.set(topic.id, card);
+			}
+			this.cloneEdgesAroundReplacedNodes(
+				canvas,
+				branch,
+				replacements,
+				true
+			);
+			const selectedIds = new Set(
+				Array.from(canvas.selection || [])
+					.filter((item) => item && 'nodeEl' in item)
+					.map((item) => item.id)
+			);
+			for (const topic of branch) this.canvasApi.removeNode(canvas, topic);
+			this.canvasApi.invalidateEdgeIndex();
+			if (selectedIds.size > 0) {
+				canvas.deselectAll?.();
+				for (const [oldId, card] of replacements) {
+					if (selectedIds.has(oldId)) canvas.select?.(card);
+				}
+			}
+			this.markMarkdownOrderDirty(canvas);
+			if (this.isMindmapCanvas(canvas)) {
+				this.layoutEngine.layout(canvas);
+				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
+			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
+			canvas.requestSave();
+			this.refreshOutline(canvas);
+			new import_obsidian5.Notice(
+				`Created ${createdFiles.length} clean note${createdFiles.length === 1 ? '' : 's'}`
+			);
+			return createdFiles;
+		} catch (error) {
+			console.error('ToMindMap: clean-note conversion failed', error);
+			for (const card of createdCards) {
+				try {
+					this.canvasApi.removeNode(canvas, card);
+				} catch (_) {}
+			}
+			for (const file of createdFiles) {
+				try {
+					await this.app.vault.delete(file);
+				} catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not create the clean note');
+			return [];
+		}
+	}
+
+	async convertTopicToNestedMindMap(canvas, node) {
+		if (!canvas || !node || !nodeIsConvertibleTopic(canvas, node)) {
+			new import_obsidian5.Notice('Select a text topic to convert');
+			return null;
+		}
+		const forest = buildForest(canvas);
+		const branchTrees = MindmapActions.getTopicBranch(forest, node, true);
+		const branch = branchTrees
+			.map((item) => item.canvasNode)
+			.filter((item) => !getGroupIds(canvas).has(item.id));
+		if (branch.length === 0) return null;
+		const rootNode = branch[0];
+		const parentPath = canvasPathFor(canvas);
+		const nested = serializedBranchData(canvas, branch, rootNode);
+		nested.mindmap = true;
+		nested.mindmapNestedVersion = 1;
+		nested.mindmapPendingResize = nested.nodes.map((item) => item.id);
+		const nestedPath = MindmapActions.nextTopicFilePath(
+			canvasFolderPath(canvas),
+			MindmapActions.topicTitleFromNode(rootNode),
+			'canvas',
+			(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+		);
+		let created = null;
+		let card = null;
+		try {
+			created = await this.app.vault.create(
+				nestedPath,
+				JSON.stringify(nested, null, '\t')
+			);
+			card = this.createTitleOnlyFileCard(
+				canvas,
+				created,
+				rootNode,
+				'nested-map',
+				MindmapActions.topicTitleFromNode(rootNode)
+			);
+			nested.mindmapParent = {
+				canvas: parentPath,
+				nodeId: card.id
+			};
+			await this.app.vault.modify(
+				created,
+				JSON.stringify(nested, null, '\t')
+			);
+			const replacements = new Map([[rootNode.id, card]]);
+			this.cloneEdgesAroundReplacedNodes(
+				canvas,
+				branch,
+				replacements,
+				false,
+				rootNode.id
+			);
+			for (const topic of branch.slice().reverse())
+				this.canvasApi.removeNode(canvas, topic);
+			this.canvasApi.invalidateEdgeIndex();
+			this.markMarkdownOrderDirty(canvas);
+			if (this.isMindmapCanvas(canvas)) {
+				this.layoutEngine.layout(canvas);
+				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
+			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
+			canvas.requestSave();
+			this.refreshOutline(canvas);
+			new import_obsidian5.Notice(
+				`Moved ${branch.length} topic${branch.length === 1 ? '' : 's'} to ${created.path}`
+			);
+			return { file: created, card, data: nested };
+		} catch (error) {
+			console.error('ToMindMap: nested mind-map conversion failed', error);
+			if (card) {
+				try {
+					this.canvasApi.removeNode(canvas, card);
+				} catch (_) {}
+			}
+			if (created) {
+				try {
+					await this.app.vault.delete(created);
+				} catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not create the nested mind map');
+			return null;
+		}
+	}
+
+	async openParentMindMap(canvas, parent) {
+		const parentPath = parent?.canvas;
+		const parentNodeId = parent?.nodeId;
+		if (!parentPath || !parentNodeId) {
+			new import_obsidian5.Notice('This mind map has no parent link');
+			return;
+		}
+		const file = this.app.vault.getAbstractFileByPath(parentPath);
+		if (!(file instanceof import_obsidian5.TFile)) {
+			new import_obsidian5.Notice('The parent mind map no longer exists');
+			return;
+		}
+		try {
+			const leaf = this.app.workspace.getLeaf(false);
+			await leaf.openFile(file);
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			const parentCanvas = this.getOpenCanvasByPath(parentPath);
+			const target = parentCanvas?.nodes.get(parentNodeId);
+			if (!target) {
+				new import_obsidian5.Notice('The parent topic could not be found');
+				return;
+			}
+			this.canvasApi.selectForNavigation(
+				parentCanvas,
+				target,
+				this.settings.navigationZoomPadding
+			);
+		} catch (error) {
+			console.error('ToMindMap: parent navigation failed', error);
+			new import_obsidian5.Notice('Could not open the parent mind map');
+		}
+	}
+
 	async convertMarkdownFileToMindMap(file) {
 		try {
 			const markdown = await this.app.vault.cachedRead(file);
@@ -51564,11 +52358,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			: { incoming: new Map(), outgoing: new Map() };
 		for (const node of canvas.nodes.values()) {
 			if (!node || !node.nodeEl) continue;
-			const type = node.file
+			const nodeFilePath = canvasNodeFilePath(node);
+			const nodeUrl = canvasNodeUrl(node);
+			const nodeData = canvasNodeUnknownData(node);
+			const titleOnly = !!nodeData[TOMINMAP_TITLE_ONLY];
+			const type = nodeFilePath
 				? 'file'
 				: node.unknownData?.type === 'group' || node.type === 'group'
 					? 'group'
-					: node.url
+					: nodeUrl
 						? 'link'
 						: hasAsyncRenderableContent(node.text)
 							? 'embedded'
@@ -51614,6 +52412,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			])) {
 				if (!element) continue;
 				element.setAttribute('data-node-type', type);
+				if (titleOnly) {
+					element.setAttribute(
+						'data-tomindmap-card-title',
+						nodeData[TOMINMAP_CARD_TITLE] || titleOnlyCardTitle(node)
+					);
+					element.setAttribute(
+						'data-tomindmap-card-kind',
+						nodeData[TOMINMAP_CARD_KIND] || 'note'
+					);
+				} else {
+					element.removeAttribute('data-tomindmap-card-title');
+					element.removeAttribute('data-tomindmap-card-kind');
+				}
 				if (typeof element.toggleClass === 'function') {
 					element.toggleClass(
 						'tomindmap-plain-card',
@@ -51624,6 +52435,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						type !== 'text'
 					);
 					element.toggleClass(ROOT_TOPIC_CLASS, isRootTopic);
+					element.toggleClass(
+						'tomindmap-title-only-card',
+						titleOnly && element === shell
+					);
 				} else {
 					element.classList?.toggle(
 						'tomindmap-plain-card',
@@ -51636,6 +52451,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					element.classList?.toggle(
 						ROOT_TOPIC_CLASS,
 						isRootTopic
+					);
+					element.classList?.toggle(
+						'tomindmap-title-only-card',
+						titleOnly && element === shell
 					);
 				}
 			}
@@ -52867,6 +53686,305 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		}
 	}
+	async prepareCanvasForExport(canvas, includeNestedMaps = false) {
+		if (!includeNestedMaps) return canvas;
+		const sourceData = canvas.getData();
+		const cache = new Map();
+		const active = new Set([canvasPathFor(canvas)].filter(Boolean));
+		let sequence = 0;
+		const filePathOf = (node) =>
+			String(node?.file || '')
+				.split('#')[0]
+				.split('?')[0];
+		const isNestedCard = (node) =>
+			node?.type === 'file' && /\.canvas$/i.test(filePathOf(node));
+		const nodeText = (node) => {
+			if (node?.type === 'group') return node.label || 'Group';
+			if (node?.type === 'file') {
+				if (node[TOMINMAP_CARD_TITLE]) return node[TOMINMAP_CARD_TITLE];
+				const path = filePathOf(node);
+				return path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'File';
+			}
+			return getRootTitle(canvasNodeMarkdownText(node));
+		};
+		const rectOf = (node) => ({
+			x: Number(node.x) || 0,
+			y: Number(node.y) || 0,
+			width: Number(node.width) || 260,
+			height: Number(node.height) || 60
+		});
+		const intersects = (left, right, gap = 42) =>
+			!(
+				left.x + left.width + gap <= right.x ||
+				right.x + right.width + gap <= left.x ||
+				left.y + left.height + gap <= right.y ||
+				right.y + right.height + gap <= left.y
+			);
+		const groupBounds = (nodes) => {
+			const rects = nodes.map(rectOf);
+			const minX = Math.min(...rects.map((item) => item.x));
+			const minY = Math.min(...rects.map((item) => item.y));
+			const maxX = Math.max(...rects.map((item) => item.x + item.width));
+			const maxY = Math.max(...rects.map((item) => item.y + item.height));
+			return {
+				x: minX,
+				y: minY,
+				width: Math.max(1, maxX - minX),
+				height: Math.max(1, maxY - minY)
+			};
+		};
+		const translate = (nodes, dx, dy) =>
+			nodes.map((node) => ({ ...node, x: (Number(node.x) || 0) + dx, y: (Number(node.y) || 0) + dy }));
+		const placeGroup = (nodes, anchor, occupied) => {
+			if (nodes.length === 0) return [];
+			const root = nodes[0];
+			const base = translate(
+				nodes,
+				rectOf(anchor).x - rectOf(root).x,
+				rectOf(anchor).y - rectOf(root).y
+			);
+			const bounds = groupBounds(base);
+			const stepX = Math.max(120, bounds.width + 72);
+			const stepY = Math.max(100, bounds.height + 72);
+			const candidates = [
+				[0, 0],
+				[stepX, 0],
+				[-stepX, 0],
+				[0, stepY],
+				[0, -stepY],
+				[stepX, stepY],
+				[-stepX, stepY],
+				[stepX, -stepY],
+				[-stepX, -stepY]
+			];
+			for (const [dx, dy] of candidates) {
+				const candidate = translate(base, dx, dy);
+				const candidateBounds = groupBounds(candidate);
+				if (
+					occupied.every((item) => !intersects(candidateBounds, item))
+				)
+					return candidate;
+			}
+			for (let ring = 2; ring <= 12; ring++) {
+				for (const [dx, dy] of [
+					[1, 0],
+					[0, 1],
+					[-1, 0],
+					[0, -1],
+					[1, 1],
+					[-1, 1],
+					[1, -1],
+					[-1, -1]
+				]) {
+					const candidate = translate(
+						base,
+						dx * stepX * ring,
+						dy * stepY * ring
+					);
+					const candidateBounds = groupBounds(candidate);
+					if (
+						occupied.every(
+							(item) => !intersects(candidateBounds, item)
+						)
+					)
+						return candidate;
+				}
+			}
+			const occupiedBottom = occupied.length
+				? Math.max(...occupied.map((item) => item.y + item.height))
+				: rectOf(anchor).y;
+			return translate(
+				base,
+				0,
+				occupiedBottom + stepY - rectOf(base).y
+			);
+		};
+		const loadCanvas = async (path) => {
+			if (!path || active.has(path)) return null;
+			if (cache.has(path)) return cache.get(path);
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof import_obsidian5.TFile)) {
+				cache.set(path, null);
+				return null;
+			}
+			try {
+				const data = JSON.parse(await this.app.vault.cachedRead(file));
+				cache.set(path, data);
+				return data;
+			} catch (error) {
+				console.warn(`ToMindMap: could not read nested map ${path}`, error);
+				cache.set(path, null);
+				return null;
+			}
+		};
+		const expandLevel = async (data, prefix, occupied, ancestry) => {
+			const sourceNodes = Array.isArray(data?.nodes) ? data.nodes : [];
+			const nodes = sourceNodes.map((node) => ({
+				...node,
+				id: `${prefix}${node.id}`
+			}));
+			const byId = new Map(nodes.map((node) => [node.id, node]));
+			const sourceEdges = Array.isArray(data?.edges) ? data.edges : [];
+			const output = [];
+			const outputEdges = [];
+			const replacements = new Map();
+			const nestedCards = new Set(
+				nodes.filter((node) => isNestedCard(node)).map((node) => node.id)
+			);
+			const occupiedHere = occupied.slice();
+			for (const node of nodes) {
+				if (!nestedCards.has(node.id)) {
+					output.push(node);
+					occupiedHere.push(rectOf(node));
+				}
+			}
+			for (const node of nodes) {
+				if (!nestedCards.has(node.id)) continue;
+				const path = filePathOf(node);
+				const nested = await loadCanvas(path);
+				if (!nested || ancestry.has(path)) {
+					output.push(node);
+					occupiedHere.push(rectOf(node));
+					continue;
+				}
+				const childPrefix = `${prefix}map-${sequence++}-`;
+				const child = await expandLevel(
+					nested,
+					childPrefix,
+					occupiedHere,
+					new Set([...ancestry, path])
+				);
+				if (child.nodes.length === 0) {
+					output.push(node);
+					occupiedHere.push(rectOf(node));
+					continue;
+				}
+				const childRootId = child.rootIds[0] || child.nodes[0]?.id;
+				const childRoot =
+					child.nodes.find((item) => item.id === childRootId) ||
+					child.nodes[0];
+				const orderedChildNodes = childRoot
+					? [
+							childRoot,
+							...child.nodes.filter((item) => item.id !== childRoot.id)
+						]
+					: [];
+				const placed = placeGroup(
+					orderedChildNodes,
+					node,
+					occupiedHere
+				);
+				output.push(...placed);
+				outputEdges.push(...child.edges);
+				for (const placedNode of placed) occupiedHere.push(rectOf(placedNode));
+				replacements.set(node.id, child.rootIds);
+			}
+			const mapEndpoint = (id) => replacements.get(id)?.[0] || id;
+			for (const edge of sourceEdges) {
+				const fromNode = mapEndpoint(`${prefix}${edge.fromNode}`);
+				const toNode = mapEndpoint(`${prefix}${edge.toNode}`);
+				if (!byId.has(`${prefix}${edge.fromNode}`) || !byId.has(`${prefix}${edge.toNode}`))
+					continue;
+				outputEdges.push({
+					...edge,
+					id: `${prefix}edge-${edge.id || `${sourceEdges.indexOf(edge)}`}`,
+					fromNode,
+					toNode
+				});
+			}
+			const incoming = new Set(outputEdges.map((edge) => edge.toNode));
+			const rootIds = output
+				.filter((node) => !incoming.has(node.id))
+				.map((node) => node.id);
+			if (rootIds.length === 0 && output.length > 0) rootIds.push(output[0].id);
+			return {
+				nodes: output,
+				edges: outputEdges,
+				rootIds,
+				replacements
+			};
+		};
+		const expanded = await expandLevel(sourceData, '', [], active);
+		const exportData = {
+			...sourceData,
+			nodes: expanded.nodes,
+			edges: expanded.edges
+		};
+		const wrapperRect =
+			canvas.wrapperEl?.getBoundingClientRect?.() || {
+				left: 0,
+				top: 0,
+				width: 0,
+				height: 0
+			};
+		const referenceNode = Array.from(canvas.nodes.values()).find(
+			(node) =>
+				node.nodeEl &&
+				typeof node.nodeEl.getBoundingClientRect === 'function' &&
+				node.width
+		);
+		const referenceRect = referenceNode?.nodeEl?.getBoundingClientRect?.();
+		const exportScale =
+			referenceRect && referenceNode?.width
+				? referenceRect.width / referenceNode.width
+				: 1;
+		const exportOffsetX = referenceRect
+			? referenceRect.left - referenceNode.x * exportScale
+			: wrapperRect.left;
+		const exportOffsetY = referenceRect
+			? referenceRect.top - referenceNode.y * exportScale
+			: wrapperRect.top;
+		const exportNodeElement = (node) => {
+			const x = exportOffsetX + (Number(node.x) || 0) * exportScale;
+			const y = exportOffsetY + (Number(node.y) || 0) * exportScale;
+			const width = (Number(node.width) || 260) * exportScale;
+			const height = (Number(node.height) || 60) * exportScale;
+			return {
+				parentElement: null,
+				querySelector: () => null,
+				matches: () => false,
+				getBoundingClientRect: () => ({
+					left: x,
+					top: y,
+					right: x + width,
+					bottom: y + height,
+					width,
+					height
+				})
+			};
+		};
+		const exportSelection = new Set();
+		for (const item of canvas.selection || []) {
+			const id = typeof item === 'string' ? item : item?.id;
+			if (!id) continue;
+			const roots = expanded.replacements.get(id) || [id];
+			for (const rootId of roots) exportSelection.add(rootId);
+		}
+		const syntheticNodes = new Map(
+			expanded.nodes.map((node) => [
+				node.id,
+				{
+					id: node.id,
+					x: Number(node.x) || 0,
+					y: Number(node.y) || 0,
+					width: Number(node.width) || 260,
+					height: Number(node.height) || 60,
+					color: node.color || '',
+					text: nodeText(node),
+					nodeEl: exportNodeElement(node),
+					contentEl: null
+				}
+			])
+		);
+		return {
+			wrapperEl: canvas.wrapperEl,
+			view: canvas.view,
+			selection: exportSelection,
+			nodes: syntheticNodes,
+			edges: new Map(),
+			getData: () => exportData
+		};
+	}
 	openExportModal(canvas) {
 		new ExportMindMapModal(this.app, canvas.selection.size > 0, (request) =>
 			this.exportMindMap(canvas, request)
@@ -52879,9 +53997,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return;
 		}
 		if (request.format === 'pdf') {
-			await this.exportMindMapPdf(canvas, scope);
+			await this.exportMindMapPdf(
+				canvas,
+				scope,
+				request.includeNestedMaps
+			);
 			return;
 		}
+		const exportCanvas = await this.prepareCanvasForExport(
+			canvas,
+			request.includeNestedMaps
+		);
 		const base =
 			canvas.view && canvas.view.file
 				? canvas.view.file.basename
@@ -52894,7 +54020,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					: 'Selection';
 		try {
 			if (request.format === 'markdown') {
-				const markdown = portableMindMapMarkdown(canvas);
+				const markdown = portableMindMapMarkdown(exportCanvas);
 				const filename = await saveToDownloads(
 					base,
 					'Mind map',
@@ -52906,7 +54032,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				);
 				return;
 			}
-			const html = canvasPrintDocument(canvas, scope);
+			const html = canvasPrintDocument(exportCanvas, scope);
 			if (!html)
 				throw new Error('Nothing is available in that export area');
 			const embedded = await embedDocumentAssets(
@@ -52929,7 +54055,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			if (request.format === 'png') {
 				const ownerDocument =
-					canvas.wrapperEl.ownerDocument || document;
+					exportCanvas.wrapperEl.ownerDocument || document;
 				let svg = pdfSvgFromDocument(embedded, false);
 				if (!svg) throw new Error('Could not build image');
 				let bytes;
@@ -52961,8 +54087,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		}
 	}
-	async exportMindMapPdf(canvas, scope) {
-		const html = canvasPrintDocument(canvas, scope);
+	async exportMindMapPdf(canvas, scope, includeNestedMaps = false) {
+		const exportCanvas = await this.prepareCanvasForExport(
+			canvas,
+			includeNestedMaps
+		);
+		const html = canvasPrintDocument(exportCanvas, scope);
 		if (!html) {
 			new import_obsidian5.Notice(
 				scope === 'selection'

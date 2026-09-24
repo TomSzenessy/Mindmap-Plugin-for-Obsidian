@@ -16,6 +16,12 @@ Tap a topic to select it and a floating toolbar appears at the bottom: edit, add
 
 On the computer nothing changes: Tab and Enter grow the map, arrows navigate, and every keybind keeps working. The touch toolbar is a setting away if you want it on or off on any device.
 
+## Linked topics and nested maps
+
+Right-click a text topic to create an empty, title-named Markdown note, export a whole branch as one title-named Markdown file containing its hierarchy, or move the branch into a separate nested mind map. Generated cards show only their title, open the target on double-click, and remain ordinary Canvas file links so Obsidian can index them. A nested map remembers its immediate parent; right-click its main topic and choose **Go to parent node** to return there.
+
+The export dialog includes **Include nested maps**. When enabled, linked nested maps are expanded into the exported map and placed in available space so cards do not overlap.
+
 ## Development
 
 Runtime modules live in `lib/`, the plugin source in `src/main.js`; `npm run build` embeds the modules into the `main.js` distributable. `npm run check` verifies the bundle is current and runs the test suite (`node --test`). Exports (SVG/PDF/PNG) run through a bundled vector pipeline; on devices without filesystem access they go to the platform download pipeline instead of `~/Downloads`.

@@ -103,8 +103,8 @@ jobs:
           archive="tomindmap-${tag}.zip"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$archive" --clobber
-            echo "Release $tag already exists; refreshed its plugin asset."
+            echo "Release $tag already exists; leaving the immutable release unchanged."
+            echo "Bump package.json and manifest.json to publish the next version."
           elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
             gh release create "$tag" "$archive" \
               --verify-tag \

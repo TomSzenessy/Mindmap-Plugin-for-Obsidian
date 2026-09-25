@@ -43165,16 +43165,18 @@ var {
   		const cached = this.graphQueries.get(canvas);
   		if (
   			cached &&
+  			cached.revision === this.graphRevision &&
   			cached.nodeCount === (canvas?.nodes?.size || 0) &&
   			cached.edgeCount === (canvas?.edges?.size || 0)
   		)
   			return cached;
-  		const query = new CanvasGraphQuery(canvas, ++this.graphRevision);
+  		const query = new CanvasGraphQuery(canvas, this.graphRevision);
   		this.graphQueries.set(canvas, query);
   		return query;
   	}
 
   	invalidateGraphQuery() {
+  		this.graphRevision++;
   		this.graphQueries = /* @__PURE__ */ new WeakMap();
   	}
 
@@ -43406,8 +43408,18 @@ var {
   	 * Remove a node and all its connected edges.
   	 */
   	removeNode(canvas, node) {
-  		const connectedEdges = this.getConnectedEdges(canvas, node);
-  		for (const edge of connectedEdges) {
+  		const nodeId = node?.id;
+  		const toRemove = new Set(this.getConnectedEdges(canvas, node));
+  		if (canvas?.edges && nodeId) {
+  			for (const edge of canvas.edges.values()) {
+  				const fromId = edge.from?.node?.id || edge.fromNode;
+  				const toId = edge.to?.node?.id || edge.toNode;
+  				if (fromId === nodeId || toId === nodeId) {
+  					toRemove.add(edge);
+  				}
+  			}
+  		}
+  		for (const edge of toRemove) {
   			canvas.removeEdge(edge);
   		}
   		canvas.removeNode(node);
@@ -44913,7 +44925,8 @@ var {
       idSeen = true;
       if (typeof node.file !== "string" || !node.file) continue;
       if (extensionOf(node.file) !== CANVAS_EXTENSION) continue;
-      if (node.unknownData?.[CARD_KIND_KEY] !== NESTED_MAP_CARD_KIND)
+      const cardKind = node.unknownData?.[CARD_KIND_KEY] ?? node[CARD_KIND_KEY];
+      if (cardKind !== NESTED_MAP_CARD_KIND)
         continue;
       found = node;
     }
@@ -44921,8 +44934,8 @@ var {
   }
 
   function cardSyncState(card) {
-    const data = card?.unknownData;
-    if (!isObject(data) || !Object.prototype.hasOwnProperty.call(data, CARD_SYNC_KEY))
+    const data = isObject(card?.unknownData) ? card.unknownData : (card || {});
+    if (!Object.prototype.hasOwnProperty.call(data, CARD_SYNC_KEY))
       return { present: false, invalid: false, syncId: null };
     const stored = data[CARD_SYNC_KEY];
     if (typeof stored !== "string" || !SYNC_ID_PATTERN.test(stored))
@@ -44932,7 +44945,8 @@ var {
 
   function cardUnknownDataPatch(card, syncId) {
     const patch = {};
-    for (const [key, value] of Object.entries(card.unknownData)) {
+    const data = isObject(card?.unknownData) ? card.unknownData : (card || {});
+    for (const [key, value] of Object.entries(data)) {
       if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
       if (!PRIVATE_OWNERSHIP_KEYS.has(key)) patch[key] = value;
     }
@@ -45030,7 +45044,7 @@ var {
     const record = await readCanvasRecord(args.vault, file);
     if (!record) return reject(LINK_REASON.NOT_CANVAS);
     const card = findNestedMapCard(record, rawLink.nodeId);
-    if (!card || !isObject(card.unknownData)) return reject(LINK_REASON.NO_PARENT_CARD);
+    if (!card) return reject(LINK_REASON.NO_PARENT_CARD);
     const cardClaim = cardSyncState(card);
     if (cardClaim.invalid) return reject(LINK_REASON.MALFORMED_TARGET);
     const previousSyncId = cardClaim.syncId;
@@ -50682,18 +50696,38 @@ var TreeDrag = (() => {
     draggedNode,
     exceptEdge = null
   ) {
-    if (!canvasApi.getIncomingEdges) {
-      return;
+    const toDelete = new Set();
+
+    if (canvasApi?.getIncomingEdges) {
+      const incomingEdges =
+        canvasApi.getIncomingEdges(canvas, draggedNode) || [];
+      for (const edge of incomingEdges) {
+        if (edge && edge !== exceptEdge) {
+          toDelete.add(edge);
+        }
+      }
     }
 
-    const incomingEdges =
-      canvasApi.getIncomingEdges(canvas, draggedNode) || [];
-
-    for (const edge of incomingEdges) {
-      if (edge === exceptEdge) continue;
-      if (canvasApi.removeEdge) {
-        canvasApi.removeEdge(canvas, edge);
+    if (canvas?.edges) {
+      for (const edge of canvas.edges.values()) {
+        if (!edge || edge === exceptEdge) continue;
+        const toId = edge.to?.node?.id || edge.to?.node || edge.toNode;
+        if (toId === draggedNode?.id) {
+          toDelete.add(edge);
+        }
       }
+    }
+
+    for (const edge of toDelete) {
+      if (canvasApi?.removeEdge) {
+        canvasApi.removeEdge(canvas, edge);
+      } else if (canvas?.removeEdge) {
+        canvas.removeEdge(edge);
+      }
+    }
+
+    if (canvasApi?.invalidateEdgeIndex) {
+      canvasApi.invalidateEdgeIndex();
     }
   }
 
@@ -58346,10 +58380,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const targetHeight = Number(rootNode.height) || this.settings.defaultNodeHeight;
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
+			if (canvas?.edges && canvas?.nodes) {
+				for (const edge of Array.from(canvas.edges.values())) {
+					const fromId = edge.from?.node?.id || edge.fromNode;
+					const toId = edge.to?.node?.id || edge.toNode;
+					if (!canvas.nodes.has(fromId) || !canvas.nodes.has(toId)) {
+						this.canvasApi.removeEdge(canvas, edge);
+					}
+				}
+			}
 			this.canvasApi.invalidateEdgeIndex();
-			// The old topic is detached now; passing it to the layout engine would
-			// trigger a full-map relayout and move the replacement. Keep the new
-			// file card exactly where the selected topic was.
 			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
 			if (typeof card.moveAndResize === 'function') {
 				card.moveAndResize({
@@ -58363,6 +58403,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				card.width = targetWidth;
 				card.height = targetHeight;
 			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
 			for (const edge of canvas.edges?.values?.() || []) {
 				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
 					edge.render?.();
@@ -58415,9 +58457,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			new import_obsidian5.Notice('This mind map has no parent link');
 			return;
 		}
-		const resolved = await this.resolveParentLinkForCanvas(canvas, parent);
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parent, { confirmLegacy: true });
 		if (!resolved.ok) {
-			new import_obsidian5.Notice(`Could not open the parent mind map: ${resolved.reason}`);
+			const reasonMessages = {
+				'not-canvas': 'The parent canvas file could not be found',
+				'no-parent-card': 'The parent card could not be found in the parent canvas',
+				'no-link': 'This mind map has no parent link',
+				'needs-confirmation': 'Parent link requires confirmation',
+				'unowned-target': 'The parent card is linked to a different mind map',
+				'already-owned': 'The parent card is already owned by another canvas'
+			};
+			const msg = reasonMessages[resolved.reason] || `Could not open the parent mind map: ${resolved.reason}`;
+			new import_obsidian5.Notice(msg);
 			return;
 		}
 		const file = resolved.link.file;

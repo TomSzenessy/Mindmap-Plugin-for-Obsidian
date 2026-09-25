@@ -492,6 +492,47 @@ test("adoption does not write proof, secret, or records into a parent Canvas car
   assert.equal(result.ok, true);
 });
 
+test("resolves and adopts a parent card when card properties are serialized at top-level without unknownData", async () => {
+  const syncId = createSyncId();
+  const parent = canvasFile("Maps/Parent.canvas", [
+    {
+      id: "card-disk",
+      type: "file",
+      file: "Maps/Child.canvas",
+      tomindmapTitleOnly: true,
+      tomindmapCardKind: "nested-map",
+      tomindmapCardTitle: "Child",
+      tomindmapSyncId: syncId
+    }
+  ]);
+  const vault = disposableVault({ [parent.path]: parent });
+  const registry = createMarkdownSyncOwnership();
+  const issued = registry.issueRecord({
+    canvasPath: "Maps/Child.canvas",
+    kind: "parent",
+    targetPath: "Maps/Parent.canvas",
+    syncId,
+    nodeId: "card-disk"
+  });
+  assert.equal(issued.ok, true);
+  registry.upsert(issued.record);
+
+  const resolved = await resolveParentLink(
+    {
+      canvas: "Maps/Parent.canvas",
+      nodeId: "card-disk",
+      syncId,
+      proof: issued.record.proof,
+      ownership: { source: "plugin-data" }
+    },
+    "Maps/Child.canvas",
+    registry,
+    vault
+  );
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.link.nodeId, "card-disk");
+});
+
 test("the registry round-trips through JSON and rejects stale schema versions", () => {
   const registry = createMarkdownSyncOwnership({ now: () => 10 });
   const record = registry.issueRecord({

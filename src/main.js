@@ -6006,10 +6006,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const targetHeight = Number(rootNode.height) || this.settings.defaultNodeHeight;
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
+			if (canvas?.edges && canvas?.nodes) {
+				for (const edge of Array.from(canvas.edges.values())) {
+					const fromId = edge.from?.node?.id || edge.fromNode;
+					const toId = edge.to?.node?.id || edge.toNode;
+					if (!canvas.nodes.has(fromId) || !canvas.nodes.has(toId)) {
+						this.canvasApi.removeEdge(canvas, edge);
+					}
+				}
+			}
 			this.canvasApi.invalidateEdgeIndex();
-			// The old topic is detached now; passing it to the layout engine would
-			// trigger a full-map relayout and move the replacement. Keep the new
-			// file card exactly where the selected topic was.
 			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
 			if (typeof card.moveAndResize === 'function') {
 				card.moveAndResize({
@@ -6023,6 +6029,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				card.width = targetWidth;
 				card.height = targetHeight;
 			}
+			this.updateNodeTypeAttributes(canvas);
+			this.updateGroupBounds(canvas);
 			for (const edge of canvas.edges?.values?.() || []) {
 				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
 					edge.render?.();
@@ -6075,9 +6083,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			new import_obsidian5.Notice('This mind map has no parent link');
 			return;
 		}
-		const resolved = await this.resolveParentLinkForCanvas(canvas, parent);
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parent, { confirmLegacy: true });
 		if (!resolved.ok) {
-			new import_obsidian5.Notice(`Could not open the parent mind map: ${resolved.reason}`);
+			const reasonMessages = {
+				'not-canvas': 'The parent canvas file could not be found',
+				'no-parent-card': 'The parent card could not be found in the parent canvas',
+				'no-link': 'This mind map has no parent link',
+				'needs-confirmation': 'Parent link requires confirmation',
+				'unowned-target': 'The parent card is linked to a different mind map',
+				'already-owned': 'The parent card is already owned by another canvas'
+			};
+			const msg = reasonMessages[resolved.reason] || `Could not open the parent mind map: ${resolved.reason}`;
+			new import_obsidian5.Notice(msg);
 			return;
 		}
 		const file = resolved.link.file;

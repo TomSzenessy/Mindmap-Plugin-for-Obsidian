@@ -16,6 +16,7 @@ const {
   isDescendant,
   isWithinAttachmentRadius,
   nodeToNodeDistance,
+  removeIncomingParentEdges,
   reparentSubtree,
   restoreEdgePayload,
   snapshotEdgePayload
@@ -338,4 +339,32 @@ test("restoring a link whose cards are gone creates nothing", () => {
 
   assert.equal(restoreEdgePayload(canvas, canvasApi, payload), null);
   assert.equal(edges.length, 0);
+});
+
+test("removeIncomingParentEdges cleans up all surplus parent edges including those directly in canvas.edges", () => {
+  const dragged = { id: "child" };
+  const edge1 = { id: "e1", to: { node: { id: "child" } } };
+  const edge2 = { id: "e2", to: { node: { id: "child" } } };
+  const keepEdge = { id: "e3", to: { node: { id: "child" } } };
+  const removed = [];
+
+  const canvas = {
+    edges: new Map([
+      ["e1", edge1],
+      ["e2", edge2],
+      ["e3", keepEdge]
+    ])
+  };
+  const canvasApi = {
+    getIncomingEdges: () => [edge1, keepEdge],
+    removeEdge: (c, edge) => {
+      removed.push(edge.id);
+      canvas.edges.delete(edge.id);
+    }
+  };
+
+  removeIncomingParentEdges(canvas, canvasApi, dragged, keepEdge);
+  assert.deepEqual(removed.sort(), ["e1", "e2"]);
+  assert.equal(canvas.edges.size, 1);
+  assert.ok(canvas.edges.has("e3"));
 });

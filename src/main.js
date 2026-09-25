@@ -7268,7 +7268,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						? directionFromParent(selected)
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: false,
+						preserveRootSides: true,
 						branchDirectionOverride: branchDirection
 							? {
 									nodeId: selected.id,

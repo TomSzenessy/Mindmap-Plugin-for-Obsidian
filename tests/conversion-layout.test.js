@@ -327,3 +327,194 @@ test("removes a nested branch from the parent and keeps the replacement stable",
   assert.deepEqual({ x: card.x, y: card.y }, settledCardPosition);
   assert.equal(canvas.nodes.has("child"), false);
 });
+
+test("expanding a nested mind map into topics deletes the nested canvas file and cleans up registry", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const { LayoutEngine } = require("../lib/layout.js");
+  const { createMarkdownSyncOwnership } = require("../lib/markdown-sync.js");
+  const { canvas } = makeCanvas();
+  let trashedFile = null;
+  const files = new Map();
+  const nestedCanvasData = {
+    mindmap: true,
+    nodes: [
+      { id: "nested-root", text: "Selected", type: "text", x: 0, y: 0, width: 200, height: 60 },
+      { id: "sub-1", text: "Sub 1", type: "text", x: 280, y: 0, width: 200, height: 60 }
+    ],
+    edges: [
+      { id: "e1", fromNode: "nested-root", toNode: "sub-1", fromSide: "right", toSide: "left" }
+    ]
+  };
+  const nestedFile = new TFile("Selected.canvas");
+  files.set("Selected.canvas", { file: nestedFile, content: JSON.stringify(nestedCanvasData) });
+
+  const app = {
+    vault: {
+      getAbstractFileByPath(p) { return files.get(p)?.file ?? null; },
+      async cachedRead(f) { return files.get(f.path)?.content ?? ""; },
+      async trash(f) { trashedFile = f; files.delete(f.path); },
+      async delete(f) { trashedFile = f; files.delete(f.path); },
+      getFiles() { return Array.from(files.values()).map((entry) => entry.file); }
+    }
+  };
+  const ownership = createMarkdownSyncOwnership();
+  ownership.upsert({
+    canvasPath: "Selected.canvas",
+    kind: "parent",
+    targetPath: "Parent.canvas",
+    nodeId: "card-1",
+    syncId: "0".repeat(32),
+    proof: "0".repeat(64)
+  }, { replaceExisting: true });
+
+  const plugin = {
+    app,
+    markdownOwnership: ownership,
+    verifiedParentLinks: new Map(),
+    persistPluginData: async () => {},
+    canvasApi: new CanvasAPI(app),
+    settings: { defaultNodeWidth: 200, defaultNodeHeight: 60, autoColor: false },
+    layoutEngine: new LayoutEngine({ animate: false }),
+    branchColors: { applyColors() {} },
+    isMindmapCanvas: () => true,
+    markMarkdownOrderDirty() {},
+    updateNodeTypeAttributes() {},
+    updateGroupBounds() {},
+    refreshOutline() {},
+    resizeNodesWhenRendered() {}
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const card = canvas.createFileNode({ pos: { x: 500, y: 100 }, size: { width: 200, height: 60 }, file: nestedFile });
+  card.unknownData = {
+    tomindmapTitleOnly: true,
+    tomindmapCardKind: "nested-map",
+    tomindmapCardTitle: "Selected"
+  };
+
+  const success = await CanvasMindMapPlugin.prototype.convertLinkedNodeToNormalTopic.call(
+    plugin,
+    canvas,
+    card
+  );
+  assert.equal(success, true);
+  assert.equal(trashedFile, nestedFile);
+  assert.equal(files.has("Selected.canvas"), false);
+  assert.equal(ownership.recordsForCanvas("Selected.canvas").length, 0);
+  const topicNodes = Array.from(canvas.nodes.values()).filter((n) => n.type === "text");
+  assert.ok(topicNodes.some((n) => n.text === "Selected"));
+  assert.ok(topicNodes.some((n) => n.text === "Sub 1"));
+});
+
+test("openParentMindMap opens parent canvas even when ownership token resolution fails", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const parentFile = new TFile("Parent.canvas");
+  let openedFile = null;
+  const app = {
+    vault: {
+      getAbstractFileByPath(p) { return p === "Parent.canvas" ? parentFile : null; }
+    },
+    workspace: {
+      getLeaf() {
+        return {
+          async openFile(f) { openedFile = f; }
+        };
+      }
+    }
+  };
+  const { createMarkdownSyncOwnership } = require("../lib/markdown-sync.js");
+  const plugin = {
+    app,
+    markdownOwnership: createMarkdownSyncOwnership(),
+    canvasApi: new CanvasAPI(app),
+    settings: { navigationZoomPadding: 20 },
+    waitForCanvasNode: async () => null,
+    resolveParentLinkForCanvas: async () => ({ ok: false, reason: "record-missing" })
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const childCanvas = {
+    view: { file: new TFile("Child.canvas") }
+  };
+  const parentLink = { canvas: "Parent.canvas", nodeId: "card-1" };
+
+  await CanvasMindMapPlugin.prototype.openParentMindMap.call(plugin, childCanvas, parentLink);
+  assert.equal(openedFile, parentFile);
+});
+
+test("converting a collapsed topic to a nested mind map clears collapsed design and expanding it keeps topics visible", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const { LayoutEngine } = require("../lib/layout.js");
+  const { createMarkdownSyncOwnership } = require("../lib/markdown-sync.js");
+  const { canvas, selected, child } = makeCanvas();
+  // selected was collapsed with child
+  assert.equal(selected.unknownData.collapsed, true);
+
+  const files = new Map([
+    ["Parent.canvas", { file: canvas.view.file, content: "{}" }]
+  ]);
+  const app = {
+    vault: {
+      getAbstractFileByPath(p) { return files.get(p)?.file ?? null; },
+      async cachedRead(f) { return files.get(f.path)?.content ?? ""; },
+      async create(p, data) {
+        const file = new TFile(p);
+        files.set(p, { file, content: data });
+        return file;
+      },
+      async process(f, fn) {
+        const entry = files.get(f.path);
+        const updated = fn(entry.content);
+        entry.content = updated;
+        return updated;
+      },
+      async trash(f) { files.delete(f.path); },
+      async delete(f) { files.delete(f.path); },
+      getFiles() { return Array.from(files.values()).map((e) => e.file); }
+    }
+  };
+  const plugin = {
+    app,
+    markdownOwnership: createMarkdownSyncOwnership(),
+    verifiedParentLinks: new Map(),
+    persistPluginData: async () => {},
+    canvasApi: new CanvasAPI(app),
+    settings: { defaultNodeWidth: 200, defaultNodeHeight: 60, autoColor: false },
+    layoutEngine: new LayoutEngine({ animate: false }),
+    branchColors: { applyColors() {} },
+    isMindmapCanvas: () => true,
+    markMarkdownOrderDirty() {},
+    updateNodeTypeAttributes() {},
+    updateGroupBounds() {},
+    refreshOutline() {},
+    resizeNodesWhenRendered() {}
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  // 1. Convert collapsed topic to nested mind map
+  const result = await CanvasMindMapPlugin.prototype.convertTopicToNestedMindMap.call(
+    plugin,
+    canvas,
+    selected
+  );
+  assert.ok(result);
+  const card = result.card;
+  // File card must NOT have collapsed: true or tomindmap-collapsed-node class
+  assert.equal(card.unknownData.collapsed, false);
+  assert.equal(card.nodeEl.hasClass("tomindmap-collapsed-node"), false);
+
+  // 2. Expand nested mind map back to topics
+  const expandSuccess = await CanvasMindMapPlugin.prototype.convertLinkedNodeToNormalTopic.call(
+    plugin,
+    canvas,
+    card
+  );
+  assert.equal(expandSuccess, true);
+  const reRoot = Array.from(canvas.nodes.values()).find((n) => n.text === "Selected");
+  assert.ok(reRoot);
+  // Replaced root topic must NOT be collapsed
+  assert.equal(reRoot.unknownData.collapsed, false);
+  assert.equal(reRoot.nodeEl.hasClass("tomindmap-collapsed-node"), false);
+});
+
+

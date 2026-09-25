@@ -240,6 +240,70 @@ test("pulls complete subtrees inward like collision-limited springs", () => {
   assert.equal(positions.get("leaf").y, 0);
 });
 
+test("styles surplus links as curves while keeping the canonical tree vertical", () => {
+  const engine = new LayoutEngine({
+    nodeWidth: 200,
+    nodeHeight: 60,
+    horizontalGap: 80,
+    verticalGap: 20,
+    animate: false
+  });
+  const makeCanvasNode = (id, x = 0, y = 0) => ({
+    id,
+    x,
+    y,
+    width: 200,
+    height: 60,
+    moveTo({ x: nextX, y: nextY }) {
+      this.x = nextX;
+      this.y = nextY;
+    }
+  });
+  const nodes = [
+    makeCanvasNode("root", 0, 0),
+    makeCanvasNode("alpha", 280, -80),
+    makeCanvasNode("beta", 280, 80),
+    makeCanvasNode("gamma", 560, -80)
+  ];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const edge = (id, from, to) => ({
+    id,
+    from: { node: byId.get(from), side: "right" },
+    to: { node: byId.get(to), side: "left" }
+  });
+  const explicitSurplus = edge("alpha-beta-straight", "alpha", "beta");
+  explicitSurplus.lineType = "straight";
+  const edges = [
+    edge("root-alpha", "root", "alpha"),
+    edge("root-beta", "root", "beta"),
+    edge("alpha-gamma", "alpha", "gamma"),
+    edge("alpha-beta", "alpha", "beta"),
+    explicitSurplus
+  ];
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map(edges.map((item) => [item.id, item])),
+    getData: () => ({
+      nodes: nodes.map((node) => ({ id: node.id, type: "text" })),
+      edges: edges.map((item) => ({
+        id: item.id,
+        fromNode: item.from.node.id,
+        toNode: item.to.node.id
+      }))
+    }),
+    requestSave() {},
+    requestFrame() {}
+  };
+
+  engine.layout(canvas, { persist: false });
+
+  assert.equal(canvas.edges.get("alpha-beta").lineType, "curved");
+  assert.equal(canvas.edges.get("alpha-beta").curve, true);
+  assert.equal(canvas.edges.get("alpha-beta-straight").lineType, "straight");
+  assert.notEqual(canvas.edges.get("alpha-gamma").lineType, "curved");
+});
+
+
 test("balances root sides by rendered branch height, not a contiguous split", () => {
   const engine = new LayoutEngine({ verticalGap: 20 });
   const branches = [

@@ -46526,6 +46526,48 @@ var {
         canvas.requestSave();
     }
   }
+  /**
+   * Keep the canonical topic tree visually dominant. Cross-links are retained,
+   * but an unstyled surplus link gets a gentle curve instead of competing with
+   * the vertical parent/child structure. Explicit authored edge styles win.
+   */
+  function styleSurplusEdges(canvas, forest, persist = true) {
+    const canonical = new Set();
+    for (const root of forest || []) {
+      const stack = [root];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        for (const child of current.children || []) {
+          const parentId = current.canvasNode?.id;
+          const childId = child.canvasNode?.id;
+          if (parentId && childId) canonical.add(`${parentId}\u0000${childId}`);
+          stack.push(child);
+        }
+      }
+    }
+    let changed = false;
+    for (const edge of canvas?.edges?.values?.() || []) {
+      if (edge?.__mindMapPreview) continue;
+      const fromId = edge?.from?.node?.id;
+      const toId = edge?.to?.node?.id;
+      if (!fromId || !toId) continue;
+      const surplus = !canonical.has(`${fromId}\u0000${toId}`);
+      if (
+        surplus &&
+        edge.lineType === undefined &&
+        edge.curve === undefined
+      ) {
+        edge.lineType = "curved";
+        edge.curve = true;
+        edge.curvature = 0.25;
+        changed = true;
+      }
+    }
+    if (changed) {
+      canvas.requestFrame?.();
+      if (persist) canvas.requestSave?.();
+    }
+  }
   function registerDragEndHandler(canvas, enabled = () => true) {
     var _a, _b;
     let lastMoveUpdate = 0;
@@ -46593,6 +46635,7 @@ var {
       const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
+      styleSurplusEdges(canvas, forest, options.persist !== false);
       const nestedDirections = new Map();
       for (const root of forest) {
         const stack = [];
@@ -46652,13 +46695,18 @@ var {
         if (forest.length === 0)
           return;
         const parentTreeNode = findTreeForNode(forest, parentNodeId);
-        this.layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride, options);
+        this.layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride, {
+          ...options,
+          forest
+        });
       });
     }
     /** Layout one already-resolved topic from the shared visible forest. */
     layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride = null, options = {}) {
       if (!parentTreeNode || parentTreeNode.children.length === 0)
         return;
+      const forest = options.forest || buildForest(canvas, { includeHidden: false });
+      styleSurplusEdges(canvas, forest, options.persist !== false);
       const positions = /* @__PURE__ */ new Map();
       if (!parentTreeNode.parent) {
         const rootX = parentTreeNode.canvasNode.x;
@@ -58244,10 +58292,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			await this.persistPluginData();
 			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
+			const replacementPosition = {
+				x: Number(card.x) || 0,
+				y: Number(card.y) || 0
+			};
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
-			this.applyStructuralMutation(canvas, [rootNode], { save: false });
+			// The old topic is detached now; passing it to the layout engine would
+			// trigger a full-map relayout and move the replacement. Keep the new
+			// file card exactly where the selected topic was.
+			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
+			card.moveTo?.(replacementPosition);
+			this.layoutEngine.updateEdgeSides(canvas, { persist: false });
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 			this.verifiedParentLinks.set(nestedPath, parentLink);

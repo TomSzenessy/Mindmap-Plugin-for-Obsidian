@@ -5933,10 +5933,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			await this.persistPluginData();
 			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
+			const replacementPosition = {
+				x: Number(card.x) || 0,
+				y: Number(card.y) || 0
+			};
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
-			this.applyStructuralMutation(canvas, [rootNode], { save: false });
+			// The old topic is detached now; passing it to the layout engine would
+			// trigger a full-map relayout and move the replacement. Keep the new
+			// file card exactly where the selected topic was.
+			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
+			card.moveTo?.(replacementPosition);
+			this.layoutEngine.updateEdgeSides(canvas, { persist: false });
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 			this.verifiedParentLinks.set(nestedPath, parentLink);

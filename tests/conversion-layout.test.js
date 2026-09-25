@@ -299,12 +299,17 @@ test("removes a nested branch from the parent and keeps the replacement stable",
   };
   Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
 
+  const originalPosition = { x: selected.x, y: selected.y, width: selected.width, height: selected.height };
   const result = await CanvasMindMapPlugin.prototype.convertTopicToNestedMindMap.call(
     plugin,
     canvas,
     selected
   );
   assert.ok(result);
+  assert.deepEqual(
+    { x: result.card.x, y: result.card.y, width: result.card.width, height: result.card.height },
+    originalPosition
+  );
   assert.equal(canvas.nodes.has("selected"), false);
   assert.equal(canvas.nodes.has("child"), false);
   const card = result.card;
@@ -312,9 +317,9 @@ test("removes a nested branch from the parent and keeps the replacement stable",
   assert.equal(card.unknownData.tomindmapCardKind, "nested-map");
   assert.equal(canvas.edges.size, 2);
 
-  const firstCardPosition = { x: card.x, y: card.y };
   plugin.layoutEngine.layout(canvas, { preserveRootSides: true });
+  const settledCardPosition = { x: card.x, y: card.y };
   plugin.layoutEngine.layout(canvas, { preserveRootSides: true });
-  assert.deepEqual({ x: card.x, y: card.y }, firstCardPosition);
+  assert.deepEqual({ x: card.x, y: card.y }, settledCardPosition);
   assert.equal(canvas.nodes.has("child"), false);
 });

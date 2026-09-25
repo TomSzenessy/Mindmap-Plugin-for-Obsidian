@@ -1,6 +1,6 @@
 # ToMindMap
 
-A mind mapping plugin for Obsidian Canvas. Type a topic, grow branches, and the auto-layout keeps the map readable — on your computer with the keyboard, on your phone with touch.
+A mind mapping plugin for Obsidian Canvas. Type a topic, grow branches, and the auto-layout keeps the map readable — on your computer with the keyboard, on your phone with touch. Canonical parent/child branches stay in vertical columns; extra authored cross-links are retained as subtler curves so they do not obscure the hierarchy.
 
 ## Install (BRAT)
 

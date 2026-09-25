@@ -50820,6 +50820,10 @@ var TreeDrag = (() => {
       edge.__mindMapPreview = true;
     }
 
+    // Canvas creates the edge record synchronously, but some host renderers only
+    // materialize its SVG/edge element on the next frame. Render the preview
+    // explicitly so the arrow is visible for the whole drag, not only on commit.
+    edge.render?.();
     canvas?.requestFrame?.();
   }
 

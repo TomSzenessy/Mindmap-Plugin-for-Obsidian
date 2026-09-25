@@ -201,7 +201,7 @@ function randomDragFixture(seed) {
  */
 function largeMapFixture({ topicCount, branchWidth = 4 }) {
   const cards = [];
-  const counts = { geometryReads: 0, forestScans: 0 };
+  const counts = { geometryReads: 0, forestScans: 0, renders: 0 };
   const countGeometry = (card) => {
     for (const key of ["x", "y", "width", "height"]) {
       let value = card[key];
@@ -273,7 +273,8 @@ function largeMapFixture({ topicCount, branchWidth = 4 }) {
         color,
         label: options.label,
         lineType: "curved",
-        curvature: 0.35
+        curvature: 0.35,
+        render() { counts.renders += 1; }
       };
       activeEdges.push(edge);
       return edge;
@@ -313,6 +314,14 @@ test("one drag frame over 5,000 topics reads a linear amount of geometry", () =>
     fixture.counts.geometryReads <= fixture.topicCount * 40,
     `one frame read ${fixture.counts.geometryReads} geometry values for ${fixture.topicCount} topics`
   );
+});
+
+test("renders the preview arrow during the drag frame", () => {
+  const fixture = largeMapFixture({ topicCount: 8 });
+  fixture.controller.begin(fixture.dragged);
+  const preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.ok(fixture.counts.renders > 0, "preview edge was not rendered");
 });
 
 test("a whole 5,000-topic drag acquires the forest only once", () => {
@@ -618,7 +627,8 @@ function dragFixture({ withOriginalParent = true } = {}) {
         color,
         label: options.label,
         lineType: "curved",
-        curvature: 0.35
+        curvature: 0.35,
+        render() {}
       };
       activeEdges.push(edge);
       return edge;

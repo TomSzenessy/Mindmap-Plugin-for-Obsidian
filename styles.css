@@ -394,7 +394,7 @@
  * ordinary Canvas file links. The native preview is hidden only for cards the
  * plugin explicitly marks, so user-created file previews remain untouched. */
 .tomindmap-mindmap-mode .canvas-node.tomindmap-title-only-card {
-	position: relative;
+	position: absolute !important;
 	overflow: visible;
 }
 

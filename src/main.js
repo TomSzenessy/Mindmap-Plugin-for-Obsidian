@@ -2645,6 +2645,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					};
 					scrubNative();
 					setTimeout(scrubNative, 0);
+					setTimeout(scrubNative, 50);
+					if (typeof menu.addItem === 'function' && !menu.__tomindmapScrubbed) {
+						menu.__tomindmapScrubbed = true;
+						const origAddItem = menu.addItem;
+						menu.addItem = function(callback) {
+							return origAddItem.call(this, (item) => {
+								callback(item);
+								const title = String(item?.titleEl?.textContent || item?.title || item?.title__ || '').trim();
+								if (/^convert to file/i.test(title)) {
+									if (item.dom) {
+										item.dom.remove?.();
+										item.dom.style?.setProperty('display', 'none', 'important');
+									}
+									const idx = menu.items?.indexOf?.(item);
+									if (idx >= 0) menu.items.splice(idx, 1);
+								}
+							});
+						};
+					}
 				}
 				if (
 					canvas &&
@@ -2665,23 +2684,36 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 					if (hasBranch) {
 						menu.addItem((item) => {
-							item.setTitle('Convert branch to note')
+							item.setTitle('Convert branch to file (with subtree)')
 								.setIcon('file-text')
 								.onClick(convertWithSubtree);
 						});
+						menu.addItem((item) => {
+							item.setTitle('Convert branch to file (without subtree)')
+								.setIcon('file-plus')
+								.onClick(convertWithoutSubtree);
+						});
+						menu.addItem((item) => {
+							item.setTitle('Convert branch to nested mind map')
+								.setIcon('network')
+								.onClick(() =>
+									this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
+								);
+						});
+					} else {
+						menu.addItem((item) => {
+							item.setTitle('Convert topic to file')
+								.setIcon('file-plus')
+								.onClick(convertWithoutSubtree);
+						});
+						menu.addItem((item) => {
+							item.setTitle('Convert to nested mind map')
+								.setIcon('network')
+								.onClick(() =>
+									this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
+								);
+						});
 					}
-					menu.addItem((item) => {
-						item.setTitle('Convert topic to note')
-							.setIcon('file-plus')
-							.onClick(convertWithoutSubtree);
-					});
-					menu.addItem((item) => {
-						item.setTitle('Convert to nested mind map')
-							.setIcon('network')
-							.onClick(() =>
-								this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
-							);
-					});
 				}
 				const linkedPath = canvasNodeFilePath(node);
 				const linkedTopic =
@@ -3310,7 +3342,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			});
 			if (!node) return;
 			if (event.shiftKey || event.metaKey || event.ctrlKey) return;
-			if (canvas.selection && canvas.selection.has(node) && canvas.selection.size > 1) return;
+			const isNodeInSelection = Boolean(
+				canvas.selection && (
+					canvas.selection.has(node) ||
+					canvas.selection.has(node.id) ||
+					Array.from(canvas.selection).some((item) => item === node || item === node?.id || (item && item.id === node?.id))
+				)
+			);
+			if (isNodeInSelection && canvas.selection.size > 1) return;
 			canvas.selectOnly(node);
 			canvas.requestFrame();
 		};
@@ -7369,7 +7408,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (preservedSelection && preservedSelection.size > 0) {
 					canvas.deselectAll?.();
 					for (const selNode of preservedSelection) {
-						canvas.select?.(selNode);
+						const n = typeof selNode === 'string' ? canvas.nodes.get(selNode) : selNode;
+						if (n) canvas.select?.(n);
 					}
 					canvas.requestFrame?.();
 				}
@@ -7553,9 +7593,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
 				latestPointerPosition = dragPointerStart;
+				const isNodeInSelection = Boolean(
+					canvas.selection && (
+						canvas.selection.has(node) ||
+						canvas.selection.has(node.id) ||
+						Array.from(canvas.selection).some((item) => item === node || item === node?.id || (item && item.id === node?.id))
+					)
+				);
 				const hasMultiSelection = Boolean(
-					canvas.selection &&
-					canvas.selection.has(node) &&
+					isNodeInSelection &&
 					canvas.selection.size > 1
 				);
 
@@ -7566,6 +7612,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 					const groupIds = getGroupIds(canvas);
 					const selectedList = Array.from(canvas.selection)
+						.map((item) => (typeof item === 'string' ? canvas.nodes.get(item) : (item && item.id && !item.x) ? (canvas.nodes.get(item.id) || item) : item))
 						.filter(
 							(n) =>
 								n &&

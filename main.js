@@ -44917,19 +44917,24 @@ var {
    * and stamped with this link's relationship token, so neither a coincidental
    * card id nor a copied token in the untrusted child Canvas is enough.
    */
-  function findNestedMapCard(record, nodeId) {
+  function findNestedMapCard(record, nodeId, childCanvasPath = null) {
     let found = null;
     let idSeen = false;
-    for (const node of record.nodes) {
-      if (!node || typeof node !== "object" || node.id !== nodeId) continue;
-      if (idSeen) return null;
-      idSeen = true;
+    for (const node of record.nodes || []) {
+      if (!node || typeof node !== "object") continue;
       if (typeof node.file !== "string" || !node.file) continue;
       if (extensionOf(node.file) !== CANVAS_EXTENSION) continue;
-      const cardKind = node.unknownData?.[CARD_KIND_KEY] ?? node[CARD_KIND_KEY];
-      if (cardKind !== NESTED_MAP_CARD_KIND)
-        continue;
-      found = node;
+      if (node.id === nodeId) {
+        if (idSeen) return null;
+        idSeen = true;
+        found = node;
+      } else if (!found && childCanvasPath) {
+        const normChild = String(childCanvasPath).replace(/^\/+/, '');
+        const normFile = String(node.file).replace(/^\/+/, '');
+        if (normFile === normChild || normFile.endsWith('/' + normChild) || normChild.endsWith('/' + normFile)) {
+          found = node;
+        }
+      }
     }
     return found;
   }
@@ -44979,7 +44984,7 @@ var {
     if (!file) return Promise.resolve(reject(LINK_REASON.NOT_CANVAS));
     return readCanvasRecord(args.vault, file).then((record) => {
       if (!record) return reject(LINK_REASON.NOT_CANVAS);
-      const card = findNestedMapCard(record, rawLink.nodeId);
+      const card = findNestedMapCard(record, rawLink.nodeId, args.canvasPath);
       if (!card) return reject(LINK_REASON.NO_PARENT_CARD);
       const cardClaim = cardSyncState(card);
       if (cardClaim.invalid) return reject(LINK_REASON.MALFORMED_TARGET);
@@ -44990,7 +44995,7 @@ var {
         link: {
           file,
           canvas: parsed.binding.targetPath,
-          nodeId: rawLink.nodeId,
+          nodeId: card.id || rawLink.nodeId,
           syncId: parsed.binding.syncId,
           proof: rawLink.proof,
           ownership: { source: "plugin-data" }
@@ -45044,7 +45049,7 @@ var {
     if (!file) return reject(LINK_REASON.NOT_CANVAS);
     const record = await readCanvasRecord(args.vault, file);
     if (!record) return reject(LINK_REASON.NOT_CANVAS);
-    const card = findNestedMapCard(record, rawLink.nodeId);
+    const card = findNestedMapCard(record, rawLink.nodeId, args.canvasPath);
     if (!card) return reject(LINK_REASON.NO_PARENT_CARD);
     const cardClaim = cardSyncState(card);
     if (cardClaim.invalid) return reject(LINK_REASON.MALFORMED_TARGET);
@@ -50732,6 +50737,7 @@ var TreeDrag = (() => {
     exceptEdge = null
   ) {
     const toDelete = new Set();
+    const exceptId = exceptEdge?.id || null;
 
     if (canvasApi?.getIncomingEdges) {
       const incomingEdges =
@@ -50746,7 +50752,7 @@ var TreeDrag = (() => {
     if (canvas?.edges) {
       for (const edge of canvas.edges.values()) {
         if (!edge || edge === exceptEdge) continue;
-        const toId = edge.to?.node?.id || edge.to?.node || edge.toNode;
+        const toId = edge.to?.node?.id || (typeof edge.to?.node === "string" ? edge.to.node : null) || edge.toNode || edge.to?.id;
         if (toId === draggedNode?.id) {
           toDelete.add(edge);
         }
@@ -51223,9 +51229,19 @@ var {
         canvasApi.removeEdge(canvas, previewEdge);
       previewEdge = null;
       previewParent = null;
+      for (const origEdge of originalEdgeObjects) {
+        if (origEdge?.edgeEl) {
+          origEdge.edgeEl.style.display = "";
+        }
+      }
     }
 
     function resetState() {
+      for (const origEdge of originalEdgeObjects) {
+        if (origEdge?.edgeEl) {
+          origEdge.edgeEl.style.display = "";
+        }
+      }
       activeDraggedNode = null;
       originalLinks = [];
       originalEdgeObjects = [];
@@ -51431,6 +51447,11 @@ var {
       previewParent = targetNode;
       previewParent?.nodeEl?.addClass?.("tomindmap-reparent-target");
       previewEdge = edge;
+      for (const origEdge of originalEdgeObjects) {
+        if (origEdge?.edgeEl) {
+          origEdge.edgeEl.style.display = "none";
+        }
+      }
       state = "preview";
       return { state, target: targetNode, incomingSide: edge.to?.side || null };
     }
@@ -55054,6 +55075,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					};
 					scrubNative();
 					setTimeout(scrubNative, 0);
+					setTimeout(scrubNative, 50);
+					if (typeof menu.addItem === 'function' && !menu.__tomindmapScrubbed) {
+						menu.__tomindmapScrubbed = true;
+						const origAddItem = menu.addItem;
+						menu.addItem = function(callback) {
+							return origAddItem.call(this, (item) => {
+								callback(item);
+								const title = String(item?.titleEl?.textContent || item?.title || item?.title__ || '').trim();
+								if (/^convert to file/i.test(title)) {
+									if (item.dom) {
+										item.dom.remove?.();
+										item.dom.style?.setProperty('display', 'none', 'important');
+									}
+									const idx = menu.items?.indexOf?.(item);
+									if (idx >= 0) menu.items.splice(idx, 1);
+								}
+							});
+						};
+					}
 				}
 				if (
 					canvas &&
@@ -55074,23 +55114,36 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 					if (hasBranch) {
 						menu.addItem((item) => {
-							item.setTitle('Convert branch to note')
+							item.setTitle('Convert branch to file (with subtree)')
 								.setIcon('file-text')
 								.onClick(convertWithSubtree);
 						});
+						menu.addItem((item) => {
+							item.setTitle('Convert branch to file (without subtree)')
+								.setIcon('file-plus')
+								.onClick(convertWithoutSubtree);
+						});
+						menu.addItem((item) => {
+							item.setTitle('Convert branch to nested mind map')
+								.setIcon('network')
+								.onClick(() =>
+									this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
+								);
+						});
+					} else {
+						menu.addItem((item) => {
+							item.setTitle('Convert topic to file')
+								.setIcon('file-plus')
+								.onClick(convertWithoutSubtree);
+						});
+						menu.addItem((item) => {
+							item.setTitle('Convert to nested mind map')
+								.setIcon('network')
+								.onClick(() =>
+									this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
+								);
+						});
 					}
-					menu.addItem((item) => {
-						item.setTitle('Convert topic to note')
-							.setIcon('file-plus')
-							.onClick(convertWithoutSubtree);
-					});
-					menu.addItem((item) => {
-						item.setTitle('Convert to nested mind map')
-							.setIcon('network')
-							.onClick(() =>
-								this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
-							);
-					});
 				}
 				const linkedPath = canvasNodeFilePath(node);
 				const linkedTopic =
@@ -55719,7 +55772,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			});
 			if (!node) return;
 			if (event.shiftKey || event.metaKey || event.ctrlKey) return;
-			if (canvas.selection && canvas.selection.has(node) && canvas.selection.size > 1) return;
+			const isNodeInSelection = Boolean(
+				canvas.selection && (
+					canvas.selection.has(node) ||
+					canvas.selection.has(node.id) ||
+					Array.from(canvas.selection).some((item) => item === node || item === node?.id || (item && item.id === node?.id))
+				)
+			);
+			if (isNodeInSelection && canvas.selection.size > 1) return;
 			canvas.selectOnly(node);
 			canvas.requestFrame();
 		};
@@ -59778,7 +59838,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (preservedSelection && preservedSelection.size > 0) {
 					canvas.deselectAll?.();
 					for (const selNode of preservedSelection) {
-						canvas.select?.(selNode);
+						const n = typeof selNode === 'string' ? canvas.nodes.get(selNode) : selNode;
+						if (n) canvas.select?.(n);
 					}
 					canvas.requestFrame?.();
 				}
@@ -59962,9 +60023,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
 				latestPointerPosition = dragPointerStart;
+				const isNodeInSelection = Boolean(
+					canvas.selection && (
+						canvas.selection.has(node) ||
+						canvas.selection.has(node.id) ||
+						Array.from(canvas.selection).some((item) => item === node || item === node?.id || (item && item.id === node?.id))
+					)
+				);
 				const hasMultiSelection = Boolean(
-					canvas.selection &&
-					canvas.selection.has(node) &&
+					isNodeInSelection &&
 					canvas.selection.size > 1
 				);
 
@@ -59975,6 +60042,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 					const groupIds = getGroupIds(canvas);
 					const selectedList = Array.from(canvas.selection)
+						.map((item) => (typeof item === 'string' ? canvas.nodes.get(item) : (item && item.id && !item.x) ? (canvas.nodes.get(item.id) || item) : item))
 						.filter(
 							(n) =>
 								n &&

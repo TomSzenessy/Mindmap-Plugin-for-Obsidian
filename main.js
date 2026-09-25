@@ -52813,6 +52813,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						'tomindmap-title-only-card',
 						titleOnly && element === shell
 					);
+					element.toggleClass(
+						'tomindmap-file-card',
+						type === 'file' && element === shell
+					);
 				} else {
 					element.classList?.toggle(
 						'tomindmap-plain-card',
@@ -52829,6 +52833,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					element.classList?.toggle(
 						'tomindmap-title-only-card',
 						titleOnly && element === shell
+					);
+					element.classList?.toggle(
+						'tomindmap-file-card',
+						type === 'file' && element === shell
 					);
 				}
 			}

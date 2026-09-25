@@ -493,6 +493,42 @@
 }
 
 .tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card
+	.canvas-node-container {
+	position: absolute !important;
+	inset: 0 !important;
+	width: 100% !important;
+	height: 100% !important;
+	min-height: 0 !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	transform: none !important;
+	box-sizing: border-box;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card:not(.tomindmap-title-only-card)::before {
+	content: '▤';
+	position: absolute;
+	z-index: 2;
+	inset-block-start: 8px;
+	inset-inline-end: 10px;
+	color: var(--text-muted);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	line-height: 1;
+	opacity: 0.85;
+	pointer-events: none;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card.tomindmap-collapsed-node::before {
+	content: '＋';
+	color: var(--interactive-accent);
+	font-weight: var(--font-semibold);
+}
+
+.tomindmap-mindmap-mode
 	.canvas-node.tomindmap-title-only-card::after {
 	content: attr(data-tomindmap-card-title);
 	position: absolute;

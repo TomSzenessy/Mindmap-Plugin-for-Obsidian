@@ -43226,6 +43226,13 @@ var {
   				save: false
   			});
   			if (node) {
+  				if (typeof node.moveAndResize === 'function') {
+  					node.moveAndResize({ x, y, width, height });
+  				} else if (typeof node.moveTo === 'function') {
+  					node.moveTo({ x, y });
+  					node.width = width;
+  					node.height = height;
+  				}
   				if (!canvas.nodes.has(node.id) && typeof canvas.addNode === 'function')
   					canvas.addNode(node);
   				return node;
@@ -46526,48 +46533,6 @@ var {
         canvas.requestSave();
     }
   }
-  /**
-   * Keep the canonical topic tree visually dominant. Cross-links are retained,
-   * but an unstyled surplus link gets a gentle curve instead of competing with
-   * the vertical parent/child structure. Explicit authored edge styles win.
-   */
-  function styleSurplusEdges(canvas, forest, persist = true) {
-    const canonical = new Set();
-    for (const root of forest || []) {
-      const stack = [root];
-      while (stack.length > 0) {
-        const current = stack.pop();
-        for (const child of current.children || []) {
-          const parentId = current.canvasNode?.id;
-          const childId = child.canvasNode?.id;
-          if (parentId && childId) canonical.add(`${parentId}\u0000${childId}`);
-          stack.push(child);
-        }
-      }
-    }
-    let changed = false;
-    for (const edge of canvas?.edges?.values?.() || []) {
-      if (edge?.__mindMapPreview) continue;
-      const fromId = edge?.from?.node?.id;
-      const toId = edge?.to?.node?.id;
-      if (!fromId || !toId) continue;
-      const surplus = !canonical.has(`${fromId}\u0000${toId}`);
-      if (
-        surplus &&
-        edge.lineType === undefined &&
-        edge.curve === undefined
-      ) {
-        edge.lineType = "curved";
-        edge.curve = true;
-        edge.curvature = 0.25;
-        changed = true;
-      }
-    }
-    if (changed) {
-      canvas.requestFrame?.();
-      if (persist) canvas.requestSave?.();
-    }
-  }
   function registerDragEndHandler(canvas, enabled = () => true) {
     var _a, _b;
     let lastMoveUpdate = 0;
@@ -46635,7 +46600,6 @@ var {
       const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
-      styleSurplusEdges(canvas, forest, options.persist !== false);
       const nestedDirections = new Map();
       for (const root of forest) {
         const stack = [];
@@ -46705,8 +46669,6 @@ var {
     layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride = null, options = {}) {
       if (!parentTreeNode || parentTreeNode.children.length === 0)
         return;
-      const forest = options.forest || buildForest(canvas, { includeHidden: false });
-      styleSurplusEdges(canvas, forest, options.persist !== false);
       const positions = /* @__PURE__ */ new Map();
       if (!parentTreeNode.parent) {
         const rootX = parentTreeNode.canvasNode.x;
@@ -46905,7 +46867,12 @@ var {
         subtrees.push({ positions: tempPositions, contour: layout.contour, rectangles: layout.rectangles });
       }
       const foldSign = direction === "left" ? -1 : 1;
-      const { xOffsets, yOffsets, combinedContour } = this.foldPack(subtrees, subtrees.map(() => foldSign));
+      const { xOffsets, yOffsets, combinedContour } = this.foldPack(
+        subtrees,
+        subtrees.map(() => foldSign),
+        null,
+        { fold: false }
+      );
       let blockTop = Number.POSITIVE_INFINITY;
       let blockBottom = Number.NEGATIVE_INFINITY;
       for (const extent of combinedContour.values()) {
@@ -47034,9 +47001,18 @@ var {
             contour: /* @__PURE__ */ new Map(),
             rectangles: collectRectangles(child)
           }));
+          const hasDescendantSubtrees = entry.children.some(
+            (child) => (child.children?.length || child.node?.children?.length || 0) > 0
+          );
+          const shouldFold =
+            options.fold !== false &&
+            !hasDescendantSubtrees &&
+            entry.children.length >= 7;
           const packed = this.foldPack(
             childSubtrees,
-            entry.children.map((child) => child.direction === "left" ? -1 : 1)
+            entry.children.map((child) => (child.direction === "left" ? -1 : 1)),
+            null,
+            { fold: shouldFold }
           );
           xOffsets = packed.xOffsets;
           yOffsets = packed.yOffsets;
@@ -57998,15 +57974,24 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const width = Number(sourceNode?.width) || this.settings.defaultNodeWidth;
 		const height =
 			Number(sourceNode?.height) || this.settings.defaultNodeHeight;
+		const targetX = Number(sourceNode?.x) || 0;
+		const targetY = Number(sourceNode?.y) || 0;
 		const card = this.canvasApi.createFileNode(
 			canvas,
 			file,
-			Number(sourceNode?.x) || 0,
-			Number(sourceNode?.y) || 0,
+			targetX,
+			targetY,
 			width,
 			height
 		);
 		if (!card) throw new Error('Canvas could not create a file card');
+		if (typeof card.moveAndResize === 'function') {
+			card.moveAndResize({ x: targetX, y: targetY, width, height });
+		} else if (typeof card.moveTo === 'function') {
+			card.moveTo({ x: targetX, y: targetY });
+			card.width = width;
+			card.height = height;
+		}
 		const sourceData = canvasNodeUnknownData(sourceNode);
 		const patch = {
 			...(sourceData.collapsed !== undefined
@@ -58071,6 +58056,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let card = null;
 		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
+			const targetX = Number(node?.x) || 0;
+			const targetY = Number(node?.y) || 0;
+			const targetWidth = Number(node?.width) || this.settings.defaultNodeWidth;
+			const targetHeight = Number(node?.height) || this.settings.defaultNodeHeight;
 			file = await this.createCleanNoteForTopic(
 				canvas,
 				node,
@@ -58096,6 +58085,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			for (const topic of branch.slice().reverse())
 				this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
+			if (typeof card.moveAndResize === 'function') {
+				card.moveAndResize({
+					x: targetX,
+					y: targetY,
+					width: targetWidth,
+					height: targetHeight
+				});
+			} else if (typeof card.moveTo === 'function') {
+				card.moveTo({ x: targetX, y: targetY });
+				card.width = targetWidth;
+				card.height = targetHeight;
+			}
+			for (const edge of canvas.edges?.values?.() || []) {
+				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
+					edge.render?.();
+				}
+			}
 			if (canvas.selection?.has?.(node)) {
 				canvas.deselectAll?.();
 				canvas.select?.(card);
@@ -58292,10 +58298,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			await this.persistPluginData();
 			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
-			const replacementPosition = {
-				x: Number(card.x) || 0,
-				y: Number(card.y) || 0
-			};
+			const targetX = Number(rootNode.x) || 0;
+			const targetY = Number(rootNode.y) || 0;
+			const targetWidth = Number(rootNode.width) || this.settings.defaultNodeWidth;
+			const targetHeight = Number(rootNode.height) || this.settings.defaultNodeHeight;
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
@@ -58303,8 +58309,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			// trigger a full-map relayout and move the replacement. Keep the new
 			// file card exactly where the selected topic was.
 			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
-			card.moveTo?.(replacementPosition);
+			if (typeof card.moveAndResize === 'function') {
+				card.moveAndResize({
+					x: targetX,
+					y: targetY,
+					width: targetWidth,
+					height: targetHeight
+				});
+			} else if (typeof card.moveTo === 'function') {
+				card.moveTo({ x: targetX, y: targetY });
+				card.width = targetWidth;
+				card.height = targetHeight;
+			}
+			for (const edge of canvas.edges?.values?.() || []) {
+				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
+					edge.render?.();
+				}
+			}
 			this.layoutEngine.updateEdgeSides(canvas, { persist: false });
+			canvas.requestFrame?.();
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 			this.verifiedParentLinks.set(nestedPath, parentLink);

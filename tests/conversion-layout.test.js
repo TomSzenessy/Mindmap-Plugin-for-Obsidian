@@ -139,7 +139,11 @@ function makeCanvas() {
     requestSave() {},
     requestFrame() {},
     createFileNode({ pos, size, file }) {
-      const node = makeNode(`card-${this.nodes.size + 1}`, pos.x, pos.y, "", {});
+      const colliding = [...this.nodes.values()].some(
+        (existing) => Math.abs(existing.x - pos.x) < 10 && Math.abs(existing.y - pos.y) < 10
+      );
+      const initialY = colliding ? pos.y + 120 : pos.y;
+      const node = makeNode(`card-${this.nodes.size + 1}`, pos.x, initialY, "", {});
       node.type = "file";
       node.file = file.path || file;
       node.width = size.width;

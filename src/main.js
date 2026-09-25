@@ -5639,15 +5639,24 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const width = Number(sourceNode?.width) || this.settings.defaultNodeWidth;
 		const height =
 			Number(sourceNode?.height) || this.settings.defaultNodeHeight;
+		const targetX = Number(sourceNode?.x) || 0;
+		const targetY = Number(sourceNode?.y) || 0;
 		const card = this.canvasApi.createFileNode(
 			canvas,
 			file,
-			Number(sourceNode?.x) || 0,
-			Number(sourceNode?.y) || 0,
+			targetX,
+			targetY,
 			width,
 			height
 		);
 		if (!card) throw new Error('Canvas could not create a file card');
+		if (typeof card.moveAndResize === 'function') {
+			card.moveAndResize({ x: targetX, y: targetY, width, height });
+		} else if (typeof card.moveTo === 'function') {
+			card.moveTo({ x: targetX, y: targetY });
+			card.width = width;
+			card.height = height;
+		}
 		const sourceData = canvasNodeUnknownData(sourceNode);
 		const patch = {
 			...(sourceData.collapsed !== undefined
@@ -5712,6 +5721,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let card = null;
 		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
+			const targetX = Number(node?.x) || 0;
+			const targetY = Number(node?.y) || 0;
+			const targetWidth = Number(node?.width) || this.settings.defaultNodeWidth;
+			const targetHeight = Number(node?.height) || this.settings.defaultNodeHeight;
 			file = await this.createCleanNoteForTopic(
 				canvas,
 				node,
@@ -5737,6 +5750,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			for (const topic of branch.slice().reverse())
 				this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
+			if (typeof card.moveAndResize === 'function') {
+				card.moveAndResize({
+					x: targetX,
+					y: targetY,
+					width: targetWidth,
+					height: targetHeight
+				});
+			} else if (typeof card.moveTo === 'function') {
+				card.moveTo({ x: targetX, y: targetY });
+				card.width = targetWidth;
+				card.height = targetHeight;
+			}
+			for (const edge of canvas.edges?.values?.() || []) {
+				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
+					edge.render?.();
+				}
+			}
 			if (canvas.selection?.has?.(node)) {
 				canvas.deselectAll?.();
 				canvas.select?.(card);
@@ -5933,10 +5963,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			await this.persistPluginData();
 			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
-			const replacementPosition = {
-				x: Number(card.x) || 0,
-				y: Number(card.y) || 0
-			};
+			const targetX = Number(rootNode.x) || 0;
+			const targetY = Number(rootNode.y) || 0;
+			const targetWidth = Number(rootNode.width) || this.settings.defaultNodeWidth;
+			const targetHeight = Number(rootNode.height) || this.settings.defaultNodeHeight;
 			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
 			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
@@ -5944,8 +5974,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			// trigger a full-map relayout and move the replacement. Keep the new
 			// file card exactly where the selected topic was.
 			this.applyStructuralMutation(canvas, [card], { save: false, layout: false });
-			card.moveTo?.(replacementPosition);
+			if (typeof card.moveAndResize === 'function') {
+				card.moveAndResize({
+					x: targetX,
+					y: targetY,
+					width: targetWidth,
+					height: targetHeight
+				});
+			} else if (typeof card.moveTo === 'function') {
+				card.moveTo({ x: targetX, y: targetY });
+				card.width = targetWidth;
+				card.height = targetHeight;
+			}
+			for (const edge of canvas.edges?.values?.() || []) {
+				if (edge?.from?.node?.id === card.id || edge?.to?.node?.id === card.id) {
+					edge.render?.();
+				}
+			}
 			this.layoutEngine.updateEdgeSides(canvas, { persist: false });
+			canvas.requestFrame?.();
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 			this.verifiedParentLinks.set(nestedPath, parentLink);

@@ -240,7 +240,7 @@ test("pulls complete subtrees inward like collision-limited springs", () => {
   assert.equal(positions.get("leaf").y, 0);
 });
 
-test("styles surplus links as curves while keeping the canonical tree vertical", () => {
+test("keeps sibling topics in the same column even when a branch has 4 or more children", () => {
   const engine = new LayoutEngine({
     nodeWidth: 200,
     nodeHeight: 60,
@@ -248,59 +248,24 @@ test("styles surplus links as curves while keeping the canonical tree vertical",
     verticalGap: 20,
     animate: false
   });
-  const makeCanvasNode = (id, x = 0, y = 0) => ({
-    id,
-    x,
-    y,
-    width: 200,
-    height: 60,
-    moveTo({ x: nextX, y: nextY }) {
-      this.x = nextX;
-      this.y = nextY;
-    }
-  });
-  const nodes = [
-    makeCanvasNode("root", 0, 0),
-    makeCanvasNode("alpha", 280, -80),
-    makeCanvasNode("beta", 280, 80),
-    makeCanvasNode("gamma", 560, -80)
-  ];
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edge = (id, from, to) => ({
-    id,
-    from: { node: byId.get(from), side: "right" },
-    to: { node: byId.get(to), side: "left" }
-  });
-  const explicitSurplus = edge("alpha-beta-straight", "alpha", "beta");
-  explicitSurplus.lineType = "straight";
-  const edges = [
-    edge("root-alpha", "root", "alpha"),
-    edge("root-beta", "root", "beta"),
-    edge("alpha-gamma", "alpha", "gamma"),
-    edge("alpha-beta", "alpha", "beta"),
-    explicitSurplus
-  ];
-  const canvas = {
-    nodes: new Map(nodes.map((node) => [node.id, node])),
-    edges: new Map(edges.map((item) => [item.id, item])),
-    getData: () => ({
-      nodes: nodes.map((node) => ({ id: node.id, type: "text" })),
-      edges: edges.map((item) => ({
-        id: item.id,
-        fromNode: item.from.node.id,
-        toNode: item.to.node.id
-      }))
-    }),
-    requestSave() {},
-    requestFrame() {}
-  };
-
-  engine.layout(canvas, { persist: false });
-
-  assert.equal(canvas.edges.get("alpha-beta").lineType, "curved");
-  assert.equal(canvas.edges.get("alpha-beta").curve, true);
-  assert.equal(canvas.edges.get("alpha-beta-straight").lineType, "straight");
-  assert.notEqual(canvas.edges.get("alpha-gamma").lineType, "curved");
+  const leaf = (id) => tree(id, [], 60);
+  const branchWithChildren = tree("child-1", [leaf("grandchild-1"), leaf("grandchild-2")]);
+  const root = tree("root", [
+    branchWithChildren,
+    leaf("child-2"),
+    leaf("child-3"),
+    leaf("child-4"),
+    leaf("child-5")
+  ]);
+  const positions = new Map();
+  engine.layoutSubtree(root, 0, 0, 0, "right", positions);
+  const child1X = positions.get("child-1").x;
+  assert.equal(positions.get("child-2").x, child1X);
+  assert.equal(positions.get("child-3").x, child1X);
+  assert.equal(positions.get("child-4").x, child1X);
+  assert.equal(positions.get("child-5").x, child1X);
+  assert.ok(positions.get("grandchild-1").x > child1X);
+  assert.ok(positions.get("grandchild-2").x > child1X);
 });
 
 

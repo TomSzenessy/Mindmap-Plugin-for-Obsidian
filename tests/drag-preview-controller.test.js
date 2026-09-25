@@ -405,6 +405,11 @@ test("only the primary button on a plain topic card is a drag the plugin owns", 
     "a resizer starts a resize, not a card drag"
   );
   assert.equal(
+    isPrimaryCardGesture(pointerEvent({ on: ["canvas-node-resize-handle"], node: topic }), context),
+    null,
+    "a resize handle starts a resize, not a card drag"
+  );
+  assert.equal(
     isPrimaryCardGesture(pointerEvent({ node: { ...topic, isEditing: true } }), context),
     null,
     "an active topic editor owns the pointer"
@@ -425,6 +430,29 @@ test("only the primary button on a plain topic card is a drag the plugin owns", 
     "an ordinary Canvas file owns nothing"
   );
   assert.equal(isPrimaryCardGesture(null, context), null);
+});
+
+test("nested connection control targets are not claimed as topic drags", () => {
+  const topic = { id: "topic" };
+  const target = {
+    closest: () => null,
+    parentElement: {
+      classList: {
+        contains: (name) => name === "canvas-node-connection-point"
+      }
+    }
+  };
+  assert.equal(
+    isPrimaryCardGesture(
+      { button: 0, target },
+      {
+        isEnabled: () => true,
+        findNode: () => topic,
+        isGroupNode: () => false
+      }
+    ),
+    null
+  );
 });
 
 test("one terminal finish commits once and ignores every later call", () => {

@@ -51158,7 +51158,33 @@ var {
 
   const PRIMARY_BUTTON = 0;
   const CANVAS_OWNED_CONTROL =
-    ".canvas-node-connection-point, .canvas-node-resizer, .canvas-node-resizers";
+    ".canvas-node-connection-point, .canvas-node-resizer, .canvas-node-resizers, .canvas-node-resize-handle, [class*='resizer']";
+  const CANVAS_OWNED_CLASSES = [
+    "canvas-node-connection-point",
+    "canvas-node-resizer",
+    "canvas-node-resizers",
+    "canvas-node-resize-handle"
+  ];
+
+  function isCanvasOwnedControl(target) {
+    if (!target) return false;
+    if (target.closest?.(CANVAS_OWNED_CONTROL)) return true;
+    const candidates = [];
+    if (typeof target.composedPath === "function") {
+      try {
+        candidates.push(...target.composedPath());
+      } catch (_) {}
+    }
+    let current = target;
+    while (current) {
+      candidates.push(current);
+      current = current.parentElement;
+    }
+    return candidates.some((element) => {
+      if (element?.matches?.(CANVAS_OWNED_CONTROL)) return true;
+      return CANVAS_OWNED_CLASSES.some((name) => element?.classList?.contains?.(name));
+    });
+  }
 
   /**
    * The one predicate for a card gesture this plugin owns.
@@ -51177,7 +51203,7 @@ var {
       return null;
     }
 
-    if (event.target?.closest?.(CANVAS_OWNED_CONTROL)) {
+    if (isCanvasOwnedControl(event.target)) {
       return null;
     }
 

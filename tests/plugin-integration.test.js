@@ -350,8 +350,16 @@ test("claims a topic pointer gesture before the host Canvas can also drag it", (
   const document = new FakeDocument();
   const wrapper = new FakeElement("div", document);
   const target = {};
+  const connectionTarget = {
+    closest: () => null,
+    parentElement: {
+      classList: {
+        contains: (name) => name === "canvas-node-connection-point"
+      }
+    }
+  };
   const nodeEl = {
-    contains: (value) => value === target,
+    contains: (value) => value === target || value === connectionTarget,
     closest: () => null,
     addClass() {},
     removeClass() {},
@@ -396,6 +404,14 @@ test("claims a topic pointer gesture before the host Canvas can also drag it", (
     button: 0,
     pointerId: 1,
     target,
+    preventDefault() { prevented++; },
+    stopPropagation() { stopped++; },
+    stopImmediatePropagation() { stoppedImmediate++; }
+  }, true);
+  wrapper.dispatch("pointerdown", {
+    button: 0,
+    pointerId: 2,
+    target: connectionTarget,
     preventDefault() { prevented++; },
     stopPropagation() { stopped++; },
     stopImmediatePropagation() { stoppedImmediate++; }

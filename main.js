@@ -50559,7 +50559,8 @@ var TreeDrag = (() => {
     draggedNode,
     allNodes,
     mainRootNode,
-    isDescendantFn = null
+    isDescendantFn = null,
+    maximumDistance = Infinity
   ) {
     if (!draggedNode || !mainRootNode)
       return null;
@@ -50570,7 +50571,7 @@ var TreeDrag = (() => {
     const draggedRight = draggedLeft +
       Math.max(1, Number(draggedNode.width) || 1);
     let bestNode = null;
-    let bestDistance = Infinity;
+    let bestDistance = Math.max(0, Number(maximumDistance) || 0);
     let bestHorizontalGap = Infinity;
 
     for (const node of Array.isArray(allNodes) ? allNodes : Array.from(allNodes || [])) {
@@ -51295,9 +51296,6 @@ var {
         canvasApi.removeEdge(canvas, previewEdge);
       previewEdge = null;
       previewParent = null;
-      for (const origEdge of originalEdgeObjects) {
-        setCanvasEdgeHidden(origEdge, false);
-      }
     }
 
     function resetState() {
@@ -51335,6 +51333,9 @@ var {
       state = draggedNode ? "original" : "idle";
       finished = false;
       settledResult = null;
+      for (const origEdge of originalEdgeObjects) {
+        setCanvasEdgeHidden(origEdge, true);
+      }
       return originalParent;
     }
 
@@ -51424,8 +51425,7 @@ var {
       // bounding box merely reaches the cursor; otherwise the preview sticks to
       // the branch it came from until the whole map is left behind.
       const candidates = maps.filter(
-        (map) =>
-          map.contains || map.nodeDistance <= ATTACHMENT_DISTANCE
+        (map) => map.nodeDistance <= ATTACHMENT_DISTANCE
       );
       if (candidates.length === 0) return null;
       candidates.sort(
@@ -51449,15 +51449,19 @@ var {
       const candidate = attachmentMap?.root || null;
       const rayTarget = candidate
         ? attachmentMap.nodes.length === 1
-          ? candidate
+          ? (nodeToNodeDistance(draggedNode, candidate) <= ATTACHMENT_DISTANCE ? candidate : null)
           : findNearestNodeOnBranch(
             draggedNode,
             attachmentMap.nodes,
             candidate,
-            (rootId, targetId) => dragIndex.descendantIds.has(targetId)
+            (rootId, targetId) => dragIndex.descendantIds.has(targetId),
+            ATTACHMENT_DISTANCE
           )
         : null;
-      const targetNode = rayTarget;
+      const targetNode =
+        rayTarget && nodeToNodeDistance(draggedNode, rayTarget) <= ATTACHMENT_DISTANCE
+          ? rayTarget
+          : null;
       const mainRootNode = targetNode
         ? getRootNode?.(targetNode) || targetNode
         : null;

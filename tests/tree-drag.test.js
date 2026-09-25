@@ -231,6 +231,30 @@ test("targets the nearest strictly inward card on the same branch only", () => {
     )?.id,
     "right-near"
   );
+
+  assert.equal(
+    findNearestNodeOnBranch(
+      draggedRight,
+      [root, leftNear, rightFar, rightOverlap, rightNear],
+      root,
+      null,
+      30
+    ),
+    null,
+    "maximumDistance excludes nodes beyond the given threshold"
+  );
+
+  assert.equal(
+    findNearestNodeOnBranch(
+      draggedRight,
+      [root, leftNear, rightFar, rightOverlap, rightNear],
+      root,
+      null,
+      50
+    )?.id,
+    "right-near",
+    "maximumDistance includes nodes within the given threshold"
+  );
 });
 
 test("reattaching a topic keeps the authored branch link", () => {

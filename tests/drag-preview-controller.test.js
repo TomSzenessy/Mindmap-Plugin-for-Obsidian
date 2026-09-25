@@ -966,3 +966,44 @@ test("hides original incoming edge lineGroupEl and lineEndGroupEl during preview
   assert.equal(originalEdge.lineGroupEl.style.display, "");
   assert.equal(originalEdge.lineEndGroupEl.style.display, "");
 });
+
+test("dragging beyond ATTACHMENT_DISTANCE automatically disconnects and keeps original edges hidden", () => {
+  const fixture = dragFixture({ withOriginalParent: true });
+  const originalEdge = fixture.canvasApi.getIncomingEdges(null, fixture.dragged)[0];
+  fixture.controller.begin(fixture.dragged);
+
+  // Position within attachment distance
+  fixture.dragged.x = fixture.oldParent.x + fixture.oldParent.width + 50;
+  let preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.equal(originalEdge.lineGroupEl.style.display, "none");
+
+  // Move beyond ATTACHMENT_DISTANCE (180px) from all cards
+  fixture.dragged.x = 2000;
+  preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "detached");
+  assert.equal(preview.target, null);
+  // Original edge MUST remain hidden during detached drag
+  assert.equal(originalEdge.lineGroupEl.style.display, "none");
+
+  // Committing while detached permanently removes incoming edges
+  const result = fixture.controller.commit(fixture.dragged);
+  assert.equal(result.state, "detached");
+  assert.equal(fixture.activeEdges.length, 0);
+});
+
+test("cancelling a detached drag restores the original edge", () => {
+  const fixture = dragFixture({ withOriginalParent: true });
+  const originalEdge = fixture.canvasApi.getIncomingEdges(null, fixture.dragged)[0];
+  fixture.controller.begin(fixture.dragged);
+
+  fixture.dragged.x = 2000;
+  const preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "detached");
+  assert.equal(originalEdge.lineGroupEl.style.display, "none");
+
+  fixture.controller.finish("cancel", fixture.dragged);
+  assert.equal(originalEdge.lineGroupEl.style.display, "");
+  assert.equal(fixture.activeEdges.length, 1);
+});
+

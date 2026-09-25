@@ -646,3 +646,94 @@ test("invokes edge.render when updating edge sides and applying positions", () =
   assert.ok(renderedCount > beforeCount, "edge.render should be called on applyPositions");
 });
 
+test("spreads subbranches equally to both sides without changing their order", () => {
+  const engine = new LayoutEngine();
+  const root = { canvasNode: { id: "root", x: 0, y: 0, width: 200, height: 60 }, children: [] };
+  const childNodes = ["a", "b", "c", "d"].map((id, index) => ({
+    canvasNode: { id, x: 300, y: index * 50, width: 200, height: 60 },
+    children: [],
+    parent: root
+  }));
+  root.children = childNodes;
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(root, false, null, { spreadEqually: true });
+  assert.equal(rightChildren.length, 2);
+  assert.equal(leftChildren.length, 2);
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["a", "b"]);
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["c", "d"]);
+});
+
+test("spreads odd number of subbranches equally (ceil on right, floor on left) preserving order", () => {
+  const engine = new LayoutEngine();
+  const root = { canvasNode: { id: "5", x: 0, y: 0, width: 200, height: 60 }, children: [] };
+  const childNodes = ["v", "c", "d"].map((id, index) => ({
+    canvasNode: { id, x: 300, y: index * 50, width: 200, height: 60 },
+    children: [],
+    parent: root
+  }));
+  root.children = childNodes;
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(root, false, null, { spreadEqually: true });
+  assert.equal(rightChildren.length, 2);
+  assert.equal(leftChildren.length, 1);
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["v", "c"]);
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["d"]);
+});
+
+test("automatically spreads one-sided branches equally in nested mind maps", () => {
+  const makeNode = (id, x, y) => ({
+    id,
+    x,
+    y,
+    width: 200,
+    height: 60,
+    moveTo({ x: nextX, y: nextY }) {
+      this.x = nextX;
+      this.y = nextY;
+    },
+    nodeEl: { addClass() {}, removeClass() {} }
+  });
+  const root = makeNode("2", 0, 0);
+  const a = makeNode("a", 300, -60);
+  const b = makeNode("b", 300, 20);
+  const c = makeNode("c", 300, 100);
+  const d = makeNode("d", 300, 180);
+  const edges = new Map([
+    ["e-a", { id: "e-a", from: { node: root, side: "right" }, to: { node: a, side: "left" }, fromSide: "right", toSide: "left" }],
+    ["e-b", { id: "e-b", from: { node: root, side: "right" }, to: { node: b, side: "left" }, fromSide: "right", toSide: "left" }],
+    ["e-c", { id: "e-c", from: { node: root, side: "right" }, to: { node: c, side: "left" }, fromSide: "right", toSide: "left" }],
+    ["e-d", { id: "e-d", from: { node: root, side: "right" }, to: { node: d, side: "left" }, fromSide: "right", toSide: "left" }]
+  ]);
+  const canvas = {
+    nodes: new Map([["2", root], ["a", a], ["b", b], ["c", c], ["d", d]]),
+    edges,
+    getData: () => ({
+      mindmap: true,
+      mindmapParent: { canvas: "Parent.canvas", nodeId: "card-1" },
+      nodes: [root, a, b, c, d].map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height })),
+      edges: Array.from(edges.values()).map((e) => ({ id: e.id, fromNode: e.from.node.id, toNode: e.to.node.id, fromSide: e.fromSide, toSide: e.toSide }))
+    }),
+    requestSave() {},
+    requestFrame() {}
+  };
+  const engine = new LayoutEngine({ animate: false });
+  engine.layout(canvas);
+
+  // First half (a, b) should remain on the right (x > 0)
+  assert.ok(a.x > root.x, "a should be on right");
+  assert.ok(b.x > root.x, "b should be on right");
+  assert.ok(a.y < b.y, "a should be above b");
+
+  // Second half (c, d) should float to the left (x < 0)
+  assert.ok(c.x < root.x, "c should be on left");
+  assert.ok(d.x < root.x, "d should be on left");
+  assert.ok(c.y < d.y, "c should be above d");
+
+  // Edges should update side directions accordingly
+  assert.equal(edges.get("e-a").from.side, "right");
+  assert.equal(edges.get("e-a").to.side, "left");
+  assert.equal(edges.get("e-c").from.side, "left");
+  assert.equal(edges.get("e-c").to.side, "right");
+});
+
+

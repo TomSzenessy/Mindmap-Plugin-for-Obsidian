@@ -1425,6 +1425,66 @@ function serializedBranchData(canvas, branchNodes, rootNode) {
 	return { nodes, edges };
 }
 
+function layoutNestedMindmapData(data, layoutEngine) {
+	if (!data || !Array.isArray(data.nodes) || data.nodes.length <= 1) return;
+	const nodeMap = new Map();
+	for (const n of data.nodes) {
+		nodeMap.set(n.id, {
+			id: n.id,
+			x: Number(n.x) || 0,
+			y: Number(n.y) || 0,
+			width: Number(n.width) || 200,
+			height: Number(n.height) || 60,
+			moveTo(pos) {
+				this.x = pos.x;
+				this.y = pos.y;
+			}
+		});
+	}
+	const edgeMap = new Map();
+	for (const e of data.edges || []) {
+		const fromNode = nodeMap.get(e.fromNode);
+		const toNode = nodeMap.get(e.toNode);
+		if (!fromNode || !toNode) continue;
+		edgeMap.set(e.id, {
+			id: e.id,
+			from: { node: fromNode, side: e.fromSide || 'right' },
+			to: { node: toNode, side: e.toSide || 'left' },
+			fromNode: e.fromNode,
+			toNode: e.toNode,
+			fromSide: e.fromSide || 'right',
+			toSide: e.toSide || 'left'
+		});
+	}
+	const mockCanvas = {
+		nodes: nodeMap,
+		edges: edgeMap,
+		getData: () => data,
+		requestSave() {},
+		requestFrame() {}
+	};
+	layoutEngine.layout(mockCanvas, {
+		persist: false,
+		animate: false,
+		preserveRootSides: false,
+		spreadEqually: true
+	});
+	for (const n of data.nodes) {
+		const updated = nodeMap.get(n.id);
+		if (updated) {
+			n.x = updated.x;
+			n.y = updated.y;
+		}
+	}
+	for (const e of data.edges || []) {
+		const updated = edgeMap.get(e.id);
+		if (updated) {
+			e.fromSide = updated.from.side;
+			e.toSide = updated.to.side;
+		}
+	}
+}
+
 var MarkdownMindMapModal = class extends import_obsidian4.Modal {
 	constructor(app, onImport) {
 		super(app);
@@ -5992,6 +6052,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const nested = serializedBranchData(canvas, branch, rootNode);
 		nested.mindmap = true;
 		nested.mindmapNestedVersion = 1;
+		layoutNestedMindmapData(nested, this.layoutEngine);
 		nested.mindmapPendingResize = nested.nodes.map((item) => item.id);
 		const nestedPath = allocateFilePath(
 			canvasFolderPath(canvas),
@@ -6930,6 +6991,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let cachedDragForest = [];
 		let liveBranchDirection = null;
 		let livePreviewTargetId = null;
+		let liveDetached = false;
+		let singleStartPositions = new Map();
 		let previewResolved = false;
 		let draggedDescendants = [];
 		let draggedMoveTo = null;
@@ -7124,6 +7187,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					: null;
 				previewResolved = Boolean(preview);
 				if (preview?.state === 'preview' && preview.target) {
+					liveDetached = false;
 					const direction = directionOppositeIncomingSide(
 						preview.incomingSide
 					);
@@ -7148,23 +7212,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						}
 					}
 				} else if (preview?.state === 'detached') {
-					const wasDirectional =
+					const shouldRebalance =
+						!liveDetached ||
 						livePreviewTargetId !== null ||
 						liveBranchDirection !== null;
 					livePreviewTargetId = null;
 					liveBranchDirection = null;
-					if (wasDirectional && isSingleCardDrag) {
-						this.layoutEngine.layoutChildren(
+					if (shouldRebalance && isSingleCardDrag) {
+						liveDetached = true;
+						this.layoutEngine?.layoutChildren?.(
 							canvas,
 							draggedNode.id,
 							null,
 							{
+								treatAsRoot: true,
+								spreadEqually: true,
 								animate: false,
 								persist: false
 							}
 						);
 					}
 				} else if (this.canvasApi.getParentNode(canvas, draggedNode)) {
+					liveDetached = false;
 					const direction = directionFromParent(draggedNode);
 					const leftTargetPreview = livePreviewTargetId !== null;
 					livePreviewTargetId = null;
@@ -7413,6 +7482,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						: null;
 					this.layoutEngine.layout(canvas, {
 						preserveRootSides: true,
+						spreadEquallyForRootIds: preview?.state === 'detached'
+							? new Set(multiTopLevelNodes.map((n) => n.id))
+							: null,
 						branchDirectionOverride: branchDirection && targetNode
 							? {
 									nodeId: targetNode.id,
@@ -7530,10 +7602,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				terminalReason === 'commit' ? 'commit' : 'cancel',
 				draggedNode
 			);
-			if (terminalReason !== 'commit' && isMultiCardDrag) {
-				for (const [id, pos] of multiStartPositions) {
-					const node = canvas.nodes?.get(id);
-					node?.moveTo?.(pos);
+			if (terminalReason !== 'commit') {
+				if (isMultiCardDrag) {
+					for (const [id, pos] of multiStartPositions) {
+						const node = canvas.nodes?.get(id);
+						node?.moveTo?.(pos);
+					}
+				} else if (isSingleCardDrag && singleStartPositions.size > 0) {
+					for (const [id, pos] of singleStartPositions) {
+						const node = canvas.nodes?.get(id);
+						node?.moveTo?.(pos);
+					}
+					this.layoutEngine?.updateEdgeSides?.(canvas, { persist: false });
 				}
 			}
 			restoreDraggedMove();
@@ -7546,9 +7626,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			multiMovingNodes = [];
 			multiTopLevelNodes = [];
 			multiStartPositions.clear();
+			singleStartPositions.clear();
 			preservedSelection = null;
 			liveBranchDirection = null;
 			livePreviewTargetId = null;
+			liveDetached = false;
 			previewResolved = false;
 			resizingNode = null;
 			dragPointerStart = null;
@@ -7713,6 +7795,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					multiMovingNodes = [];
 					multiTopLevelNodes = [];
 					multiStartPositions.clear();
+					singleStartPositions.clear();
+					singleStartPositions.set(node.id, { x: node.x, y: node.y });
+					for (const desc of this.collectSubtreeNodes(canvas, node)) {
+						singleStartPositions.set(desc.id, { x: desc.x, y: desc.y });
+					}
 					preservedSelection = null;
 
 					const parentNode = this.canvasApi.getParentNode(canvas, node);
@@ -7720,6 +7807,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						? directionFromParent(node)
 						: null;
 					livePreviewTargetId = null;
+					liveDetached = false;
 					previewResolved = false;
 
 					if (!resizingNode) setMediaDragging(node, true);

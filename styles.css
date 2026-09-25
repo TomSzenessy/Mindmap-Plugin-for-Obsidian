@@ -381,20 +381,26 @@
 
 /* Collapsed subtrees remain in the saved graph, but their cards are hidden
  * from the interactive Canvas and from automatic layout. */
-.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-hidden {
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-hidden,
+.tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-hidden {
 	display: none !important;
 	pointer-events: none !important;
 }
 
 .tomindmap-mindmap-mode
 	.canvas-node.tomindmap-collapsed-node
+	.canvas-node-container,
+.tomindmap-mindmap-mode
+	.canvas-node .tomindmap-collapsed-node
 	.canvas-node-container {
 	outline: 2px dashed var(--interactive-accent) !important;
 	outline-offset: 2px;
 }
 
 .tomindmap-mindmap-mode
-	.canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before {
+	.canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.tomindmap-mindmap-mode
+	.canvas-node .tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before {
 	content: '＋';
 	position: absolute;
 	z-index: 2;
@@ -504,6 +510,31 @@
 	padding: 0 !important;
 	transform: none !important;
 	box-sizing: border-box;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card
+	.canvas-node-placeholder {
+	position: absolute !important;
+	inset: 0 !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	transform: none !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card
+	.canvas-node-label,
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-file-card
+	.canvas-node-container
+	.inline-title,
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
+	.canvas-node-placeholder {
+	display: none !important;
+	margin: 0 !important;
+	padding: 0 !important;
 }
 
 .tomindmap-mindmap-mode

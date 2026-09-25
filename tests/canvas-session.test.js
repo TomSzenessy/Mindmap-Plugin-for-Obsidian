@@ -299,10 +299,11 @@ test("writes an authoritative Canvas snapshot when leaving the view", async () =
 
 test("reflows the complete canvas after any topic move", () => {
   const calls = [];
+  let layoutOptions = null;
   const canvas = { requestSave: () => calls.push("save") };
   const changed = reflowCanvasAfterMove(canvas, {
     isMindmap: () => true,
-    layout: { layout: () => calls.push("layout") },
+    layout: { layout: (_canvas, options) => { layoutOptions = options; calls.push("layout"); } },
     updateGroups: () => calls.push("groups"),
     autoColor: () => true,
     colors: { applyColors: () => calls.push("colors") },
@@ -310,6 +311,7 @@ test("reflows the complete canvas after any topic move", () => {
   });
 
   assert.equal(changed, true);
+  assert.deepEqual(layoutOptions, { preserveRootSides: true });
   assert.deepEqual(calls, ["layout", "groups", "colors", "order", "save"]);
 });
 

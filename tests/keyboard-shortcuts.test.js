@@ -51,6 +51,29 @@ test("captures Shift+Enter while a topic card is being edited", () => {
   assert.equal(handler.shouldCaptureNavigationShortcut(canvas, event), true);
 });
 
+test("leaves customizable modifier shortcuts for Obsidian commands", () => {
+  const { canvas, handler, node } = editingHarness();
+  node.isEditing = false;
+  const event = {
+    key: "C",
+    shiftKey: true,
+    ctrlKey: false,
+    metaKey: true,
+    altKey: false,
+    target: { closest: () => false }
+  };
+  assert.equal(handler.shouldCaptureNavigationShortcut(canvas, event), false);
+  let prevented = false;
+  event.preventDefault = () => { prevented = true; };
+  event.stopImmediatePropagation = () => {};
+  handler.handleKeydown(canvas, event);
+  assert.equal(prevented, false);
+  event.key = "ArrowUp";
+  event.shiftKey = false;
+  event.altKey = true;
+  assert.equal(handler.shouldCaptureNavigationShortcut(canvas, event), true);
+});
+
 test("inserts a newline for Shift+Enter without leaving edit mode", () => {
   const { canvas, handler, node } = editingHarness();
   const calls = [];

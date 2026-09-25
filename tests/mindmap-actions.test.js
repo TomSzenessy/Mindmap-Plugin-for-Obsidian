@@ -16,6 +16,7 @@ const {
 	isTextTopicNode,
 	getTopicBranch,
 	remapLinkedCanvasData,
+	updateLinkedParentCardData,
 	syncCollapsedVisibility
 } = require('../lib/mindmap-actions.js');
 
@@ -136,6 +137,29 @@ test('remaps nested linked content at the linked card anchor', () => {
 	assert.deepEqual(result.edges, [
 		{ id: 'new-3', fromNode: 'new-1', toNode: 'new-2' }
 	]);
+});
+
+test('updates a parent linked card when a nested title changes', () => {
+	const data = {
+		nodes: [
+			{ id: 'parent-card', type: 'file', file: 'Nested.canvas' },
+			{ id: 'other', type: 'text', text: 'Other' }
+		]
+	};
+	const result = updateLinkedParentCardData(
+		data,
+		'parent-card',
+		'New title',
+		'Renamed.canvas'
+	);
+	assert.equal(result, data);
+	assert.deepEqual(result.nodes[0].unknownData, {
+		tomindmapTitleOnly: true,
+		tomindmapCardKind: 'nested-map',
+		tomindmapCardTitle: 'New title'
+	});
+	assert.equal(result.nodes[0].file, 'Renamed.canvas');
+	assert.equal(result.nodes[1].text, 'Other');
 });
 
 test('toggles subtree collapse state', () => {

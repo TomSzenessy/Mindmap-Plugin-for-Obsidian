@@ -163,6 +163,11 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 				'Type to edit · Enter creates a sibling (or saves while editing) · Shift+Enter creates a sibling above (or a line break while editing) · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+Delete removes only the topic · Mod+Enter inserts a parent · Alt+Up/Down reorders · Mod+F searches the outline · F2 edits · Mod+R selects the root.'
 			);
 		new import_obsidian3.Setting(containerEl)
+			.setName('Customizable mind-map actions')
+			.setDesc(
+				'Open Settings → Hotkeys and search ToMindMap to customize collapse/expand, file conversion, nested-map conversion, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod (Cmd on macOS).'
+			);
+		new import_obsidian3.Setting(containerEl)
 			.setName('Auto-color branches')
 			.setDesc('Assign distinct colors to top-level branches')
 			.addToggle((toggle) =>
@@ -1766,10 +1771,12 @@ function findNativeCanvasMenuItem(menu, titlePattern) {
 	);
 }
 
-function replaceNativeCanvasMenuItem(menu, titlePattern, title, icon, onClick) {
+function removeNativeCanvasMenuItem(menu, titlePattern) {
 	const item = findNativeCanvasMenuItem(menu, titlePattern);
-	if (!item || typeof item.onClick !== 'function') return false;
-	item.setTitle(title).setIcon(icon).onClick(onClick);
+	if (!item || !Array.isArray(menu.items)) return false;
+	const index = menu.items.indexOf(item);
+	if (index < 0) return false;
+	menu.items.splice(index, 1);
 	return true;
 }
 
@@ -4194,6 +4201,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.addCommand({
 			id: 'mindmap-relayout',
 			name: 'Re-layout mind map',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'L' }],
 			checkCallback: (checking) => {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas) return false;
@@ -4241,6 +4249,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.addCommand({
 			id: 'mindmap-open-outline',
 			name: 'Open mind map outline',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'O' }],
 			checkCallback: (checking) => {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
@@ -4312,6 +4321,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.addCommand({
 			id: 'mindmap-apply-colors',
 			name: 'Apply branch colors',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'K' }],
 			checkCallback: (checking) => {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas) return false;
@@ -4323,11 +4333,111 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.addCommand({
 			id: 'mindmap-toggle-mode',
 			name: 'Toggle mindmap mode for this canvas',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'T' }],
 			checkCallback: (checking) => {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas) return false;
 				if (checking) return true;
 				this.toggleMindmapMode(canvas);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-toggle-subtree',
+			name: 'Collapse or expand selected subtree',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'C' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const node = this.canvasApi.getSelectedNode(canvas);
+				if (!node) return false;
+				const forest = buildForest(canvas);
+				const tree = findTreeForNode(forest, node.id);
+				if (!tree || tree.children.length === 0) return false;
+				if (checking) return true;
+				const next = MindmapActions.toggleSubtreeCollapse(
+					canvas,
+					forest,
+					node
+				);
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
+				canvas.requestSave();
+				this.refreshOutline(canvas);
+				new import_obsidian5.Notice(
+					next ? 'Subtree collapsed' : 'Subtree expanded'
+				);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-convert-file-with-subtree',
+			name: 'Convert selected topic to file with subtree',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'F' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const node = this.canvasApi.getSelectedNode(canvas);
+				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
+				const forest = buildForest(canvas);
+				const tree = findTreeForNode(forest, node.id);
+				if (!tree || tree.children.length === 0) return false;
+				if (checking) return true;
+				void this.convertTopicToCleanNotes(canvas, node, true);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-convert-file-without-subtree',
+			name: 'Convert selected topic to file without subtree',
+			hotkeys: [{ modifiers: ['Mod', 'Alt'], key: 'F' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const node = this.canvasApi.getSelectedNode(canvas);
+				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
+				if (checking) return true;
+				void this.convertTopicToCleanNotes(canvas, node, false);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-convert-linked-to-topic',
+			name: 'Expand linked file into a normal topic',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'N' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const node = this.canvasApi.getSelectedNode(canvas);
+				if (
+					!node ||
+					!canvasNodeFilePath(node) ||
+					!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]
+				)
+					return false;
+				if (checking) return true;
+				void this.convertLinkedNodeToNormalTopic(canvas, node);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-convert-to-nested',
+			name: 'Convert selected topic to nested mind map',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'M' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const node = this.canvasApi.getSelectedNode(canvas);
+				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
+				if (checking) return true;
+				void this.convertTopicToNestedMindMap(canvas, node);
+			}
+		});
+		this.addCommand({
+			id: 'mindmap-open-parent',
+			name: 'Go to parent mind map',
+			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'ArrowUp' }],
+			checkCallback: (checking) => {
+				const canvas = this.canvasApi.getActiveCanvas();
+				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+				const parent = canvas.getData?.()?.[TOMINMAP_PARENT];
+				if (!parent?.canvas || !parent?.nodeId) return false;
+				if (checking) return true;
+				void this.openParentMindMap(canvas, parent);
 			}
 		});
 		this.registerEvent(
@@ -4516,6 +4626,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							new import_obsidian5.Notice('Node link copied');
 						});
 				});
+				if (canvas && this.isMindmapCanvas(canvas))
+					removeNativeCanvasMenuItem(
+						menu,
+						/^Convert to file(?:\.{3}|…)$/i
+					);
 				if (
 					canvas &&
 					this.isMindmapCanvas(canvas) &&
@@ -4529,42 +4644,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					const hasBranch = !!(
 						conversionTree && conversionTree.children.length > 0
 					);
-					const convertDefaultNotes = () =>
-						void this.convertTopicToCleanNotes(
-							canvas,
-							node,
-							hasBranch
-						);
-					const defaultTitle = hasBranch
-						? 'Convert branch to Markdown file'
-						: 'Convert to clean note';
-					const replacedNativeConvert = replaceNativeCanvasMenuItem(
-						menu,
-						/^Convert to file(?:\.{3}|…)$/i,
-						defaultTitle,
-						hasBranch ? 'file-text' : 'file-plus',
-						convertDefaultNotes
-					);
-					if (!replacedNativeConvert) {
-						menu.addItem((item) => {
-							item.setTitle(defaultTitle)
-								.setIcon(hasBranch ? 'file-text' : 'file-plus')
-								.onClick(convertDefaultNotes);
-						});
-					}
+					const convertWithSubtree = () =>
+						void this.convertTopicToCleanNotes(canvas, node, true);
+					const convertWithoutSubtree = () =>
+						void this.convertTopicToCleanNotes(canvas, node, false);
 					if (hasBranch) {
 						menu.addItem((item) => {
-							item.setTitle('Convert this topic to empty note')
-								.setIcon('file-plus')
-								.onClick(() =>
-									void this.convertTopicToCleanNotes(
-										canvas,
-										node,
-										false
-									)
-								);
+							item.setTitle('Convert to file with subtree')
+								.setIcon('file-text')
+								.onClick(convertWithSubtree);
 						});
 					}
+					menu.addItem((item) => {
+						item.setTitle('Convert to file without subtree')
+							.setIcon('file-plus')
+							.onClick(convertWithoutSubtree);
+					});
 					menu.addItem((item) => {
 						item.setTitle(
 							hasBranch
@@ -5611,13 +5706,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
-					if (
-						!this.isAutoAdjustCanvas(canvas2) ||
-						!this.isMindmapCanvas(canvas2)
-					) {
-						return;
-					}
+					if (!this.isMindmapCanvas(canvas2)) return;
 					void this.renameCanvasFromRootTopic(canvas2, editedNode);
+					if (!this.isAutoAdjustCanvas(canvas2)) return;
 					this.resizeNodesWhenRendered(
 						canvas2,
 						[editedNode],
@@ -8912,6 +9003,57 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!element || typeof element.toggleClass !== 'function') return;
 		element.toggleClass(ROOT_TOPIC_CLASS, isRoot);
 	}
+	async syncParentLinkedCardTitle(canvas, title, childFile = null) {
+		const parentLink = canvas?.getData?.()?.[TOMINMAP_PARENT];
+		const parentPath = parentLink?.canvas;
+		const parentNodeId = parentLink?.nodeId;
+		if (!parentPath || !parentNodeId || !title) return false;
+		const parentFile = this.app.vault.getAbstractFileByPath(parentPath);
+		if (!(parentFile instanceof import_obsidian5.TFile)) return false;
+		const patchData = (data) =>
+			MindmapActions.updateLinkedParentCardData(
+				data,
+				parentNodeId,
+				title,
+				childFile?.path
+			);
+		const parentCanvas = this.getOpenCanvasByPath(parentPath);
+		const card = parentCanvas?.nodes?.get(parentNodeId);
+		if (card) {
+			if (childFile?.path) {
+				if (typeof card.setFilePath === 'function')
+					card.setFilePath(childFile.path, card.subpath || '');
+				else if (typeof card.setFile === 'function')
+					card.setFile(childFile, '');
+				else {
+					card.file = childFile;
+					card.filePath = childFile.path;
+				}
+			}
+			setCanvasNodeUnknownData(card, {
+				[TOMINMAP_TITLE_ONLY]: true,
+				[TOMINMAP_CARD_KIND]: 'nested-map',
+				[TOMINMAP_CARD_TITLE]: title
+			});
+			this.updateNodeTypeAttributes(parentCanvas);
+			this.updateGroupBounds(parentCanvas);
+			parentCanvas.requestSave?.();
+			return true;
+		}
+		if (typeof this.app.vault.process !== 'function') return false;
+		try {
+			await this.app.vault.process(parentFile, (raw) => {
+				const data = JSON.parse(raw);
+				const patched = patchData(data);
+				return patched ? JSON.stringify(patched, null, '\t') : raw;
+			});
+			return true;
+		} catch (error) {
+			console.error('ToMindMap: could not update the parent linked card', error);
+			return false;
+		}
+	}
+
 	/**
 	 * Rename a Canvas file after its central topic is titled. Only a lone
 	 * root topic drives the name so a canvas holding several maps keeps its
@@ -8919,11 +9061,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 */
 	async renameCanvasFromRootTopic(canvas, node) {
 		if (this.unloaded) return false;
-		if (!this.settings.renameCanvasFromRootTopic) return false;
 		if (!canvas || !this.isMindmapCanvas(canvas)) return false;
 		const file = canvas.view?.file;
 		if (!file || file.extension !== 'canvas') return false;
 		if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
+		const title = deriveCanvasTitle(node.text);
+		if (!title) return false;
+		await this.syncParentLinkedCardTitle(canvas, title, file);
+		if (!this.settings.renameCanvasFromRootTopic) return false;
 		// A canvas may hold floating cards beside its map. Rename only when this
 		// root is the single branching map, so several real maps never fight
 		// over the filename.
@@ -8934,14 +9079,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				(tree.children?.length || 0) > 0
 		);
 		if (competingMaps.length > 0) return false;
-		const title = deriveCanvasTitle(node.text);
-		if (!title || title === file.basename) return false;
+		if (title === file.basename) return false;
 		const folder = file.parent?.path ? `${file.parent.path}/` : '';
 		const target = `${folder}${title}.canvas`;
 		if (target === file.path) return false;
 		if (this.app.vault.getAbstractFileByPath(target)) return false;
 		try {
 			await this.app.fileManager.renameFile(file, target);
+			await this.syncParentLinkedCardTitle(
+				canvas,
+				title,
+				this.app.vault.getAbstractFileByPath(target) ||
+					canvas.view?.file ||
+					file
+			);
 			return true;
 		} catch (error) {
 			console.error('ToMindMap: could not rename the Canvas file', error);

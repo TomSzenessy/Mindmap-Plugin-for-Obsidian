@@ -25,7 +25,7 @@ _Avoid_: Deleted branch when the underlying structure should remain recoverable.
 **Nested mind map**: A separate Canvas file containing a moved topic and its descendants. Its parent retains a title-only linked card at the original location.
 _Avoid_: Embedded map when the content is a separate file.
 
-**Parent link**: The immediate parent Canvas and linked-card identifier stored by a nested mind map. It is a one-level navigation relationship, not a Markdown body link.
+**Parent link**: The immediate parent Canvas and linked-card identifier stored by a nested mind map. It is a one-level navigation relationship, not a Markdown body link. The parent card title follows the nested map's main title.
 _Avoid_: Backlink chain when describing the stored relationship.
 
 **Include nested maps**: An export option that recursively substitutes linked nested Canvas content into the exported map instead of treating the link as a terminal card.

@@ -39328,9 +39328,12 @@ var {
    * stable insertion order instead of making layout recurse forever.
    */
   function isCollapsedCanvasNodeHidden(node) {
-    return !!(
-      node?.nodeEl?.hasClass?.("tomindmap-collapsed-hidden") ||
-      node?.nodeEl?.classList?.contains?.("tomindmap-collapsed-hidden")
+    const element = node?.nodeEl;
+    const shell = element?.closest?.(".canvas-node");
+    return [element, shell].some(
+      (candidate) =>
+        candidate?.hasClass?.("tomindmap-collapsed-hidden") ||
+        candidate?.classList?.contains?.("tomindmap-collapsed-hidden")
     );
   }
 
@@ -40624,7 +40627,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Apply calculated positions to canvas nodes.
      */
     applyPositions(canvas, positions, options = {}) {
-      var _a;
+      var _a, _b;
       const animate = options.animate ?? this.config.animate;
       const persist = options.persist !== false;
       for (const [nodeId, pos] of positions) {
@@ -40633,6 +40636,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
           continue;
         if (animate) {
           (_a = node.nodeEl) == null ? void 0 : _a.addClass("mindmap-animating");
+        } else {
+          (_b = node.nodeEl) == null ? void 0 : _b.removeClass("mindmap-animating");
         }
         node.moveTo({ x: pos.x, y: pos.y });
       }
@@ -44519,12 +44524,14 @@ var MindmapActions = (() => {
   }
 
   function setCanvasNodeClass(node, className, enabled) {
-  	const element = node?.nodeEl;
-  	if (!element) return;
-  	if (typeof element.toggleClass === 'function') {
-  		element.toggleClass(className, enabled);
-  	} else {
-  		element.classList?.toggle(className, enabled);
+  	const nodeElement = node?.nodeEl;
+  	const shell = nodeElement?.closest?.('.canvas-node');
+  	for (const element of new Set([nodeElement, shell].filter(Boolean))) {
+  		if (typeof element.toggleClass === 'function') {
+  			element.toggleClass(className, enabled);
+  		} else {
+  			element.classList?.toggle(className, enabled);
+  		}
   	}
   }
 
@@ -44547,8 +44554,10 @@ var MindmapActions = (() => {
   function syncCollapsedVisibility(canvas) {
   	if (!canvas?.nodes || !treeModel.buildForest) return 0;
   	const nodes = Array.from(canvas.nodes.values());
-  	for (const node of nodes)
+  	for (const node of nodes) {
   		setCanvasNodeClass(node, 'tomindmap-collapsed-hidden', false);
+  		setCanvasNodeClass(node, 'tomindmap-collapsed-node', false);
+  	}
   	for (const edge of canvas.edges?.values?.() || [])
   		setCanvasEdgeHidden(edge, false);
 
@@ -44565,6 +44574,13 @@ var MindmapActions = (() => {
   	};
   	const descFn = getGetDescendants();
   	const visit = (treeNode) => {
+  		if (getData(treeNode.canvasNode).collapsed) {
+  			setCanvasNodeClass(
+  				treeNode.canvasNode,
+  				'tomindmap-collapsed-node',
+  				true
+  			);
+  		}
   		if (getData(treeNode.canvasNode).collapsed && descFn) {
   			for (const descendant of descFn(treeNode)) {
   				const child = descendant.canvasNode;
@@ -46314,7 +46330,13 @@ function applyTitleOnlyCardMarker(node, kind, title) {
 	shell.toggleClass?.('tomindmap-title-only-card', true);
 	shell.setAttribute?.('data-tomindmap-card-title', marker);
 	shell.setAttribute?.('data-tomindmap-card-kind', kind);
-	shell.setAttribute?.('aria-label', `${marker} — open linked file`);
+	const kindLabel =
+		kind === 'nested-map'
+			? 'nested mind map'
+			: kind === 'branch-note'
+				? 'branch file'
+				: 'linked file';
+	shell.setAttribute?.('aria-label', `${marker} — open ${kindLabel}`);
 }
 
 function nodeIsConvertibleTopic(canvas, node) {
@@ -48887,7 +48909,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
 			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight
+			nodeHeight: this.settings.defaultNodeHeight,
+			// Canvas edges update synchronously; animating only the cards makes
+			// the visible graph temporarily disagree with its edge geometry.
+			animate: false
 		});
 		this.branchColors = new BranchColors(this.canvasApi);
 		this.navigation = new Navigation(this.canvasApi);
@@ -54788,7 +54813,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
 			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight
+			nodeHeight: this.settings.defaultNodeHeight,
+			// Canvas edges update synchronously; animating only the cards makes
+			// the visible graph temporarily disagree with its edge geometry.
+			animate: false
 		});
 		this.nodeOps = new NodeOperations(this.canvasApi, {
 			nodeWidth: this.settings.defaultNodeWidth,

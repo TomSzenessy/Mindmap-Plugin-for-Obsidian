@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const { buildForest } = require('../lib/tree-model.js');
 const {
 	separateBranch,
 	colorBranch,
@@ -172,14 +173,24 @@ test('toggles subtree collapse state', () => {
 
 test('syncs persisted collapse state to nodes and edge groups', () => {
 	const makeNode = (id, data = {}) => {
+		const shell = {
+			classes: new Set(),
+			toggleClass(className, enabled) {
+				if (enabled) this.classes.add(className);
+				else this.classes.delete(className);
+			},
+			hasClass(className) {
+				return this.classes.has(className);
+			}
+		};
 		const node = {
 			id,
 			data,
+			shell,
 			nodeEl: {
-				classes: new Set(),
+				closest: () => shell,
 				toggleClass(className, enabled) {
-					if (enabled) this.classes.add(className);
-					else this.classes.delete(className);
+					shell.toggleClass(className, enabled);
 				}
 			},
 			getData() {
@@ -202,10 +213,13 @@ test('syncs persisted collapse state to nodes and edge groups', () => {
 		getData: () => ({ nodes: [{ id: 'root', type: 'text' }, { id: 'child', type: 'text' }] })
 	};
 	assert.equal(syncCollapsedVisibility(canvas), 1);
-	assert.equal(child.nodeEl.classes.has('tomindmap-collapsed-hidden'), true);
+	assert.equal(root.shell.classes.has('tomindmap-collapsed-node'), true);
+	assert.equal(child.shell.classes.has('tomindmap-collapsed-hidden'), true);
+	assert.equal(buildForest(canvas, { includeHidden: false })[0].children.length, 0);
 	assert.equal(edge.lineGroupEl.style.display, 'none');
 	root.data.collapsed = false;
 	assert.equal(syncCollapsedVisibility(canvas), 0);
-	assert.equal(child.nodeEl.classes.has('tomindmap-collapsed-hidden'), false);
+	assert.equal(root.shell.classes.has('tomindmap-collapsed-node'), false);
+	assert.equal(child.shell.classes.has('tomindmap-collapsed-hidden'), false);
 	assert.equal(edge.lineGroupEl.style.display, '');
 });

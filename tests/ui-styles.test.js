@@ -18,4 +18,6 @@ test('generated linked cards align their visual container with Canvas anchors', 
 	assert.match(css, /\.canvas-node\.tomindmap-collapsed-hidden[\s\S]*?display:\s*none\s*!important/);
 	assert.match(css, /\.canvas-node-label[\s\S]*?display:\s*none\s*!important/);
 	assert.match(css, /content:\s*'↗'/);
+	assert.match(css, /tomindmap-collapsed-node[\s\S]*?outline:/);
+	assert.match(css, /data-tomindmap-card-kind='nested-map'[\s\S]*?content:\s*'◈'/);
 });

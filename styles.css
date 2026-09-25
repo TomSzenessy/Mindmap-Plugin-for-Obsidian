@@ -386,6 +386,28 @@
 	pointer-events: none !important;
 }
 
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-collapsed-node
+	.canvas-node-container {
+	outline: 2px dashed var(--interactive-accent) !important;
+	outline-offset: 2px;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before {
+	content: '＋';
+	position: absolute;
+	z-index: 2;
+	inset-block-start: 7px;
+	inset-inline-end: 9px;
+	color: var(--interactive-accent);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	line-height: 1;
+	pointer-events: none;
+}
+
 /* Generated note and nested-map cards keep the map compact while remaining
  * ordinary Canvas file links. The native preview is hidden only for cards the
  * plugin explicitly marks, so user-created file previews remain untouched. */
@@ -416,6 +438,35 @@
 	line-height: 1;
 	opacity: 0.85;
 	pointer-events: none;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card[data-tomindmap-card-kind='nested-map']::before {
+	content: '◈';
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card[data-tomindmap-card-kind='branch-note']::before {
+	content: '▤';
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
+	.canvas-node-container {
+	border-color: color-mix(in srgb, var(--text-faint) 72%, transparent) !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card[data-tomindmap-card-kind='nested-map']
+	.canvas-node-container {
+	border-style: double !important;
+	border-color: color-mix(in srgb, var(--interactive-accent) 78%, transparent) !important;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node[data-node-type='file']
+	.canvas-node-container {
+	border-color: color-mix(in srgb, var(--text-faint) 72%, transparent) !important;
 }
 
 .tomindmap-mindmap-mode

@@ -1,7 +1,7 @@
 {
 	"id": "tomindmap",
 	"name": "ToMindMap",
-	"version": "0.12.2",
+	"version": "0.12.3",
 	"minAppVersion": "1.5.0",
 	"description": "An intuitive Canvas mind mapper with keyboard and touch controls, auto-layout, rich Markdown sync, and versatile export.",
 	"author": "tom",

@@ -1738,7 +1738,13 @@ function applyTitleOnlyCardMarker(node, kind, title) {
 	shell.toggleClass?.('tomindmap-title-only-card', true);
 	shell.setAttribute?.('data-tomindmap-card-title', marker);
 	shell.setAttribute?.('data-tomindmap-card-kind', kind);
-	shell.setAttribute?.('aria-label', `${marker} — open linked file`);
+	const kindLabel =
+		kind === 'nested-map'
+			? 'nested mind map'
+			: kind === 'branch-note'
+				? 'branch file'
+				: 'linked file';
+	shell.setAttribute?.('aria-label', `${marker} — open ${kindLabel}`);
 }
 
 function nodeIsConvertibleTopic(canvas, node) {
@@ -4142,7 +4148,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
 			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight
+			nodeHeight: this.settings.defaultNodeHeight,
+			// Canvas edges update synchronously; animating only the cards makes
+			// the visible graph temporarily disagree with its edge geometry.
+			animate: false
 		});
 		this.branchColors = new BranchColors(this.canvasApi);
 		this.navigation = new Navigation(this.canvasApi);
@@ -10043,7 +10052,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
 			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight
+			nodeHeight: this.settings.defaultNodeHeight,
+			// Canvas edges update synchronously; animating only the cards makes
+			// the visible graph temporarily disagree with its edge geometry.
+			animate: false
 		});
 		this.nodeOps = new NodeOperations(this.canvasApi, {
 			nodeWidth: this.settings.defaultNodeWidth,

@@ -7351,7 +7351,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						? directionFromParent(nodeToMove) || directionFromParent(targetNode) || 'right'
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: false,
+						preserveRootSides: true,
 						branchDirectionOverride: branchDirection && targetNode
 							? {
 									nodeId: targetNode.id,
@@ -7428,7 +7428,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					? directionFromParent(nodeToMove)
 					: liveBranchDirection || directionFromParent(nodeToMove);
 				this.layoutEngine.layout(canvas, {
-					preserveRootSides: false,
+					preserveRootSides: true,
 					branchDirectionOverride: {
 						nodeId: nodeToMove.id,
 						direction: branchDirection
@@ -9089,7 +9089,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas,
 				Array.from(canvas.nodes.values()).filter(
 					(node) => !groupIds.has(node.id)
-				)
+				),
+				undefined,
+				{ preserveRootSides: true }
 			);
 			this.refreshOutline(canvas);
 		} else {

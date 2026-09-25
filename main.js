@@ -1611,6 +1611,7 @@ var {
      * @returns {Promise<{status: string, canvas: object, requestedIds: string[], measurements: Map}>}
      */
     resizeNodesWhenRendered(canvas, nodes, onSettled = null, layoutOptions = {}) {
+      const effectiveLayoutOptions = { preserveRootSides: true, ...layoutOptions };
       this.cancelQueue(canvas);
       this.stopWatchingCanvas(canvas);
       const session = this.replaceSession(canvas);
@@ -1629,7 +1630,7 @@ var {
         data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
         canvas.setData(data);
         canvas.requestSave();
-        this.plugin.layoutEngine.layout(canvas, layoutOptions);
+        this.plugin.layoutEngine.layout(canvas, effectiveLayoutOptions);
         this.plugin.updateGroupBounds(canvas);
         const measured = result(SIZING_STATUS.MEASURED);
         onSettled?.(measured);
@@ -1724,13 +1725,13 @@ var {
         }
         if (changed.length > 0)
           canvas.requestSave();
-        this.plugin.layoutEngine.layout(canvas, layoutOptions);
+        this.plugin.layoutEngine.layout(canvas, effectiveLayoutOptions);
         this.plugin.updateGroupBounds(canvas);
         for (const delay of [120, 280, 600])
           this.scheduleSessionTimeout(
             session,
             `retry:${delay}`,
-            () => this.resizeNodesRetry(canvas, requested, layoutOptions),
+            () => this.resizeNodesRetry(canvas, requested, effectiveLayoutOptions),
             delay
           );
         const measured = result(SIZING_STATUS.MEASURED, measurements);
@@ -46540,6 +46541,7 @@ var {
         edge.to.side = toSide;
         changed = true;
       }
+      edge.render?.();
     }
     if (changed) {
       canvas.requestFrame();
@@ -46635,9 +46637,10 @@ var {
         const rootX = root.canvasNode.x;
         const rootY = root.canvasNode.y;
         positions.set(root.canvasNode.id, { x: rootX, y: rootY });
+        const preserveSides = Boolean(options.preserveRootSides);
         const { rightChildren, leftChildren } = this.balanceRootChildren(
           root,
-          Boolean(options.preserveRootSides),
+          preserveSides,
           options.branchDirectionOverride
         );
         // A complete mind-map reflow is radial: once a top-level branch has a
@@ -46650,6 +46653,12 @@ var {
         const layoutOptions = { ...options, nestedDirections, forceRootBranchIds };
         this.layoutGroup(root, rightChildren, "right", rootX, rootY, positions, layoutOptions);
         this.layoutGroup(root, leftChildren, "left", rootX, rootY, positions, layoutOptions);
+        for (const child of rightChildren) {
+          this.enforceSubtreeDirection(canvas, child, "right");
+        }
+        for (const child of leftChildren) {
+          this.enforceSubtreeDirection(canvas, child, "left");
+        }
       }
       this.applyPositions(canvas, positions, options);
       if (options.persist !== false && options.displaceFloating !== false)
@@ -46691,9 +46700,10 @@ var {
           propagateDirection(parentTreeNode, directionOverride);
           this.layoutGroup(parentTreeNode, parentTreeNode.children, directionOverride, rootX, rootY, positions);
         } else {
+          const preserveSides = Boolean(options.preserveRootSides);
           const { rightChildren, leftChildren } = this.balanceRootChildren(
             parentTreeNode,
-            Boolean(options.preserveRootSides)
+            preserveSides
           );
           this.layoutGroup(parentTreeNode, rightChildren, "right", rootX, rootY, positions);
           this.layoutGroup(parentTreeNode, leftChildren, "left", rootX, rootY, positions);
@@ -46734,6 +46744,7 @@ var {
                 edge.to.side = toSide;
                 changed = true;
               }
+              edge.render?.();
               break;
             }
           }
@@ -46756,6 +46767,24 @@ var {
       const right = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 >= rootCx).sort(byPosition);
       const left = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 < rootCx).sort(byPosition);
       if (preserveExistingSides) {
+        if (branchDirectionOverride?.nodeId && (branchDirectionOverride.direction === "left" || branchDirectionOverride.direction === "right")) {
+          const overrideId = branchDirectionOverride.nodeId;
+          const targetSide = branchDirectionOverride.direction;
+          const child = root.children.find((c) => c.canvasNode.id === overrideId);
+          if (child) {
+            const rIdx = right.indexOf(child);
+            if (rIdx >= 0) right.splice(rIdx, 1);
+            const lIdx = left.indexOf(child);
+            if (lIdx >= 0) left.splice(lIdx, 1);
+            if (targetSide === "right") {
+              right.push(child);
+              right.sort(byPosition);
+            } else {
+              left.push(child);
+              left.sort(byPosition);
+            }
+          }
+        }
         root.children = [...right, ...left];
         for (const child of right) {
           child.direction = "right";
@@ -47415,6 +47444,9 @@ var {
         }
         node.moveTo({ x: pos.x, y: pos.y });
       }
+      for (const edge of canvas.edges.values()) {
+        edge.render?.();
+      }
       if (persist)
         canvas.requestSave();
       canvas.requestFrame();
@@ -47423,6 +47455,9 @@ var {
           var _a2;
           for (const node of canvas.nodes.values()) {
             (_a2 = node.nodeEl) == null ? void 0 : _a2.removeClass("mindmap-animating");
+          }
+          for (const edge of canvas.edges.values()) {
+            edge.render?.();
           }
         }, 350);
       }
@@ -59725,7 +59760,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						? directionFromParent(nodeToMove) || directionFromParent(targetNode) || 'right'
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: false,
+						preserveRootSides: true,
 						branchDirectionOverride: branchDirection && targetNode
 							? {
 									nodeId: targetNode.id,
@@ -59802,7 +59837,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					? directionFromParent(nodeToMove)
 					: liveBranchDirection || directionFromParent(nodeToMove);
 				this.layoutEngine.layout(canvas, {
-					preserveRootSides: false,
+					preserveRootSides: true,
 					branchDirectionOverride: {
 						nodeId: nodeToMove.id,
 						direction: branchDirection
@@ -61463,7 +61498,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas,
 				Array.from(canvas.nodes.values()).filter(
 					(node) => !groupIds.has(node.id)
-				)
+				),
+				undefined,
+				{ preserveRootSides: true }
 			);
 			this.refreshOutline(canvas);
 		} else {

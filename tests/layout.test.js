@@ -592,3 +592,57 @@ test("cascades each root branch outward after one branch crosses the root", () =
   assert.ok(other.x > root.x);
   assert.ok(otherLeaf.x > other.x);
 });
+
+test("preserves existing root sides while moving an overridden branch", () => {
+  const engine = new LayoutEngine({ verticalGap: 20 });
+  const root = tree("root", []);
+  root.canvasNode.x = 100;
+  root.canvasNode.width = 100;
+
+  const leftA = tree("left-a", []);
+  leftA.canvasNode.x = -200;
+  const leftB = tree("left-b", []);
+  leftB.canvasNode.x = -200;
+
+  const rightA = tree("right-a", []);
+  rightA.canvasNode.x = 400;
+  const rightB = tree("right-b", []);
+  rightB.canvasNode.x = 400;
+
+  root.children = [leftA, leftB, rightA, rightB];
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(
+    root,
+    true,
+    { nodeId: "right-b", direction: "left" }
+  );
+
+  assert.equal(leftChildren.map((c) => c.canvasNode.id).sort().join(","), "left-a,left-b,right-b");
+  assert.equal(rightChildren.map((c) => c.canvasNode.id).join(","), "right-a");
+});
+
+test("invokes edge.render when updating edge sides and applying positions", () => {
+  let renderedCount = 0;
+  const root = { id: "root", x: 0, y: 0, width: 100, height: 40, moveTo() {} };
+  const child = { id: "child", x: 200, y: 0, width: 100, height: 40, moveTo() {} };
+  const edge = {
+    id: "edge-1",
+    from: { node: root, side: "left" },
+    to: { node: child, side: "right" },
+    render() { renderedCount++; }
+  };
+  const canvas = {
+    nodes: new Map([[root.id, root], [child.id, child]]),
+    edges: new Map([[edge.id, edge]]),
+    getData: () => ({ nodes: [root, child], edges: [edge] }),
+    requestFrame() {},
+    requestSave() {}
+  };
+  const engine = new LayoutEngine({ animate: false });
+  engine.updateEdgeSides(canvas);
+  assert.ok(renderedCount > 0, "edge.render should be called on updateEdgeSides");
+  const beforeCount = renderedCount;
+  engine.applyPositions(canvas, new Map([[child.id, { x: 300, y: 0 }]]), { animate: false });
+  assert.ok(renderedCount > beforeCount, "edge.render should be called on applyPositions");
+});
+

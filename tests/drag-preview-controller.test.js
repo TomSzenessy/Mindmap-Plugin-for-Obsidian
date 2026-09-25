@@ -628,7 +628,11 @@ function dragFixture({ withOriginalParent = true } = {}) {
         label: options.label,
         lineType: "curved",
         curvature: 0.35,
-        render() {}
+        render() {},
+        lineGroupEl: { style: {} },
+        lineEndGroupEl: { style: {} },
+        el: { style: {} },
+        edgeEl: { style: {} }
       };
       activeEdges.push(edge);
       return edge;
@@ -944,4 +948,21 @@ test("excludes candidate cards specified via options.excludedIds during multi-ca
   assert.equal(preview.state, "preview");
   assert.notEqual(preview.target?.id, fixture.newParent.id);
   assert.equal(preview.target?.id, fixture.oldParent.id);
+});
+
+test("hides original incoming edge lineGroupEl and lineEndGroupEl during preview and restores on cancel", () => {
+  const fixture = dragFixture({ withOriginalParent: true });
+  const originalEdge = fixture.canvasApi.getIncomingEdges(null, fixture.dragged)[0];
+  fixture.newParent.x = 260;
+  fixture.newParent.y = 80;
+  fixture.controller.begin(fixture.dragged);
+  const preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.equal(preview.target?.id, fixture.newParent.id);
+  assert.equal(originalEdge.lineGroupEl.style.display, "none");
+  assert.equal(originalEdge.lineEndGroupEl.style.display, "none");
+
+  fixture.controller.finish("cancel", fixture.dragged);
+  assert.equal(originalEdge.lineGroupEl.style.display, "");
+  assert.equal(originalEdge.lineEndGroupEl.style.display, "");
 });

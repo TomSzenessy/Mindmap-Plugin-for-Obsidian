@@ -51190,6 +51190,42 @@ var {
     });
   }
 
+  function setCanvasEdgeHidden(edge, hidden) {
+    if (!edge) return;
+    for (const element of [
+      edge.lineGroupEl,
+      edge.lineEndGroupEl,
+      edge.el,
+      edge.edgeEl
+    ]) {
+      if (!element) continue;
+      if (element.style) {
+        if (typeof element.style.setProperty === "function") {
+          if (hidden) {
+            element.style.setProperty("display", "none", "important");
+            element.style.setProperty("visibility", "hidden", "important");
+            element.style.setProperty("opacity", "0", "important");
+          } else {
+            element.style.removeProperty("display");
+            element.style.removeProperty("visibility");
+            element.style.removeProperty("opacity");
+          }
+        } else {
+          element.style.display = hidden ? "none" : "";
+          element.style.visibility = hidden ? "hidden" : "";
+          element.style.opacity = hidden ? "0" : "";
+        }
+      }
+      if (hidden) {
+        element.addClass?.("tomindmap-edge-hidden");
+        element.classList?.add?.("tomindmap-edge-hidden");
+      } else {
+        element.removeClass?.("tomindmap-edge-hidden");
+        element.classList?.remove?.("tomindmap-edge-hidden");
+      }
+    }
+  }
+
   /**
    * The one predicate for a card gesture this plugin owns.
    *
@@ -51260,17 +51296,13 @@ var {
       previewEdge = null;
       previewParent = null;
       for (const origEdge of originalEdgeObjects) {
-        if (origEdge?.edgeEl) {
-          origEdge.edgeEl.style.display = "";
-        }
+        setCanvasEdgeHidden(origEdge, false);
       }
     }
 
     function resetState() {
       for (const origEdge of originalEdgeObjects) {
-        if (origEdge?.edgeEl) {
-          origEdge.edgeEl.style.display = "";
-        }
+        setCanvasEdgeHidden(origEdge, false);
       }
       activeDraggedNode = null;
       originalLinks = [];
@@ -51443,12 +51475,16 @@ var {
         const sideHeld =
           previewEdge.from?.side === desired.fromSide &&
           previewEdge.to?.side === desired.toSide;
-        if (sideHeld)
+        if (sideHeld) {
+          for (const origEdge of originalEdgeObjects) {
+            setCanvasEdgeHidden(origEdge, true);
+          }
           return {
             state: "preview",
             target: targetNode,
             incomingSide: previewEdge.to?.side || null
           };
+        }
       }
 
       removePreview();
@@ -51478,9 +51514,7 @@ var {
       previewParent?.nodeEl?.addClass?.("tomindmap-reparent-target");
       previewEdge = edge;
       for (const origEdge of originalEdgeObjects) {
-        if (origEdge?.edgeEl) {
-          origEdge.edgeEl.style.display = "none";
-        }
+        setCanvasEdgeHidden(origEdge, true);
       }
       state = "preview";
       return { state, target: targetNode, incomingSide: edge.to?.side || null };

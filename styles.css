@@ -97,6 +97,14 @@
 	pointer-events: none !important;
 }
 
+/* Suppress edge visuals when an edge is hidden (e.g. drag preview or collapse) */
+.tomindmap-edge-hidden,
+.tomindmap-edge-hidden * {
+	display: none !important;
+	visibility: hidden !important;
+	opacity: 0 !important;
+}
+
 .tomindmap-mindmap-mode .canvas-node.tomindmap-reparent-target {
 	outline: 3px solid color-mix(in srgb, var(--interactive-accent) 88%, white);
 	outline-offset: 5px;

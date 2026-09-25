@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { LayoutEngine } = require("../lib/layout.js");
+const { BranchColors, LayoutEngine } = require("../lib/layout.js");
 
 function tree(id, children = [], height = 60) {
   const result = {
@@ -130,7 +130,7 @@ test("spreads a large sibling set across variable visual depths", () => {
   assert.ok(Math.max(...packed.yOffsets) < 11 * 74);
 });
 
-test("recursively settles a bulky middle subtree outward to reduce height", () => {
+test("settles a bulky middle subtree outward to reduce height", () => {
   const engine = new LayoutEngine({
     nodeWidth: 160,
     nodeHeight: 60,
@@ -331,6 +331,182 @@ test("rebalances the surrounding root branches while keeping a dragged branch on
     0
   );
   assert.ok(Math.abs(rightHeight - leftHeight) <= 100);
+});
+
+test("keeps collapsed subtree colors synchronized through the structural forest", () => {
+  const makeNode = (id, unknownData = {}) => ({
+    id,
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 60,
+    unknownData,
+    color: "stale",
+    setColor(color) {
+      this.color = color;
+    }
+  });
+  const root = makeNode("root", { collapsed: true });
+  const child = makeNode("child");
+  const branchEdge = {
+    from: { node: root },
+    to: { node: child },
+    color: "stale",
+    setColor(color) {
+      this.color = color;
+    }
+  };
+  const canvas = {
+    nodes: new Map([
+      [root.id, root],
+      [child.id, child]
+    ]),
+    edges: new Map([["branch", branchEdge]]),
+    getData: () => ({
+      nodes: [root, child].map((node) => ({ id: node.id, type: "text" }))
+    }),
+    requestSave() {},
+    requestFrame() {}
+  };
+  const canvasApi = {
+    getConnectedEdges(activeCanvas, node) {
+      return Array.from(activeCanvas.edges.values()).filter(
+        (edge) => edge.from.node === node || edge.to.node === node
+      );
+    }
+  };
+
+  new BranchColors(canvasApi).applyColors(canvas);
+
+  assert.equal(child.color, "1");
+  assert.equal(branchEdge.color, "1");
+});
+
+test("lays out a 12,000-topic chain without overflowing the stack", () => {
+  const depth = 12000;
+  const nodes = Array.from({ length: depth + 1 }, (_, id) => ({
+    id: String(id),
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 60,
+    moveTo({ x, y }) {
+      this.x = x;
+      this.y = y;
+    }
+  }));
+  const edges = nodes.slice(0, -1).map((node, id) => ({
+    id,
+    from: { node, side: "right" },
+    to: { node: nodes[id + 1], side: "left" }
+  }));
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map(edges.map((edge) => [edge.id, edge])),
+    getData: () => ({
+      nodes: nodes.map((node) => ({ id: node.id, type: "text" }))
+    }),
+    requestSave() {},
+    requestFrame() {}
+  };
+
+  assert.doesNotThrow(() => {
+    new LayoutEngine({ animate: false }).layout(canvas, { persist: false });
+  });
+  assert.ok(nodes[depth].x > 0);
+});
+
+test("builds and indexes the group forest once for multiple topic roots", () => {
+  const makeNode = (id, type = "text") => ({
+    id,
+    x: type === "group" ? 0 : id === "first" ? 50 : 250,
+    y: type === "group" ? 0 : 50,
+    width: type === "group" ? 400 : 100,
+    height: type === "group" ? 200 : 60,
+    moveTo({ x, y }) {
+      this.x = x;
+      this.y = y;
+    },
+    moveAndResize({ x, y, width, height }) {
+      this.x = x;
+      this.y = y;
+      this.width = width;
+      this.height = height;
+    },
+    nodeEl: { addClass() {}, removeClass() {} }
+  });
+  const group = makeNode("group", "group");
+  const first = makeNode("first");
+  const second = makeNode("second");
+  const nodes = [group, first, second];
+  let reads = 0;
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map(),
+    getData() {
+      reads++;
+      return {
+        nodes: nodes.map((node) => ({
+          id: node.id,
+          type: node.id === "group" ? "group" : "text"
+        }))
+      };
+    },
+    requestSave() {},
+    requestFrame() {}
+  };
+
+  new LayoutEngine({ animate: false }).layoutForest(canvas, group.id);
+
+  assert.equal(reads, 1);
+});
+
+test("forwards persistent and animated layout options through one transaction", () => {
+  const makeNode = (id, x) => ({
+    id,
+    x,
+    y: 0,
+    width: 200,
+    height: 60,
+    moveTo({ x: nextX, y }) {
+      this.x = nextX;
+      this.y = y;
+    },
+    nodeEl: {
+      addedAnimating: 0,
+      removedAnimating: 0,
+      addClass(className) {
+        if (className === "mindmap-animating") this.addedAnimating++;
+      },
+      removeClass(className) {
+        if (className === "mindmap-animating") this.removedAnimating++;
+      }
+    }
+  });
+  const root = makeNode("root", 500);
+  const child = makeNode("child", 800);
+  const floating = makeNode("floating", 1200);
+  const nodes = [root, child, floating];
+  let saves = 0;
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map([
+      ["branch", { from: { node: root, side: "right" }, to: { node: child, side: "left" } }]
+    ]),
+    getData: () => ({
+      nodes: nodes.map((node) => ({ id: node.id, type: "text" }))
+    }),
+    requestSave() { saves++; },
+    requestFrame() {}
+  };
+
+  new LayoutEngine().layout(canvas, { persist: false, animate: false });
+
+  assert.equal(saves, 0);
+  for (const node of nodes) {
+    assert.equal(node.nodeEl.addedAnimating, 0);
+    assert.ok(node.nodeEl.removedAnimating > 0);
+  }
 });
 
 test("cascades each root branch outward after one branch crosses the root", () => {

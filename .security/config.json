@@ -1,0 +1,27 @@
+{
+  "threat_model_version": "1.0.0",
+  "last_updated": "2026-09-25T11:13:05Z",
+  "security_team_contacts": [],
+  "compliance_requirements": [],
+  "scan_frequency": "on_commit",
+  "severity_thresholds": {
+    "block_merge": ["CRITICAL", "HIGH"],
+    "require_review": ["HIGH", "MEDIUM"],
+    "notify_security_team": ["CRITICAL", "HIGH"]
+  },
+  "vulnerability_patterns": {
+    "enabled": [
+      "xss",
+      "command_injection",
+      "path_traversal",
+      "xxe",
+      "ssrf",
+      "unsafe_deserialization",
+      "untrusted_recursive_input",
+      "resource_exhaustion",
+      "persisted_link_ownership",
+      "release_provenance"
+    ],
+    "custom_patterns_path": null
+  }
+}

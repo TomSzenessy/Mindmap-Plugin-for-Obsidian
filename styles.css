@@ -1,13 +1,11 @@
 /* tomindmap Plugin Styles */
 
 /* Mindmap mode toggle button in canvas toolbar */
-.tomindmap-toggle-btn,
-.tomindmap-media-btn {
+.tomindmap-toggle-btn {
 	color: var(--text-muted);
 }
 
-.tomindmap-toggle-btn:hover,
-.tomindmap-media-btn:hover {
+.tomindmap-toggle-btn:hover {
 	color: var(--text-normal);
 }
 
@@ -111,21 +109,9 @@
 		filter 80ms ease;
 }
 
-.tomindmap-mindmap-mode.tomindmap-drop-active::after {
-	content: 'Drop to add media or a link';
-	position: absolute;
-	z-index: 100;
-	inset: 18px;
-	display: grid;
-	place-items: center;
-	color: var(--text-on-accent);
-	font-size: var(--font-ui-large);
-	font-weight: var(--font-semibold);
-	letter-spacing: 0.01em;
-	background: color-mix(in srgb, var(--interactive-accent) 82%, transparent);
-	border: 2px dashed var(--text-on-accent);
-	border-radius: var(--radius-l);
-	pointer-events: none;
+.tomindmap-mindmap-mode .canvas-node.tomindmap-node-drop-hover {
+	outline: 2px dashed var(--interactive-accent);
+	outline-offset: 3px;
 }
 
 .canvas-node.tomindmap-missing-media {
@@ -326,16 +312,6 @@
 
 .tomindmap-export-form .tomindmap-export-nested-toggle input {
 	margin: 0;
-}
-
-.tomindmap-print-frame {
-	position: fixed;
-	inset: 0;
-	width: 1px;
-	height: 1px;
-	border: 0;
-	opacity: 0;
-	pointer-events: none;
 }
 
 /* Moving a rendered note/PDF can otherwise repaint an entire embedded
@@ -632,4 +608,21 @@
 .tomindmap-touch-btn svg {
 	width: 22px;
 	height: 22px;
+}
+
+/* Respect the platform motion preference without removing state feedback. */
+@media (prefers-reduced-motion: reduce) {
+	.canvas-node.mindmap-animating,
+	.canvas-node.mindmap-group-animating,
+	.tomindmap-mindmap-mode .canvas-node.tomindmap-reparent-target,
+	.tomindmap-outline .collapse-icon svg,
+	.tomindmap-outline .tomindmap-outline-drag-handle,
+	.tomindmap-touch-btn:active {
+		animation: none !important;
+		transition: none !important;
+	}
+
+	.tomindmap-touch-btn:active {
+		transform: none !important;
+	}
 }

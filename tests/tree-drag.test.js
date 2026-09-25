@@ -16,8 +16,55 @@ const {
   isDescendant,
   isWithinAttachmentRadius,
   nodeToNodeDistance,
-  reparentSubtree
+  reparentSubtree,
+  restoreEdgePayload,
+  snapshotEdgePayload
 } = require("../lib/tree-drag.js");
+
+/**
+ * Minimal stand-in for the Canvas edge seam: a branch link is created once and
+ * then removed/created again, so a test can read what the user would see on
+ * the Canvas after a drag transaction.
+ */
+function branchLinkFixture(cards = []) {
+  const canvas = {
+    nodes: new Map(cards.map((card) => [card.id, card])),
+    requestFrame() {}
+  };
+  const edges = [];
+  let created = 0;
+  const canvasApi = {
+    createEdge(
+      _canvas,
+      fromNode,
+      toNode,
+      fromSide = "right",
+      toSide = "left",
+      color,
+      options = {}
+    ) {
+      const edge = {
+        id: options.id || `link-${++created}`,
+        from: { node: fromNode, side: fromSide, end: options.fromEnd || "none" },
+        to: { node: toNode, side: toSide, end: options.toEnd || "arrow" },
+        color,
+        label: options.label,
+        lineType: "curved",
+        curvature: 0.35
+      };
+      edges.push(edge);
+      return edge;
+    },
+    getIncomingEdges(_canvas, node) {
+      return edges.filter((edge) => edge.to.node.id === node.id);
+    },
+    removeEdge(_canvas, edge) {
+      const index = edges.indexOf(edge);
+      if (index >= 0) edges.splice(index, 1);
+    }
+  };
+  return { canvas, canvasApi, edges };
+}
 
 test("classifies drop zone correctly", () => {
   const target = { x: 100, y: 100, width: 200, height: 100 };
@@ -183,4 +230,112 @@ test("targets the nearest strictly inward card on the same branch only", () => {
     )?.id,
     "right-near"
   );
+});
+
+test("reattaching a topic keeps the authored branch link", () => {
+  const mainRoot = { id: "root", x: 0, y: 0, width: 200, height: 80 };
+  const oldParent = { id: "old", x: 0, y: 200, width: 120, height: 60 };
+  const newParent = { id: "new", x: 0, y: 400, width: 120, height: 60 };
+  const dragged = { id: "dragged", x: 300, y: 200, width: 120, height: 60 };
+  const { canvas, canvasApi, edges } = branchLinkFixture([
+    mainRoot,
+    oldParent,
+    newParent,
+    dragged
+  ]);
+
+  const authored = canvasApi.createEdge(
+    canvas,
+    oldParent,
+    dragged,
+    "right",
+    "left",
+    "#4c8bf5"
+  );
+  authored.id = "link-1";
+  authored.label = "depends on";
+  authored.from.end = "none";
+  authored.to.end = "arrow";
+  authored.curvature = 0.8;
+
+  assert.equal(
+    reparentSubtree(canvas, canvasApi, dragged, newParent, "child", [], mainRoot),
+    true
+  );
+
+  assert.equal(edges.length, 1);
+  const link = edges[0];
+  assert.equal(link.id, "link-1");
+  assert.equal(link.label, "depends on");
+  assert.equal(link.from.node.id, "new");
+  assert.equal(link.to.node.id, "dragged");
+  assert.equal(link.from.side, "right");
+  assert.equal(link.to.side, "left");
+  assert.equal(link.from.end, "none");
+  assert.equal(link.to.end, "arrow");
+  assert.equal(link.color, "#4c8bf5");
+  assert.equal(link.curvature, 0.8);
+});
+
+test("a removed branch link is restored exactly as authored", () => {
+  const parent = { id: "parent", x: 0, y: 0, width: 120, height: 60 };
+  const child = { id: "child", x: 300, y: 0, width: 120, height: 60 };
+  const { canvas, canvasApi, edges } = branchLinkFixture([parent, child]);
+
+  const authored = canvasApi.createEdge(
+    canvas,
+    parent,
+    child,
+    "left",
+    "right",
+    "#7f54b3"
+  );
+  authored.id = "link-1";
+  authored.label = "blocks";
+  authored.from.end = "arrow";
+  authored.to.end = "none";
+  authored.lineType = "straight";
+  authored.curvature = 0.62;
+
+  const payload = snapshotEdgePayload(authored);
+  canvasApi.removeEdge(canvas, authored);
+  assert.equal(edges.length, 0);
+
+  const restored = restoreEdgePayload(canvas, canvasApi, payload);
+
+  assert.equal(edges.length, 1);
+  assert.equal(restored.id, "link-1");
+  assert.equal(restored.label, "blocks");
+  assert.equal(restored.from.node.id, "parent");
+  assert.equal(restored.from.side, "left");
+  assert.equal(restored.from.end, "arrow");
+  assert.equal(restored.to.node.id, "child");
+  assert.equal(restored.to.side, "right");
+  assert.equal(restored.to.end, "none");
+  assert.equal(restored.color, "#7f54b3");
+  assert.equal(restored.lineType, "straight");
+  assert.equal(restored.curvature, 0.62);
+});
+
+test("restoring a link whose cards are gone creates nothing", () => {
+  const parent = { id: "parent", x: 0, y: 0, width: 120, height: 60 };
+  const child = { id: "child", x: 300, y: 0, width: 120, height: 60 };
+  const { canvas, canvasApi, edges } = branchLinkFixture([parent, child]);
+  const payload = {
+    id: "link-1",
+    fromNodeId: "parent",
+    fromSide: "right",
+    fromEnd: "none",
+    toNodeId: "deleted-topic",
+    toSide: "left",
+    toEnd: "arrow",
+    color: null,
+    label: null,
+    lineType: null,
+    curve: null,
+    curvature: 0.35
+  };
+
+  assert.equal(restoreEdgePayload(canvas, canvasApi, payload), null);
+  assert.equal(edges.length, 0);
 });

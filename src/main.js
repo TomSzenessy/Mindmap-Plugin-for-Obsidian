@@ -40,31 +40,52 @@ var {
 	isBlankMindmapCanvas,
 	isRootTopicNode,
 	deriveCanvasTitle,
-	flushCanvasView,
-	reflowCanvasAfterMove
+	flushCanvasView
 } = require('./lib/canvas-session.js');
 var {
 	CARD_LAYOUT_VERSION,
 	LiveSizingController,
+	SIZING_STATUS,
 	hasAsyncRenderableContent,
 	isResizableCanvasNode,
 	isTextTopicCard
 } = require('./lib/live-sizing.js');
-var MarkdownOrder = require('./lib/markdown-order.js');
+var MarkdownMindMapCodec = require('./lib/markdown-codec.js');
 var { normalizeClipboardMarkdown } = require('./lib/clipboard-markdown.js');
 var {
+	createExportAssetResolver,
+	createExportDelivery,
 	createExportMindMapModal,
+	createExportPlan,
+	createRasterExportSession,
 	embedDocumentAssets,
 	paginatedPdfDocument,
 	rasterizeSvg,
 	renderHtmlAsVectorPdf,
-	saveToDownloads,
+	sanitizeExportElement,
+	serializeXmlSafe,
 	visibleCardPaint
 } = require('./lib/export.js');
 var { renderSvgToPdf } = require("./lib/vector-pdf-bundle.js");
 var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
 
 var { CanvasAPI, findNodeFromEvent, genId } = require('./lib/canvas-api.js');
+var {
+	LINK_REASON,
+	createSyncId,
+	createMarkdownSyncOwnership,
+	patchSyncIdOwnership,
+	CARD_SYNC_KEY,
+	loadMarkdownSyncOwnership,
+	resolveMarkdownSyncLink,
+	resolveParentLink,
+	adoptMarkdownSyncLink,
+	adoptParentLink,
+	isCanonicalVaultPath,
+	MarkdownSyncIndex,
+	MarkdownSyncCoordinator
+} = require('./lib/markdown-sync.js');
+var { allocateFilePath } = require('./lib/path-safety.js');
 
 /** Canvas palette color reserved for the automatic central topic. */
 var ROOT_TOPIC_COLOR = '6';
@@ -86,25 +107,31 @@ var {
 
 var { NodeOperations } = require('./lib/node-operations.js');
 
-var {
-	LayoutEngine,
-	BranchColors,
-	computeEdgeSides,
-	registerDragEndHandler,
-	updateAllEdgeSides
-} = require('./lib/layout.js');
+var { LayoutEngine, BranchColors } = require('./lib/layout.js');
 
 var { KeyboardHandler, Navigation } = require('./lib/keyboard-navigation.js');
 
-var { TouchControlsController, createGestureTracker, dispatchTouchAction } = require('./lib/touch-controls.js');
+var { TouchControlsController } = require('./lib/touch-controls.js');
 
 // src/settings.ts
 var import_obsidian3 = require('obsidian');
-var { DEFAULT_SETTINGS, normalizeSettings } = require('./lib/settings.js');
-var MediaDrop = require('./lib/media-drop.js');
+var {
+	DEFAULT_SETTINGS,
+	SETTINGS_FIELDS,
+	normalizeSettings
+} = require('./lib/settings.js');
+var {
+	createFileNodeSpec,
+	createLinkNodeSpec,
+	decodeMediaResource,
+	droppedUrl,
+	hasSupportedDrop,
+	linkLabel
+} = require('./lib/media-drop.js');
 var TreeDrag = require('./lib/tree-drag.js');
 var {
-	createDragAttachmentController
+	createDragAttachmentController,
+	isPrimaryCardGesture
 } = require('./lib/drag-preview-controller.js');
 var MindmapActions = require('./lib/mindmap-actions.js');
 var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
@@ -115,404 +142,111 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
-		const debouncedSave = (0, import_obsidian3.debounce)(async () => {
+		const save = async (patch) => {
+			this.plugin.settings = normalizeSettings({
+				...this.plugin.settings,
+				...patch
+			});
 			await this.plugin.saveSettings();
-		}, 500);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default mindmap mode')
-			.setDesc(
-				'Whether canvases default to mindmap mode (can be toggled per canvas)'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.defaultMindmapMode)
-					.onChange(async (value) => {
-						this.plugin.settings.defaultMindmapMode = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Create a central topic on blank canvases')
-			.setDesc(
+			return this.plugin.settings;
+		};
+		const descriptions = {
+			defaultMindmapMode: [
+				'Default mindmap mode',
+				'Whether canvases default to mindmap mode (can be toggled per canvas).'
+			],
+			autoCreateRootTopic: [
+				'Create a central topic on blank canvases',
 				'Open an empty mindmap canvas with an editable, distinctly colored central topic already selected.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.autoCreateRootTopic)
-					.onChange(async (value) => {
-						this.plugin.settings.autoCreateRootTopic = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Rename canvas from central topic')
-			.setDesc(
-				'Rename the Canvas file to match its central topic after the title is edited.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.renameCanvasFromRootTopic)
-					.onChange(async (value) => {
-						this.plugin.settings.renameCanvasFromRootTopic = value;
-						await this.plugin.saveSettings();
-					})
-			);
+			],
+			renameCanvasFromRootTopic: [
+				'Rename canvas from central topic',
+				'Reuse the Canvas filename for the central topic after it is edited.'
+			],
+			autoColor: ['Auto-color branches', 'Assign distinct colors to top-level branches.'],
+			mouseNavigation: [
+				'Mouse back/forward navigation',
+				"Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's note navigation."
+			],
+			wrapArrowNavigation: [
+				'Wrap arrow navigation',
+				'At the edge of the map, continue from the opposite edge instead of stopping.'
+			],
+			exportMarkmapFrontmatter: [
+				'Markmap export frontmatter',
+				'Include portable Markmap YAML options in new Markdown exports. Imported frontmatter is preserved.'
+			]
+		};
+		for (const field of SETTINGS_FIELDS) {
+			if (field.type === 'boolean') {
+				const [name, description] = descriptions[field.key] || [field.key, field.key];
+				new import_obsidian3.Setting(containerEl)
+					.setName(name)
+					.setDesc(description)
+					.addToggle((toggle) =>
+						toggle
+							.setValue(this.plugin.settings[field.key])
+							.onChange(async (value) => {
+								const settings = await save({ [field.key]: value });
+								toggle.setValue(settings[field.key]);
+							})
+					);
+			}
+		}
 		new import_obsidian3.Setting(containerEl)
 			.setName('Keyboard workflow')
 			.setDesc(
-				'Type to edit · Enter creates a sibling (or saves while editing) · Shift+Enter creates a sibling above (or a line break while editing) · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+Delete removes only the topic · Mod+Enter inserts a parent · Alt+Up/Down reorders · Mod+F searches the outline · F2 edits · Mod+R selects the root.'
+				'Type to edit · Enter creates a sibling · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+F opens the outline.'
 			);
 		new import_obsidian3.Setting(containerEl)
 			.setName('Customizable mind-map actions')
 			.setDesc(
-				'Open Settings → Hotkeys and search ToMindMap to customize collapse/expand, file conversion, nested-map conversion, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod (Cmd on macOS).'
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Auto-color branches')
-			.setDesc('Assign distinct colors to top-level branches')
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.autoColor)
-					.onChange(async (value) => {
-						this.plugin.settings.autoColor = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Horizontal gap')
-			.setDesc('Space between parent and child nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.horizontalGap))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.horizontalGap = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Vertical gap')
-			.setDesc('Space between sibling nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.verticalGap))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.verticalGap = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default node width')
-			.setDesc('Width of newly created nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.defaultNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.defaultNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Minimum automatic width')
-			.setDesc('Smallest card width used by automatic layout (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.minNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.minNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Maximum auto width')
-			.setDesc(
-				'Generous safety limit for exceptionally wide content (px)'
-			)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.maxNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.maxNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default node height')
-			.setDesc('Height of newly created nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.defaultNodeHeight))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.defaultNodeHeight = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Maximum auto height')
-			.setDesc(
-				'Generous safety limit for exceptionally tall content (px)'
-			)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.maxNodeHeight))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.maxNodeHeight = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Mouse back/forward navigation')
-			.setDesc(
-				"Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's default note navigation"
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.mouseNavigation)
-					.onChange(async (value) => {
-						this.plugin.settings.mouseNavigation = value;
-						await this.plugin.saveSettings();
-					})
+				'Open Settings → Hotkeys to customize collapse, conversions, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod.'
 			);
 		new import_obsidian3.Setting(containerEl)
 			.setName('Touch controls')
 			.setDesc(
-				'Floating touch toolbar (edit, add child, add sibling, more) with long-press menus and double-tap editing. Auto shows it on touch-primary devices.'
+				'Floating touch toolbar with long-press menus and double-tap editing. Auto shows it on touch-primary devices.'
 			)
-			.addDropdown((dropdown) =>
+			.addDropdown((dropdown) => {
+				for (const value of ['auto', 'on', 'off'])
+					dropdown.addOption(value, value === 'auto' ? 'Auto' : value === 'on' ? 'Always on' : 'Off');
 				dropdown
-					.addOption('auto', 'Auto')
-					.addOption('on', 'Always on')
-					.addOption('off', 'Off')
 					.setValue(this.plugin.settings.touchControls)
 					.onChange(async (value) => {
-						this.plugin.settings.touchControls = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Wrap arrow navigation')
-			.setDesc(
-				'At the edge of the map, continue from the opposite edge instead of stopping.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.wrapArrowNavigation)
-					.onChange(async (value) => {
-						this.plugin.settings.wrapArrowNavigation = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Arrow corridor buffer')
-			.setDesc(
-				'Extra tolerance around the straight navigation line. Outside it, the directional wedge uses the corners of the complete map bounds.'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.navigationCrossAxisBuffer)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0) {
-							this.plugin.settings.navigationCrossAxisBuffer =
-								num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Navigation zoom padding')
-			.setDesc(
-				'Extra space around the target node when zooming after navigation (px). 0 = tight zoom.'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.navigationZoomPadding)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0) {
-							this.plugin.settings.navigationZoomPadding = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Markmap export frontmatter')
-			.setDesc(
-				'Include portable Markmap YAML options in new Markdown exports. Frontmatter imported from a file is always preserved.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.exportMarkmapFrontmatter)
-					.onChange(async (value) => {
-						this.plugin.settings.exportMarkmapFrontmatter = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Markmap color freeze level')
-			.setDesc(
-				'Default colorFreezeLevel written to new Markmap Markdown exports (0–10).'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.markmapColorFreezeLevel)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0 && num <= 10) {
-							this.plugin.settings.markmapColorFreezeLevel = num;
-							debouncedSave();
-						}
-					})
-			);
+						const settings = await save({ touchControls: value });
+						dropdown.setValue(settings.touchControls);
+					});
+			});
+		const numericNames = {
+			horizontalGap: ['Horizontal gap', 'Space between parent and child topics (px).'],
+			verticalGap: ['Vertical gap', 'Space between sibling topics (px).'],
+			minNodeWidth: ['Minimum automatic width', 'Smallest card width used by automatic layout (px).'],
+			maxNodeWidth: ['Maximum auto width', 'Safety limit for exceptionally wide content (px).'],
+			defaultNodeWidth: ['Default node width', 'Width of newly created topics (px).'],
+			defaultNodeHeight: ['Default node height', 'Height of newly created topics (px).'],
+			maxNodeHeight: ['Maximum auto height', 'Safety limit for exceptionally tall content (px).'],
+			navigationCrossAxisBuffer: ['Arrow corridor buffer', 'Extra tolerance around the straight navigation line.'],
+			navigationZoomPadding: ['Navigation zoom padding', 'Extra space around a navigation target (px).'],
+			markmapColorFreezeLevel: ['Markmap color freeze level', 'Default value written to new Markmap exports (0–10).']
+		};
+		for (const field of SETTINGS_FIELDS) {
+			if (field.type !== 'number') continue;
+			const [name, description] = numericNames[field.key] || [field.key, field.key];
+			new import_obsidian3.Setting(containerEl)
+				.setName(name)
+				.setDesc(description)
+				.addText((text) =>
+					text
+						.setValue(String(this.plugin.settings[field.key]))
+						.onChange(async (rawValue) => {
+							const settings = await save({ [field.key]: rawValue });
+							text.setValue(String(settings[field.key]));
+						})
+				);
+		}
 	}
 };
-
-// src/canvas/subtree-drag.ts
-function collectDescendants(canvas, canvasApi, nodeId) {
-	const result = [];
-	const visited = /* @__PURE__ */ new Set([nodeId]);
-	const queue = [nodeId];
-	for (let cursor = 0; cursor < queue.length; cursor++) {
-		const id = queue[cursor];
-		for (const edge of canvasApi.getOutgoingEdges(canvas, id)) {
-			const childId = edge.to.node.id;
-			if (!visited.has(childId)) {
-				visited.add(childId);
-				result.push(edge.to.node);
-				queue.push(childId);
-			}
-		}
-	}
-	return result;
-}
-function registerSubtreeDragHandler(
-	canvas,
-	canvasApi,
-	onDragEnd,
-	enabled = () => true
-) {
-	var _a, _b, _c;
-	let draggedNode = null;
-	let cachedDescendants = null;
-	let originalMoveTo = null;
-	let dragStartX = 0;
-	let dragStartY = 0;
-	function installWrapper(node) {
-		const descendants = collectDescendants(canvas, canvasApi, node.id);
-		draggedNode = node;
-		cachedDescendants = descendants;
-		dragStartX = node.x;
-		dragStartY = node.y;
-		if (descendants.length === 0) return;
-		const proto = Object.getPrototypeOf(node);
-		originalMoveTo = proto.moveTo.bind(node);
-		node.moveTo = (pos) => {
-			const dx = pos.x - node.x;
-			const dy = pos.y - node.y;
-			originalMoveTo(pos);
-			for (const desc of cachedDescendants) {
-				const descProto = Object.getPrototypeOf(desc);
-				descProto.moveTo.call(desc, { x: desc.x + dx, y: desc.y + dy });
-			}
-		};
-	}
-	function clearDragSession() {
-		if (draggedNode && originalMoveTo) {
-			delete draggedNode.moveTo;
-		}
-		draggedNode = null;
-		cachedDescendants = null;
-		originalMoveTo = null;
-		dragStartX = 0;
-		dragStartY = 0;
-	}
-	const downHandler = (e) => {
-		if (!enabled()) return;
-		if (draggedNode) clearDragSession();
-		const node = findNodeFromEvent(canvas, e);
-		if (node) {
-			installWrapper(node);
-		}
-	};
-	const moveHandler = (e) => {
-		if (!enabled()) {
-			clearDragSession();
-			return;
-		}
-		if (e.buttons === 0) return;
-		if (!draggedNode) {
-			const node = canvasApi.getSelectedNode(canvas);
-			if (node) installWrapper(node);
-			if (!draggedNode) return;
-		}
-		const currentSelected = canvasApi.getSelectedNode(canvas);
-		if (!currentSelected || currentSelected.id !== draggedNode.id) {
-			clearDragSession();
-		}
-	};
-	const upHandler = () => {
-		if (!draggedNode) return;
-		if (!enabled()) {
-			clearDragSession();
-			return;
-		}
-		const completedNode = draggedNode;
-		const moved =
-			Math.abs(completedNode.x - dragStartX) > 0.5 ||
-			Math.abs(completedNode.y - dragStartY) > 0.5;
-		canvas.requestSave();
-		clearDragSession();
-		if (moved && onDragEnd) onDragEnd(completedNode);
-	};
-	(_a = canvas.wrapperEl) == null
-		? void 0
-		: _a.addEventListener('pointerdown', downHandler, true);
-	(_b = canvas.wrapperEl) == null
-		? void 0
-		: _b.addEventListener('pointermove', moveHandler);
-	(_c = canvas.wrapperEl) == null
-		? void 0
-		: _c.addEventListener('pointerup', upHandler);
-	return () => {
-		var _a2, _b2, _c2;
-		clearDragSession();
-		(_a2 = canvas.wrapperEl) == null
-			? void 0
-			: _a2.removeEventListener('pointerdown', downHandler, true);
-		(_b2 = canvas.wrapperEl) == null
-			? void 0
-			: _b2.removeEventListener('pointermove', moveHandler);
-		(_c2 = canvas.wrapperEl) == null
-			? void 0
-			: _c2.removeEventListener('pointerup', upHandler);
-	};
-}
 
 // src/canvas/group-drag.ts
 function identifyStrangers(canvas, canvasApi, group, groupIds) {
@@ -553,73 +287,95 @@ function identifyStrangers(canvas, canvasApi, group, groupIds) {
 	return Array.from(strangerIds).map((id) => insideNodes.get(id));
 }
 function registerGroupDragHandler(canvas, canvasApi, enabled = () => true) {
-	var _a, _b;
-	const frozenNodes = [];
-	const downHandler = (e) => {
-		if (!enabled()) return;
-		if (!e.altKey) return;
-		const node = findNodeFromEvent(canvas, e);
-		if (!node) return;
-		const groupIds = getGroupIds(canvas);
-		if (!groupIds.has(node.id)) return;
-		const strangers = identifyStrangers(canvas, canvasApi, node, groupIds);
-		for (const stranger of strangers) {
-			frozenNodes.push(stranger);
+	const wrapper = canvas.wrapperEl;
+	const view = wrapper?.ownerDocument?.defaultView;
+	const frozen = [];
+	let activePointerId = null;
+	let finished = false;
+	const finish = (reason, event = null) => {
+		if (finished) return false;
+		if (event && activePointerId !== null && event.pointerId !== undefined &&
+			event.pointerId !== activePointerId) return false;
+		finished = true;
+		activePointerId = null;
+		let changed = false;
+		for (const record of frozen) {
+			if (record.hadOwn) record.node.moveTo = record.original;
+			else delete record.node.moveTo;
+			changed = true;
+		}
+		frozen.length = 0;
+		if (reason === 'commit' && changed) canvas.requestSave();
+		return changed;
+	};
+	const downHandler = (event) => {
+		if (!enabled() || event.button !== 0 || !event.altKey) return;
+		const node = findNodeFromEvent(canvas, event);
+		if (!node || !getGroupIds(canvas).has(node.id)) return;
+		finish('replace');
+		finished = false;
+		activePointerId = event.pointerId ?? null;
+		for (const stranger of identifyStrangers(canvas, canvasApi, node, getGroupIds(canvas))) {
+			frozen.push({
+				node: stranger,
+				hadOwn: Object.prototype.hasOwnProperty.call(stranger, 'moveTo'),
+				original: stranger.moveTo
+			});
 			stranger.moveTo = () => {};
 		}
 	};
-	const upHandler = () => {
-		if (frozenNodes.length === 0) return;
-		for (const node of frozenNodes) {
-			delete node.moveTo;
+	const commit = (event) => finish('commit', event);
+	const cancel = (event) => finish('cancel', event);
+	const blur = () => finish('blur');
+	wrapper?.addEventListener('pointerdown', downHandler, true);
+	wrapper?.addEventListener('pointerup', commit, true);
+	wrapper?.addEventListener('pointercancel', cancel, true);
+	wrapper?.addEventListener('lostpointercapture', cancel, true);
+	view?.addEventListener?.('blur', blur);
+	const owner = {
+		finish,
+		dispose(reason = 'teardown') {
+			finish(reason);
+			wrapper?.removeEventListener('pointerdown', downHandler, true);
+			wrapper?.removeEventListener('pointerup', commit, true);
+			wrapper?.removeEventListener('pointercancel', cancel, true);
+			wrapper?.removeEventListener('lostpointercapture', cancel, true);
+			view?.removeEventListener?.('blur', blur);
 		}
-		frozenNodes.length = 0;
-		canvas.requestSave();
 	};
-	(_a = canvas.wrapperEl) == null
-		? void 0
-		: _a.addEventListener('pointerdown', downHandler, true);
-	(_b = canvas.wrapperEl) == null
-		? void 0
-		: _b.addEventListener('pointerup', upHandler);
-	return () => {
-		var _a2, _b2;
-		if (frozenNodes.length > 0) {
-			for (const node of frozenNodes) {
-				delete node.moveTo;
-			}
-			frozenNodes.length = 0;
-		}
-		(_a2 = canvas.wrapperEl) == null
-			? void 0
-			: _a2.removeEventListener('pointerdown', downHandler, true);
-		(_b2 = canvas.wrapperEl) == null
-			? void 0
-			: _b2.removeEventListener('pointerup', upHandler);
-	};
+	return owner;
 }
 
 // src/ui/auto-resize.ts
-function getEditorElements(node) {
-	var _a;
-	const iframe =
-		(_a = node.contentEl) == null ? void 0 : _a.querySelector('iframe');
-	if (!(iframe == null ? void 0 : iframe.contentDocument))
-		return { iframe: null, scroller: null, cmContent: null };
-	const scroller = iframe.contentDocument.querySelector('.cm-scroller');
-	const cmContent = iframe.contentDocument.querySelector('.cm-content');
-	return { iframe, scroller, cmContent };
-}
 function registerAutoResize(canvas, config, onEditExit) {
 	var _a, _b, _c;
 	let activeNode = null;
+	let pendingTimer = null;
+	let watchGeneration = 0;
+	function clearPending() {
+		if (pendingTimer !== null) clearTimeout(pendingTimer);
+		pendingTimer = null;
+	}
+	function scheduleStop(expectedNode) {
+		clearPending();
+		const generation = ++watchGeneration;
+		pendingTimer = setTimeout(() => {
+			pendingTimer = null;
+			if (generation !== watchGeneration || activeNode !== expectedNode) return;
+			if (!expectedNode.isEditing) stopWatching();
+		}, 50);
+	}
 	function startWatching(node) {
 		if (typeof config.enabled === 'function' && !config.enabled()) return;
+		clearPending();
+		watchGeneration++;
 		if (node.nodeEl)
 			node.nodeEl.removeClass('tomindmap-navigation-selected');
 		activeNode = node;
 	}
 	function stopWatching(triggerRelayout = true) {
+		clearPending();
+		watchGeneration++;
 		if (!activeNode) return;
 		const node = activeNode;
 		activeNode = null;
@@ -649,22 +405,14 @@ function registerAutoResize(canvas, config, onEditExit) {
 	};
 	const focusOutHandler = () => {
 		if (!activeNode) return;
-		setTimeout(() => {
-			if (activeNode && !activeNode.isEditing) {
-				stopWatching();
-			}
-		}, 50);
+		scheduleStop(activeNode);
 	};
 	const pointerHandler = (e) => {
 		var _a2;
 		if (!activeNode) return;
 		if ((_a2 = activeNode.nodeEl) == null ? void 0 : _a2.contains(e.target))
 			return;
-		setTimeout(() => {
-			if (activeNode && !activeNode.isEditing) {
-				stopWatching();
-			}
-		}, 50);
+		scheduleStop(activeNode);
 	};
 	(_a = canvas.wrapperEl) == null
 		? void 0
@@ -695,24 +443,127 @@ function registerAutoResize(canvas, config, onEditExit) {
 	};
 }
 
-// src/ui/outline-view.ts
 var import_obsidian4 = require('obsidian');
 var OUTLINE_VIEW_TYPE = 'tomindmap-outline';
+function outlineTreeDescendants(tree) {
+	const result = [];
+	const stack = [...(tree?.children || [])].reverse();
+	while (stack.length > 0) {
+		const item = stack.pop();
+		if (!item) continue;
+		result.push(item);
+		for (let index = item.children.length - 1; index >= 0; index--)
+			stack.push(item.children[index]);
+	}
+	return result;
+}
+
+function buildOutlineModel(canvas) {
+	try {
+		if (!canvas || typeof canvas.getData !== 'function' || !canvas.nodes)
+			return { ok: false, reason: 'invalid-canvas' };
+		const data = canvas.getData();
+		if (!data || typeof data !== 'object' || !Array.isArray(data.nodes) || !Array.isArray(data.edges))
+			return { ok: false, reason: 'invalid-canvas-data' };
+		const records = new Map();
+		for (const record of data.nodes) {
+			if (!record || typeof record !== 'object' || typeof record.id !== 'string' || !record.id)
+				return { ok: false, reason: 'invalid-node-record' };
+			if (records.has(record.id))
+				return { ok: false, reason: 'duplicate-node-record' };
+			records.set(record.id, record);
+		}
+		const forest = buildForest(canvas);
+		const nodes = new Map();
+		const collapsibleNodeIds = [];
+		const pending = [...forest].reverse();
+		while (pending.length > 0) {
+			const tree = pending.pop();
+			const id = tree?.canvasNode?.id;
+			if (typeof id !== 'string' || nodes.has(id))
+				return { ok: false, reason: 'invalid-forest' };
+			nodes.set(id, tree);
+			if (tree.children.length > 0) collapsibleNodeIds.push(id);
+			for (let index = tree.children.length - 1; index >= 0; index--)
+				pending.push(tree.children[index]);
+		}
+		const groups = [];
+		for (const record of data.nodes) {
+			if (record.type !== 'group' && record.label === undefined) continue;
+			if (typeof record.label !== 'string')
+				return { ok: false, reason: 'invalid-group-label' };
+			const node = canvas.nodes.get(record.id);
+			if (!node || ![node.x, node.y, node.width, node.height].every(Number.isFinite))
+				return { ok: false, reason: 'invalid-group-geometry' };
+			groups.push({
+				node,
+				label: record.label.trim() || 'Untitled Group',
+				area: node.width * node.height,
+				roots: []
+			});
+		}
+		groups.sort((left, right) =>
+			left.node.y - right.node.y ||
+			left.node.x - right.node.x ||
+			String(left.node.id).localeCompare(String(right.node.id))
+		);
+		const ungrouped = [];
+		for (const root of forest) {
+			const node = root.canvasNode;
+			const centerX = Number(node.x) + Number(node.width) / 2;
+			const centerY = Number(node.y) + Number(node.height) / 2;
+			let selectedGroup = null;
+			for (const group of groups) {
+				const area = group.node;
+				if (
+					centerX >= area.x && centerX <= area.x + area.width &&
+					centerY >= area.y && centerY <= area.y + area.height &&
+					(!selectedGroup || group.area < selectedGroup.area)
+				) selectedGroup = group;
+			}
+			if (selectedGroup) selectedGroup.roots.push(root);
+			else ungrouped.push(root);
+		}
+		return {
+			ok: true,
+			value: {
+				canvas,
+				forest,
+				groups: groups.filter((group) => group.roots.length > 0),
+				ungrouped,
+				nodes,
+				collapsibleNodeIds
+			}
+		};
+	} catch (error) {
+		return { ok: false, reason: 'invalid-canvas', error };
+	}
+}
+
+async function writeClipboardText(value, clipboard = globalThis.navigator?.clipboard) {
+	if (typeof clipboard?.writeText !== 'function')
+		throw new Error('Clipboard access is unavailable');
+	await clipboard.writeText(String(value || ''));
+	return true;
+}
+
 var OutlineView = class extends import_obsidian4.ItemView {
 	constructor(leaf) {
 		super(leaf);
 		this.canvasLeaf = null;
-		this.collapsedGroups = /* @__PURE__ */ new Set();
-		this.collapsedNodes = /* @__PURE__ */ new Set();
-		this.selectedRoots = /* @__PURE__ */ new Set();
+		this.collapsedGroups = new Set();
+		this.collapsedNodes = new Set();
+		this.selectedRoots = new Set();
 		this.lastCanvas = null;
 		this.groupIds = [];
 		this.collapsibleNodeIds = [];
 		this.draggedRoot = null;
 		this.dragSourceGroupId = null;
+		this.dragAllowedRoots = new Set();
 		this.activeNodeId = null;
-		this.allItemEls = /* @__PURE__ */ new Map();
-		this.groupElMap = /* @__PURE__ */ new Map();
+		this.allItemEls = new Map();
+		this.allTreeItems = new Map();
+		this.groupElMap = new Map();
 		this.searchQuery = '';
 		this.navHeaderEl = null;
 		this.collapseBtnEl = null;
@@ -720,90 +571,82 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		this.searchComponent = null;
 		this.zoomPadding = 0;
 		this.onForestLayout = null;
+		this.model = null;
+		this.viewDisposers = [];
+		this.session = {
+			canvas: null,
+			generation: 0,
+			timers: new Set(),
+			disposers: new Set()
+		};
 	}
-	getViewType() {
-		return OUTLINE_VIEW_TYPE;
-	}
-	getDisplayText() {
-		return 'Map outline';
-	}
-	getIcon() {
-		return 'list-tree';
-	}
+	getViewType() { return OUTLINE_VIEW_TYPE; }
+	getDisplayText() { return 'Map outline'; }
+	getIcon() { return 'list-tree'; }
 	onOpen() {
 		this.contentEl.addClass('tomindmap-outline');
+		this.contentEl.setAttribute('role', 'tree');
+		this.contentEl.setAttribute('aria-label', 'Map outline');
 		const navHeader = this.containerEl.createDiv({ cls: 'nav-header' });
 		this.containerEl.insertBefore(navHeader, this.contentEl);
 		this.navHeaderEl = navHeader;
-		const navButtons = navHeader.createDiv({
-			cls: 'nav-buttons-container'
-		});
-		const searchBtn = navButtons.createDiv({
+		const navButtons = navHeader.createDiv({ cls: 'nav-buttons-container' });
+		const searchBtn = navButtons.createEl('button', {
 			cls: 'clickable-icon nav-action-button',
-			attr: { 'aria-label': 'Search' }
+			attr: { type: 'button', 'aria-label': 'Search map outline' }
 		});
 		(0, import_obsidian4.setIcon)(searchBtn, 'search');
-		this.collapseBtnEl = navButtons.createDiv({
+		this.collapseBtnEl = navButtons.createEl('button', {
 			cls: 'clickable-icon nav-action-button',
-			attr: { 'aria-label': 'Collapse all' }
+			attr: { type: 'button', 'aria-label': 'Collapse all' }
 		});
 		(0, import_obsidian4.setIcon)(this.collapseBtnEl, 'chevrons-down-up');
-		this.collapseBtnEl.addEventListener('click', () => {
-			if (!this.lastCanvas) return;
-			const hasCollapsibleItems =
-				this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
-			const allCollapsed =
-				hasCollapsibleItems &&
-				this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
-				this.collapsibleNodeIds.every((id) =>
-					this.collapsedNodes.has(id)
-				);
-			if (allCollapsed) {
-				this.collapsedGroups.clear();
-				this.collapsedNodes.clear();
-			} else {
-				for (const id of this.groupIds) this.collapsedGroups.add(id);
-				for (const id of this.collapsibleNodeIds)
-					this.collapsedNodes.add(id);
-			}
-			this.refresh(this.lastCanvas);
-		});
-		this.searchContainerEl = navHeader.createDiv({
-			cls: 'tomindmap-outline-search-container'
-		});
+		this.addViewListener(searchBtn, 'click', () => this.toggleSearch());
+		this.addViewListener(this.collapseBtnEl, 'click', () => this.toggleAllCollapsed());
+		this.searchContainerEl = navHeader.createDiv({ cls: 'tomindmap-outline-search-container' });
 		this.searchContainerEl.hide();
-		this.searchComponent = new import_obsidian4.SearchComponent(
-			this.searchContainerEl
-		);
+		this.searchComponent = new import_obsidian4.SearchComponent(this.searchContainerEl);
 		this.searchComponent.setPlaceholder('Filter...');
 		this.searchComponent.onChange((value) => {
 			this.searchQuery = value;
-			this.applyFilter();
+			if (this.model) this.renderModel(this.model);
 		});
-		searchBtn.addEventListener('click', () => {
-			if (!this.searchContainerEl || !this.searchComponent) return;
-			if (this.searchContainerEl.isShown()) {
-				this.searchContainerEl.hide();
-				this.searchQuery = '';
-				this.searchComponent.setValue('');
-				this.applyFilter();
-			} else {
-				this.searchContainerEl.show();
-				this.searchComponent.inputEl.focus();
-			}
-		});
+		this.installDelegatedListeners();
+		if (this.lastCanvas) this.refresh(this.lastCanvas);
+		else this.clear();
 		return Promise.resolve();
 	}
 	onClose() {
-		this.clear();
-		if (this.navHeaderEl) {
-			this.navHeaderEl.remove();
-			this.navHeaderEl = null;
-		}
+		this.disposeCanvasSession();
+		for (const dispose of this.viewDisposers.splice(0)) dispose();
+		if (this.navHeaderEl) this.navHeaderEl.remove();
+		this.navHeaderEl = null;
 		this.collapseBtnEl = null;
 		this.searchContainerEl = null;
 		this.searchComponent = null;
 		return Promise.resolve();
+	}
+	addViewListener(target, type, listener, options) {
+		target.addEventListener(type, listener, options);
+		const dispose = () => target.removeEventListener(type, listener, options);
+		this.viewDisposers.push(dispose);
+		return dispose;
+	}
+	installDelegatedListeners() {
+		this.addViewListener(this.contentEl, 'click', (event) => this.handleOutlineClick(event));
+		this.addViewListener(this.contentEl, 'dblclick', (event) => this.handleOutlineDoubleClick(event));
+		this.addViewListener(this.contentEl, 'contextmenu', (event) => this.handleOutlineContextMenu(event));
+		this.addViewListener(this.contentEl, 'keydown', (event) => this.handleOutlineKeydown(event));
+		this.addViewListener(this.contentEl, 'pointerdown', (event) => {
+			const handle = event.target?.closest?.('.tomindmap-outline-drag-handle');
+			const id = handle?.parentElement?.getAttribute?.('data-outline-id');
+			if (id) this.dragAllowedRoots.add(id);
+		});
+		this.addViewListener(this.contentEl, 'dragstart', (event) => this.handleOutlineDragStart(event));
+		this.addViewListener(this.contentEl, 'dragend', () => this.clearOutlineDrag());
+		this.addViewListener(this.contentEl, 'dragover', (event) => this.handleOutlineDragOver(event));
+		this.addViewListener(this.contentEl, 'dragleave', (event) => this.handleOutlineDragLeave(event));
+		this.addViewListener(this.contentEl, 'drop', (event) => this.handleOutlineDrop(event));
 	}
 	openSearch() {
 		if (!this.searchContainerEl || !this.searchComponent) return;
@@ -811,484 +654,418 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		this.searchComponent.inputEl.focus();
 		this.searchComponent.inputEl.select();
 	}
-	/**
-	 * Rebuild the outline from the current canvas state.
-	 */
-	refresh(canvas) {
-		var _a;
-		this.contentEl.empty();
-		this.selectedRoots.clear();
-		this.groupElMap.clear();
-		this.allItemEls.clear();
-		this.lastCanvas = canvas;
-		this.canvasLeaf =
-			(_a = this.app.workspace.getLeavesOfType('canvas').find((l) => {
-				var _a2;
-				return (
-					((_a2 = l.view) == null ? void 0 : _a2.canvas) === canvas
-				);
-			})) != null
-				? _a
-				: null;
-		if (this.searchComponent) {
-			this.searchComponent.setValue(this.searchQuery);
+	toggleSearch() {
+		if (!this.searchContainerEl || !this.searchComponent) return;
+		if (this.searchContainerEl.isShown()) {
+			this.searchContainerEl.hide();
+			this.searchQuery = '';
+			this.searchComponent.setValue('');
+			if (this.model) this.renderModel(this.model);
+		} else {
+			this.searchContainerEl.show();
+			this.searchComponent.inputEl.focus();
 		}
-		const forest = buildForest(canvas);
+	}
+	toggleAllCollapsed() {
+		if (!this.lastCanvas || !this.model) return;
+		const ids = [...this.groupIds, ...this.collapsibleNodeIds];
+		if (ids.length === 0) return;
+		const allCollapsed = this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
+			this.collapsibleNodeIds.every((id) => this.collapsedNodes.has(id));
+		if (allCollapsed) {
+			this.collapsedGroups.clear();
+			this.collapsedNodes.clear();
+		} else {
+			for (const id of this.groupIds) this.collapsedGroups.add(id);
+			for (const id of this.collapsibleNodeIds) this.collapsedNodes.add(id);
+		}
+		this.renderModel(this.model);
+	}
+	activateCanvasSession(canvas) {
+		if (this.session.canvas === canvas) return;
+		this.disposeCanvasSession();
+		this.session.canvas = canvas;
+		this.session.generation++;
+		this.collapsedGroups.clear();
+		this.collapsedNodes.clear();
+		this.selectedRoots.clear();
+		this.groupIds = [];
 		this.collapsibleNodeIds = [];
-		const collectCollapsibleNodes = (topic) => {
-			if (topic.children.length > 0)
-				this.collapsibleNodeIds.push(topic.canvasNode.id);
-			for (const child of topic.children) collectCollapsibleNodes(child);
-		};
-		for (const root of forest) collectCollapsibleNodes(root);
-		if (forest.length === 0) {
+		this.activeNodeId = null;
+		this.clearOutlineDrag();
+	}
+	disposeCanvasSession() {
+		for (const timer of this.session.timers) clearTimeout(timer);
+		this.session.timers.clear();
+		for (const dispose of this.session.disposers) dispose();
+		this.session.disposers.clear();
+		this.dragAllowedRoots.clear();
+	}
+	trackSessionTimeout(callback, delay) {
+		const generation = this.session.generation;
+		const timer = setTimeout(() => {
+			this.session.timers.delete(timer);
+			if (!this.lastCanvas || this.session.generation !== generation) return;
+			callback();
+		}, delay);
+		this.session.timers.add(timer);
+		return timer;
+	}
+	refresh(canvas) {
+		const decoded = buildOutlineModel(canvas);
+		if (!decoded.ok) return false;
+		const model = decoded.value;
+		this.activateCanvasSession(canvas);
+		this.lastCanvas = canvas;
+		this.model = model;
+		this.canvasLeaf = this.app.workspace.getLeavesOfType('canvas').find((leaf) => leaf.view?.canvas === canvas) || null;
+		if (this.searchComponent) this.searchComponent.setValue(this.searchQuery);
+		this.collapsibleNodeIds = model.collapsibleNodeIds;
+		this.renderModel(model);
+		return true;
+	}
+	renderModel(model) {
+		const canvas = model.canvas;
+		this.contentEl.empty();
+		this.contentEl.setAttribute('role', 'tree');
+		this.contentEl.setAttribute('aria-label', 'Map outline');
+		this.allItemEls.clear();
+		this.allTreeItems.clear();
+		this.groupElMap.clear();
+		this.groupIds = model.groups.map((group) => group.node.id);
+		if (model.ungrouped.length === 0 && model.groups.length === 0) {
 			this.contentEl.createDiv({
 				cls: 'tomindmap-outline-empty',
-				text: 'No root nodes'
+				text: 'No root topics',
+				attr: { role: 'status' }
 			});
+			this.updateCollapseButton();
 			return;
 		}
-		const groups = [];
-		for (const nd of canvas.getData().nodes) {
-			if (nd.type !== 'group') continue;
-			const node = canvas.nodes.get(nd.id);
-			if (!node) continue;
-			groups.push({
-				node,
-				label: (nd.label || '').trim() || 'Untitled Group',
-				area: node.width * node.height,
-				roots: []
+		if (model.ungrouped.length > 0) {
+			const zone = this.contentEl.createDiv({
+				cls: 'tomindmap-outline-ungrouped-zone',
+				attr: { role: 'group', 'aria-label': 'Ungrouped topics', 'data-outline-drop': 'ungrouped' }
 			});
+			for (const root of model.ungrouped)
+				this.renderTopicBranch(zone, root, canvas, 1, null, true);
 		}
-		groups.sort((a, b) => {
-			const dy = a.node.y - b.node.y;
-			if (Math.abs(dy) > 50) return dy;
-			return a.node.x - b.node.x;
-		});
-		const ungrouped = [];
-		for (const root of forest) {
-			const cx = root.canvasNode.x + root.canvasNode.width / 2;
-			const cy = root.canvasNode.y + root.canvasNode.height / 2;
-			let bestGroup = null;
-			for (const g of groups) {
-				if (
-					cx >= g.node.x &&
-					cx <= g.node.x + g.node.width &&
-					cy >= g.node.y &&
-					cy <= g.node.y + g.node.height
-				) {
-					if (!bestGroup || g.area < bestGroup.area) {
-						bestGroup = g;
-					}
+		for (const group of model.groups)
+			this.renderGroup(group, canvas);
+		this.applyFilter();
+		this.updateCollapseButton();
+		if (this.activeNodeId) this.setActiveItem(this.activeNodeId);
+	}
+	renderTopicBranch(container, rootTree, canvas, level, groupId, isRoot) {
+		const pending = [{ tree: rootTree, container, level, groupId, isRoot }];
+		while (pending.length > 0) {
+			const current = pending.pop();
+			const tree = current.tree;
+			const node = tree.canvasNode;
+			const nodeId = node.id;
+			const hasChildren = tree.children.length > 0;
+			const isCollapsed = hasChildren && !this.searchQuery &&
+				(this.collapsedNodes.has(nodeId) || (current.isRoot && this.collapsedGroups.has(groupId)));
+			const treeItem = current.container.createDiv({
+				cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`,
+				attr: {
+					role: 'treeitem',
+					'aria-level': String(current.level),
+					'aria-expanded': hasChildren ? String(!isCollapsed) : null,
+					'aria-selected': 'false',
+					'data-outline-kind': 'node',
+					'data-outline-id': nodeId,
+					'data-tomindmap-search-text': MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))
+				}
+			});
+			this.allTreeItems.set(nodeId, treeItem);
+			const self = treeItem.createDiv({ cls: 'tree-item-self', attr: { role: 'none' } });
+			const collapse = self.createEl('button', {
+				cls: 'tree-item-icon collapse-icon',
+				attr: {
+					type: 'button',
+					'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} ${MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))}`,
+					'aria-expanded': hasChildren ? String(!isCollapsed) : null,
+					'data-outline-action': 'collapse-node',
+					'data-outline-id': nodeId
+				}
+			});
+			collapse.disabled = !hasChildren;
+			(0, import_obsidian4.setIcon)(collapse, hasChildren ? 'right-triangle' : 'minus');
+			if (current.isRoot) {
+				const handle = self.createDiv({
+					cls: 'tree-item-icon tomindmap-outline-drag-handle',
+					attr: { 'aria-hidden': 'true' }
+				});
+				(0, import_obsidian4.setIcon)(handle, 'grip-vertical');
+			}
+			const select = self.createEl('button', {
+				cls: 'tree-item-inner is-clickable tomindmap-outline-item',
+				text: MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node)),
+				attr: {
+					type: 'button',
+					'aria-label': `Select ${MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))}`,
+					'data-outline-action': 'select-node',
+					'data-outline-id': nodeId,
+					'data-tomindmap-search-text': MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))
+				}
+			});
+			select.draggable = Boolean(current.isRoot && groupId == null);
+			this.allItemEls.set(nodeId, select);
+			if (hasChildren && !isCollapsed) {
+				const children = treeItem.createDiv({
+					cls: 'tree-item-children',
+					attr: { role: 'group' }
+				});
+				for (let index = tree.children.length - 1; index >= 0; index--) {
+					pending.push({
+						tree: tree.children[index],
+						container: children,
+						level: current.level + 1,
+						groupId: current.groupId,
+						isRoot: false
+					});
 				}
 			}
-			if (bestGroup) {
-				bestGroup.roots.push(root);
-			} else {
-				ungrouped.push(root);
+		}
+	}
+	renderGroup(group, canvas) {
+		const collapsed = this.collapsedGroups.has(group.node.id) && !this.searchQuery;
+		const treeItem = this.contentEl.createDiv({
+			cls: `tree-item tomindmap-outline-group${collapsed ? ' is-collapsed' : ''}`,
+			attr: {
+				role: 'treeitem',
+				'aria-level': '1',
+				'aria-expanded': String(!collapsed),
+				'data-outline-kind': 'group',
+				'data-outline-id': group.node.id,
+				'data-tomindmap-search-text': group.label
 			}
+		});
+		this.allTreeItems.set(group.node.id, treeItem);
+		const self = treeItem.createDiv({ cls: 'tree-item-self', attr: { role: 'none' } });
+		const collapse = self.createEl('button', {
+			cls: 'tree-item-icon collapse-icon',
+			attr: {
+				type: 'button',
+				'aria-label': `${collapsed ? 'Expand' : 'Collapse'} group ${group.label}`,
+				'aria-expanded': String(!collapsed),
+				'data-outline-action': 'collapse-group',
+				'data-outline-id': group.node.id
+			}
+		});
+		(0, import_obsidian4.setIcon)(collapse, 'right-triangle');
+		const label = self.createEl('button', {
+			cls: 'tree-item-inner is-clickable',
+			text: group.label,
+			attr: {
+				type: 'button',
+				'aria-label': `${collapsed ? 'Expand' : 'Collapse'} group ${group.label}`,
+				'data-outline-action': 'collapse-group',
+				'data-outline-id': group.node.id,
+				'data-tomindmap-search-text': group.label
+			}
+		});
+		label.createSpan({ cls: 'tomindmap-outline-group-count', text: String(group.roots.length) });
+		this.groupElMap.set(group.node.id, self);
+		const children = treeItem.createDiv({ cls: 'tree-item-children', attr: { role: 'group' } });
+		if (!collapsed) {
+			for (const root of group.roots)
+				this.renderTopicBranch(children, root, canvas, 2, group.node.id, true);
 		}
-		const ungroupedZone = this.contentEl.createDiv({
-			cls: 'tomindmap-outline-ungrouped-zone'
-		});
-		ungroupedZone.addEventListener('dragover', (e) => {
-			if (!this.draggedRoot || !this.dragSourceGroupId) return;
-			e.preventDefault();
-			ungroupedZone.addClass('is-drag-over');
-		});
-		ungroupedZone.addEventListener('dragleave', () => {
-			ungroupedZone.removeClass('is-drag-over');
-		});
-		ungroupedZone.addEventListener('drop', (e) => {
-			e.preventDefault();
-			ungroupedZone.removeClass('is-drag-over');
-			if (
-				!this.draggedRoot ||
-				!this.dragSourceGroupId ||
-				!this.lastCanvas
-			)
-				return;
-			this.ungroupTree(this.draggedRoot, this.dragSourceGroupId);
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-		});
-		for (const root of ungrouped) {
-			this.renderRootItem(ungroupedZone, root, canvas, true);
-		}
-		for (const group of groups) {
-			if (group.roots.length === 0) continue;
-			this.renderGroup(group, canvas);
-		}
-		this.groupIds = groups
-			.filter((g) => g.roots.length > 0)
-			.map((g) => g.node.id);
-		const hasCollapsibleItems =
-			this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
-		const allCollapsed =
-			hasCollapsibleItems &&
+	}
+	updateCollapseButton() {
+		if (!this.collapseBtnEl) return;
+		const hasItems = this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
+		const allCollapsed = hasItems &&
 			this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
 			this.collapsibleNodeIds.every((id) => this.collapsedNodes.has(id));
-		if (this.collapseBtnEl) {
-			(0, import_obsidian4.setIcon)(
-				this.collapseBtnEl,
-				allCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'
-			);
-			this.collapseBtnEl.setAttribute(
-				'aria-label',
-				allCollapsed ? 'Expand all' : 'Collapse all'
-			);
-		}
-		if (this.searchQuery) this.applyFilter();
-		if (this.activeNodeId) {
-			const el = this.allItemEls.get(this.activeNodeId);
-			if (el) el.addClass('is-active');
-		}
+		(0, import_obsidian4.setIcon)(this.collapseBtnEl, allCollapsed ? 'chevrons-up-down' : 'chevrons-down-up');
+		this.collapseBtnEl.disabled = !hasItems;
+		this.collapseBtnEl.setAttribute('aria-label', allCollapsed ? 'Expand all' : 'Collapse all');
 	}
 	applyFilter() {
-		const q = this.searchQuery.toLowerCase().trim();
-		const items = Array.from(
-			this.contentEl.querySelectorAll('.tree-item')
-		).reverse();
+		const query = this.searchQuery.toLowerCase().trim();
+		const items = Array.from(this.contentEl.querySelectorAll('[role="treeitem"]'));
+		const childrenByItem = new Map();
 		for (const item of items) {
-			const label = item.querySelector(
-				':scope > .tree-item-self .tree-item-inner'
-			);
-			const itemSelf = item.querySelector(':scope > .tree-item-self');
-			const searchableText = (
-				itemSelf?.getAttribute('data-tomindmap-search-text') ||
-				label?.textContent ||
-				''
-			).toLowerCase();
-			const ownMatch = q === '' || searchableText.includes(q);
-			const children = Array.from(
-				item.querySelectorAll(
-					':scope > .tree-item-children > .tree-item'
-				)
-			);
-			const descendantMatch = children.some(
-				(child) => !child.hasClass('is-hidden')
-			);
-			const visible = ownMatch || descendantMatch;
+			const container = item.parentElement;
+			const parent = container?.hasClass?.('tree-item-children')
+				? container.parentElement
+				: null;
+			if (parent) {
+				const children = childrenByItem.get(parent) || [];
+				children.push(item);
+				childrenByItem.set(parent, children);
+			}
+		}
+		const hidden = new Map();
+		for (let index = items.length - 1; index >= 0; index--) {
+			const item = items[index];
+			const own = query === '' ||
+				String(item.getAttribute('data-tomindmap-search-text') || '').toLowerCase().includes(query);
+			const descendant = (childrenByItem.get(item) || [])
+				.some((child) => !hidden.get(child));
+			const visible = own || descendant;
+			hidden.set(item, !visible);
 			item.toggleClass('is-hidden', !visible);
-			if (q && descendantMatch) item.removeClass('is-collapsed');
-			if (!q) {
-				const collapseId = item.getAttribute(
-					'data-tomindmap-collapse-id'
-				);
-				const collapseKind = item.getAttribute(
-					'data-tomindmap-collapse-kind'
-				);
-				const collapsed =
-					collapseKind === 'group'
-						? this.collapsedGroups.has(collapseId)
-						: this.collapsedNodes.has(collapseId);
-				item.toggleClass('is-collapsed', !!collapseId && collapsed);
-			}
 		}
 	}
-	/**
-	 * Render a single root node as a tree-item.
-	 */
-	renderRootItem(container, root, canvas, isUngrouped, groupId) {
-		const rootMarkdown = canvasNodeMarkdownText(root.canvasNode);
-		const rootLabel = getRootTitle(rootMarkdown);
-		const isCollapsed = this.collapsedNodes.has(root.canvasNode.id);
-		const treeItem = container.createDiv({
-			cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`
-		});
-		treeItem.setAttribute('data-tomindmap-collapse-id', root.canvasNode.id);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'node');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-item',
-			attr: { 'data-tomindmap-search-text': rootLabel }
-		});
-		const branchIcon = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-branch-icon'
-		});
-		(0, import_obsidian4.setIcon)(
-			branchIcon,
-			root.children.length > 0 ? 'right-triangle' : 'minus'
-		);
-		if (root.children.length > 0) {
-			branchIcon.addClass('collapse-icon');
-			branchIcon.addEventListener('click', (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				const collapse = !treeItem.hasClass('is-collapsed');
-				treeItem.toggleClass('is-collapsed', collapse);
-				if (collapse) this.collapsedNodes.add(root.canvasNode.id);
-				else this.collapsedNodes.delete(root.canvasNode.id);
-			});
+	handleOutlineClick(event) {
+		const button = event.target?.closest?.('[data-outline-action]');
+		if (!button) return;
+		const id = button.getAttribute('data-outline-id');
+		const action = button.getAttribute('data-outline-action');
+		if (action === 'collapse-node') {
+			if (this.collapsedNodes.has(id)) this.collapsedNodes.delete(id);
+			else this.collapsedNodes.add(id);
+			if (this.model) this.renderModel(this.model);
+			return;
 		}
-		const dragHandle = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-drag-handle'
-		});
-		(0, import_obsidian4.setIcon)(dragHandle, 'grip-vertical');
-		self.createDiv({
-			cls: 'tree-item-inner',
-			text: rootLabel
-		});
-		let dragAllowed = false;
-		dragHandle.addEventListener('pointerdown', () => {
-			dragAllowed = true;
-		});
-		self.addEventListener('pointerup', () => {
-			dragAllowed = false;
-		});
-		self.setAttribute('draggable', 'true');
-		self.addEventListener('dragstart', (e) => {
-			var _a;
-			if (!dragAllowed) {
-				e.preventDefault();
-				return;
-			}
-			dragAllowed = false;
-			this.draggedRoot = root;
-			this.dragSourceGroupId = groupId != null ? groupId : null;
-			self.addClass('is-dragging');
-			(_a = e.dataTransfer) == null
-				? void 0
-				: _a.setData('text/plain', root.canvasNode.id);
-		});
-		self.addEventListener('dragend', () => {
-			self.removeClass('is-dragging');
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-			for (const [, el] of this.groupElMap) {
-				el.removeClass('is-drag-over');
-			}
-		});
-		this.allItemEls.set(root.canvasNode.id, self);
-		self.addEventListener('click', (e) => {
-			if (isUngrouped && e.ctrlKey) {
-				if (this.selectedRoots.has(root)) {
-					this.selectedRoots.delete(root);
-					self.removeClass('is-selected');
-				} else {
-					this.selectedRoots.add(root);
-					self.addClass('is-selected');
-				}
-				return;
-			}
-			this.clearSelection();
-			this.setActiveItem(root.canvasNode.id);
-			if (this.canvasLeaf) {
-				this.app.workspace.setActiveLeaf(this.canvasLeaf, {
-					focus: true
-				});
-			}
-			const node = root.canvasNode;
-			canvas.selectOnly(node);
-			const pad = this.zoomPadding;
-			const cx = node.x + node.width / 2;
-			const cy = node.y + node.height / 2;
-			canvas.zoomToBbox({
-				minX: cx - pad,
-				minY: cy - pad,
-				maxX: cx + pad,
-				maxY: cy + pad
-			});
-		});
-		self.addEventListener('contextmenu', (e) => {
-			e.preventDefault();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Copy node link')
-					.setIcon('link')
-					.onClick(() => {
-						const canvasPath = canvas.view.file.path;
-						const node = root.canvasNode;
-						if (node.file) {
-							const vaultName = this.app.vault.getName();
-							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-							);
-						} else if (node.url) {
-							void navigator.clipboard.writeText(node.url);
-						} else {
-							void navigator.clipboard.writeText(
-								`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-							);
-						}
-						new import_obsidian4.Notice('Node link copied');
-					});
-			});
-			if (isUngrouped) {
-				if (!this.selectedRoots.has(root)) {
-					this.clearSelection();
-					this.selectedRoots.add(root);
-					self.addClass('is-selected');
-				}
-				const count = this.selectedRoots.size;
-				menu.addItem((item) => {
-					item.setTitle(
-						`Create group (${count} root${count > 1 ? 's' : ''})`
-					)
-						.setIcon('group')
-						.onClick(() => this.createGroupFromSelection());
-				});
-			}
-			menu.showAtMouseEvent(e);
-		});
-		if (root.children.length > 0) {
-			const childrenContainer = treeItem.createDiv({
-				cls: 'tree-item-children'
-			});
-			for (const child of root.children) {
-				this.renderTopicItem(childrenContainer, child, canvas);
-			}
+		if (action === 'collapse-group') {
+			if (this.collapsedGroups.has(id)) this.collapsedGroups.delete(id);
+			else this.collapsedGroups.add(id);
+			if (this.model) this.renderModel(this.model);
+			return;
 		}
+		if (action === 'select-node') this.selectOutlineNode(id, event);
 	}
-	/**
-	 * Render every nested topic recursively, not just the central topic.
-	 */
-	renderTopicItem(container, topic, canvas) {
-		const topicMarkdown = canvasNodeMarkdownText(topic.canvasNode);
-		const topicLabel = getRootTitle(topicMarkdown);
-		const isCollapsed = this.collapsedNodes.has(topic.canvasNode.id);
-		const treeItem = container.createDiv({
-			cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`
-		});
-		treeItem.setAttribute(
-			'data-tomindmap-collapse-id',
-			topic.canvasNode.id
-		);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'node');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-item',
-			attr: { 'data-tomindmap-search-text': topicLabel }
-		});
-		const branchIcon = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-branch-icon'
-		});
-		(0, import_obsidian4.setIcon)(
-			branchIcon,
-			topic.children.length > 0 ? 'right-triangle' : 'minus'
-		);
-		if (topic.children.length > 0) {
-			branchIcon.addClass('collapse-icon');
-			branchIcon.addEventListener('click', (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				const collapse = !treeItem.hasClass('is-collapsed');
-				treeItem.toggleClass('is-collapsed', collapse);
-				if (collapse) this.collapsedNodes.add(topic.canvasNode.id);
-				else this.collapsedNodes.delete(topic.canvasNode.id);
-			});
-		}
-		self.createDiv({
-			cls: 'tree-item-inner',
-			text: topicLabel
-		});
-		this.allItemEls.set(topic.canvasNode.id, self);
-		self.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.clearSelection();
-			this.setActiveItem(topic.canvasNode.id);
-			if (this.canvasLeaf) {
-				this.app.workspace.setActiveLeaf(this.canvasLeaf, {
-					focus: true
-				});
-			}
-			this.canvasApiSelectAndReveal(canvas, topic.canvasNode);
-		});
-		self.addEventListener('contextmenu', (event) => {
+	handleOutlineKeydown(event) {
+		const button = event.target?.closest?.('[data-outline-action]');
+		if (!button) return;
+		const id = button.getAttribute('data-outline-id');
+		const action = button.getAttribute('data-outline-action');
+		if ((event.key === 'Enter' || event.key === ' ') &&
+			(action === 'select-node' || action === 'collapse-group')) {
 			event.preventDefault();
-			event.stopPropagation();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Copy node link')
-					.setIcon('link')
-					.onClick(() => {
-						const canvasPath = canvas.view.file.path;
-						const node = topic.canvasNode;
-						if (node.file) {
-							const vaultName = this.app.vault.getName();
-							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-							);
-						} else if (node.url) {
-							void navigator.clipboard.writeText(node.url);
-						} else {
-							void navigator.clipboard.writeText(
-								`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-							);
-						}
-						new import_obsidian4.Notice('Node link copied');
-					});
-			});
-			menu.showAtMouseEvent(event);
-		});
-		if (topic.children.length > 0) {
-			const childrenContainer = treeItem.createDiv({
-				cls: 'tree-item-children'
-			});
-			for (const child of topic.children) {
-				this.renderTopicItem(childrenContainer, child, canvas);
+			this.handleOutlineClick({ target: button });
+			return;
+		}
+		if (event.key === 'ArrowRight' && action === 'collapse-node' && this.collapsedNodes.has(id)) {
+			event.preventDefault();
+			this.collapsedNodes.delete(id);
+			if (this.model) this.renderModel(this.model);
+		} else if (event.key === 'ArrowLeft' && action === 'collapse-node' && !this.collapsedNodes.has(id)) {
+			event.preventDefault();
+			this.collapsedNodes.add(id);
+			if (this.model) this.renderModel(this.model);
+		}
+	}
+	selectOutlineNode(id, event = {}) {
+		const tree = this.model?.nodes.get(id);
+		const node = tree?.canvasNode;
+		const canvas = this.lastCanvas;
+		if (!tree || !node || !canvas) return;
+		if (tree.parent == null && (event.ctrlKey || event.metaKey)) {
+			if (this.selectedRoots.has(tree)) {
+				this.selectedRoots.delete(tree);
+				this.allItemEls.get(id)?.removeClass('is-selected');
+			} else {
+				this.clearSelection();
+				this.selectedRoots.add(tree);
+				this.allItemEls.get(id)?.addClass('is-selected');
 			}
+			this.allItemEls.get(id)?.setAttribute('aria-pressed', String(this.selectedRoots.has(tree)));
+			return;
 		}
+		this.clearSelection();
+		this.setActiveItem(id);
+		if (this.canvasLeaf) this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
+		if (tree.parent == null) this.selectAndZoom(canvas, node);
+		else this.canvasApiSelectAndReveal(canvas, node);
 	}
-	canvasApiSelectAndReveal(canvas, node) {
+	handleOutlineDoubleClick(event) {
+		const group = event.target?.closest?.('[data-outline-kind="group"]');
+		if (!group || !this.model) return;
+		const id = group.getAttribute('data-outline-id');
+		const record = this.model.groups.find((candidate) => candidate.node.id === id);
+		const label = group.querySelector('.tree-item-inner');
+		if (record && label) this.startGroupRename(label, record, this.lastCanvas);
+	}
+	handleOutlineContextMenu(event) {
+		const target = event.target?.closest?.('[data-outline-kind]');
+		if (!target || !this.model || !this.lastCanvas) return;
+		event.preventDefault();
+		const kind = target.getAttribute('data-outline-kind');
+		const id = target.getAttribute('data-outline-id');
+		const menu = new import_obsidian4.Menu();
+		if (kind === 'node') {
+			const node = this.model.nodes.get(id)?.canvasNode;
+			if (!node) return;
+			menu.addItem((item) => item.setTitle('Copy node link').setIcon('link').onClick(() => {
+				this.runAsync(() => this.copyNodeLink(node), 'copy node link');
+			}));
+			const tree = this.model.nodes.get(id);
+			if (tree?.parent == null) {
+				if (!this.selectedRoots.has(tree)) {
+					this.clearSelection();
+					this.selectedRoots.add(tree);
+				}
+				menu.addItem((item) => item.setTitle(`Create group (${this.selectedRoots.size} roots)`).setIcon('group').onClick(() => this.createGroupFromSelection()));
+			}
+		} else {
+			const group = this.model.groups.find((candidate) => candidate.node.id === id);
+			if (!group) return;
+			menu.addItem((item) => item.setTitle('Rename group').setIcon('pencil').onClick(() => {
+				const label = this.allTreeItems.get(id)?.querySelector('.tree-item-inner');
+				if (label) this.startGroupRename(label, group, this.lastCanvas);
+			}));
+			menu.addItem((item) => item.setTitle('Layout forest').setIcon('layout-grid').onClick(() => {
+				if (this.lastCanvas && this.onForestLayout) this.onForestLayout(this.lastCanvas, id);
+			}));
+		}
+		menu.showAtMouseEvent(event);
+	}
+	async copyNodeLink(node) {
+		const canvasPath = this.lastCanvas?.view?.file?.path || '';
+		let link = `obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${encodeURIComponent(node.id)}`;
+		if (canvasNodeFilePath(node)) {
+			const vaultName = this.app.vault.getName?.() || '';
+			link = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`;
+		} else if (canvasNodeUrl(node)) link = canvasNodeUrl(node);
+		await writeClipboardText(link);
+		new import_obsidian4.Notice('Node link copied');
+	}
+	selectAndZoom(canvas, node) {
 		canvas.selectOnly(node);
-		const pad = Math.max(40, this.zoomPadding);
-		const cx = node.x + node.width / 2;
-		const cy = node.y + node.height / 2;
+		const pad = this.zoomPadding;
 		canvas.zoomToBbox({
-			minX: cx - pad,
-			minY: cy - pad,
-			maxX: cx + pad,
-			maxY: cy + pad
+			minX: node.x + node.width / 2 - pad,
+			minY: node.y + node.height / 2 - pad,
+			maxX: node.x + node.width / 2 + pad,
+			maxY: node.y + node.height / 2 + pad
 		});
 	}
+	canvasApiSelectAndReveal(canvas, node) { this.selectAndZoom(canvas, node); }
 	clearSelection() {
-		var _a;
-		for (const root of this.selectedRoots) {
-			(_a = this.allItemEls.get(root.canvasNode.id)) == null
-				? void 0
-				: _a.removeClass('is-selected');
-		}
+		for (const root of this.selectedRoots)
+			this.allItemEls.get(root.canvasNode.id)?.removeClass('is-selected');
 		this.selectedRoots.clear();
 	}
 	setActiveItem(nodeId) {
-		var _a;
-		if (this.activeNodeId) {
-			(_a = this.allItemEls.get(this.activeNodeId)) == null
-				? void 0
-				: _a.removeClass('is-active');
-		}
+		if (this.activeNodeId && this.activeNodeId !== nodeId)
+			this.allItemEls.get(this.activeNodeId)?.removeClass('is-active');
 		this.activeNodeId = nodeId;
-		const el = this.allItemEls.get(nodeId);
-		el == null ? void 0 : el.addClass('is-active');
-		el == null ? void 0 : el.scrollIntoView({ block: 'nearest' });
+		const element = this.allItemEls.get(nodeId);
+		element?.addClass('is-active');
+		element?.setAttribute('aria-current', 'true');
+		element?.scrollIntoView({ block: 'nearest' });
 	}
 	clearActiveItem() {
-		var _a;
 		if (this.activeNodeId) {
-			(_a = this.allItemEls.get(this.activeNodeId)) == null
-				? void 0
-				: _a.removeClass('is-active');
+			this.allItemEls.get(this.activeNodeId)?.removeClass('is-active');
+			this.allItemEls.get(this.activeNodeId)?.removeAttribute('aria-current');
 		}
 		this.activeNodeId = null;
 	}
-	/**
-	 * Sync outline highlight from the current canvas selection.
-	 */
 	syncHighlightFromCanvas(canvas) {
-		if (canvas.selection.size !== 1) {
+		if (canvas !== this.lastCanvas || canvas.selection.size !== 1) {
 			this.clearActiveItem();
 			return;
 		}
 		const item = canvas.selection.values().next().value;
-		if (!item || !('nodeEl' in item)) {
-			this.clearActiveItem();
-			return;
-		}
-		const nodeId = item.id;
-		if (this.allItemEls.has(nodeId)) {
-			this.setActiveItem(nodeId);
-		} else {
-			this.clearActiveItem();
-		}
+		if (!item || !this.allItemEls.has(item.id)) this.clearActiveItem();
+		else this.setActiveItem(item.id);
 	}
 	createGroupFromSelection() {
 		const canvas = this.lastCanvas;
@@ -1296,316 +1073,181 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		const allNodes = [];
 		for (const root of this.selectedRoots) {
 			allNodes.push(root.canvasNode);
-			for (const desc of getDescendants(root)) {
-				allNodes.push(desc.canvasNode);
-			}
+			for (const descendant of outlineTreeDescendants(root)) allNodes.push(descendant.canvasNode);
 		}
-		const PADDING = 20;
-		let minX = Infinity,
-			minY = Infinity,
-			maxX = -Infinity,
-			maxY = -Infinity;
-		for (const node of allNodes) {
-			minX = Math.min(minX, node.x);
-			minY = Math.min(minY, node.y);
-			maxX = Math.max(maxX, node.x + node.width);
-			maxY = Math.max(maxY, node.y + node.height);
-		}
-		minX -= PADDING;
-		minY -= PADDING;
-		maxX += PADDING;
-		maxY += PADDING;
-		const group = canvas.createGroupNode({
-			pos: { x: minX, y: minY },
-			size: { width: maxX - minX, height: maxY - minY },
-			label: ''
-		});
+		const padding = 20;
+		const minX = Math.min(...allNodes.map((node) => node.x)) - padding;
+		const minY = Math.min(...allNodes.map((node) => node.y)) - padding;
+		const maxX = Math.max(...allNodes.map((node) => node.x + node.width)) + padding;
+		const maxY = Math.max(...allNodes.map((node) => node.y + node.height)) + padding;
+		const group = canvas.createGroupNode?.({ pos: { x: minX, y: minY }, size: { width: maxX - minX, height: maxY - minY }, label: '' });
+		if (!group) return;
 		canvas.requestSave();
-		if (this.canvasLeaf) {
-			this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
-		}
+		if (this.canvasLeaf) this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
 		canvas.selectOnly(group);
-		setTimeout(() => group.startEditing(), 50);
+		this.trackSessionTimeout(() => group.startEditing?.(), 50);
 		this.clearSelection();
 	}
-	/**
-	 * Render a group as a collapsible tree-item section.
-	 */
-	renderGroup(group, canvas) {
-		const isCollapsed = this.collapsedGroups.has(group.node.id);
-		const treeItem = this.contentEl.createDiv({
-			cls: 'tree-item' + (isCollapsed ? ' is-collapsed' : '')
-		});
-		treeItem.setAttribute('data-tomindmap-collapse-id', group.node.id);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'group');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-group'
-		});
-		const collapseIcon = self.createDiv({
-			cls: 'tree-item-icon collapse-icon'
-		});
-		(0, import_obsidian4.setIcon)(collapseIcon, 'right-triangle');
-		const labelContainer = self.createDiv({ cls: 'tree-item-inner' });
-		const labelSpan = labelContainer.createSpan({ text: group.label });
-		labelContainer.createSpan({
-			cls: 'tomindmap-outline-group-count',
-			text: `${group.roots.length}`
-		});
-		this.groupElMap.set(group.node.id, self);
-		self.addEventListener('dragover', (e) => {
-			if (!this.draggedRoot) return;
-			e.preventDefault();
-			self.addClass('is-drag-over');
-		});
-		self.addEventListener('dragleave', () => {
-			self.removeClass('is-drag-over');
-		});
-		self.addEventListener('drop', (e) => {
-			e.preventDefault();
-			self.removeClass('is-drag-over');
-			if (!this.draggedRoot || !this.lastCanvas) return;
-			if (this.dragSourceGroupId === group.node.id) return;
-			this.moveTreeToGroup(
-				this.draggedRoot,
-				group.node.id,
-				this.dragSourceGroupId
-			);
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-		});
-		let clickTimer = null;
-		self.addEventListener('click', () => {
-			if (clickTimer !== null) {
-				clearTimeout(clickTimer);
-				clickTimer = null;
-				return;
-			}
-			clickTimer = setTimeout(() => {
-				clickTimer = null;
-				if (this.collapsedGroups.has(group.node.id)) {
-					this.collapsedGroups.delete(group.node.id);
-					treeItem.removeClass('is-collapsed');
-				} else {
-					this.collapsedGroups.add(group.node.id);
-					treeItem.addClass('is-collapsed');
-				}
-			}, 250);
-		});
-		self.addEventListener('dblclick', () => {
-			if (clickTimer !== null) {
-				clearTimeout(clickTimer);
-				clickTimer = null;
-			}
-			this.startGroupRename(labelSpan, group, canvas);
-		});
-		self.addEventListener('contextmenu', (e) => {
-			e.preventDefault();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Rename group')
-					.setIcon('pencil')
-					.onClick(() =>
-						this.startGroupRename(labelSpan, group, canvas)
-					);
-			});
-			menu.addItem((item) => {
-				item.setTitle('Layout forest')
-					.setIcon('layout-grid')
-					.onClick(() => {
-						if (this.lastCanvas && this.onForestLayout) {
-							this.onForestLayout(this.lastCanvas, group.node.id);
-						}
-					});
-			});
-			menu.showAtMouseEvent(e);
-		});
-		const childrenContainer = treeItem.createDiv({
-			cls: 'tree-item-children'
-		});
-		for (const root of group.roots) {
-			this.renderRootItem(
-				childrenContainer,
-				root,
-				canvas,
-				false,
-				group.node.id
-			);
-		}
+	clearOutlineDrag() {
+		this.draggedRoot = null;
+		this.dragSourceGroupId = null;
+		this.dragAllowedRoots.clear();
+		for (const element of this.groupElMap.values()) element.removeClass('is-drag-over');
+		this.contentEl.querySelector('.tomindmap-outline-ungrouped-zone')?.removeClass('is-drag-over');
 	}
-	moveTreeToGroup(root, targetGroupId, sourceGroupId) {
+	handleOutlineDragStart(event) {
+		const select = event.target?.closest?.('[data-outline-action="select-node"]');
+		const id = select?.getAttribute('data-outline-id');
+		const tree = id ? this.model?.nodes.get(id) : null;
+		if (!id || !tree || tree.parent != null || !this.dragAllowedRoots.has(id)) {
+			event.preventDefault();
+			return;
+		}
+		const group = select.closest('[data-outline-kind="group"]');
+		this.draggedRoot = tree;
+		this.dragSourceGroupId = group?.getAttribute('data-outline-id') || null;
+		select.addClass('is-dragging');
+		event.dataTransfer?.setData('text/plain', id);
+	}
+	handleOutlineDragOver(event) {
+		if (!this.draggedRoot) return;
+		const target = event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]');
+		if (!target) return;
+		event.preventDefault();
+		target.addClass('is-drag-over');
+	}
+	handleOutlineDragLeave(event) {
+		event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]')?.removeClass('is-drag-over');
+	}
+	handleOutlineDrop(event) {
+		const target = event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]');
+		if (!target || !this.draggedRoot || !this.lastCanvas) return;
+		event.preventDefault();
+		const groupId = target.getAttribute('data-outline-id') || null;
+		if (groupId === this.dragSourceGroupId) {
+			this.clearOutlineDrag();
+			return;
+		}
+		if (groupId) this.moveTreeToGroup(this.draggedRoot, groupId, this.dragSourceGroupId);
+		else this.ungroupTree(this.draggedRoot, this.dragSourceGroupId);
+		this.clearOutlineDrag();
+	}
+	moveTreeToGroup(root, targetGroupId) {
 		const canvas = this.lastCanvas;
-		if (!canvas) return;
-		const group = canvas.nodes.get(targetGroupId);
-		if (!group) return;
-		const targetX = group.x + group.width / 2 - root.canvasNode.width / 2;
-		const targetY = group.y + group.height / 2 - root.canvasNode.height / 2;
-		const dx = targetX - root.canvasNode.x;
-		const dy = targetY - root.canvasNode.y;
-		root.canvasNode.moveTo({ x: targetX, y: targetY });
-		for (const desc of getDescendants(root)) {
-			desc.canvasNode.moveTo({
-				x: desc.canvasNode.x + dx,
-				y: desc.canvasNode.y + dy
-			});
-		}
-		if (this.onForestLayout) {
-			this.onForestLayout(canvas, targetGroupId);
-			if (sourceGroupId) {
-				this.onForestLayout(canvas, sourceGroupId);
-			}
-		}
+		const group = canvas?.nodes.get(targetGroupId);
+		if (!canvas || !group) return;
+		const descendants = [root, ...outlineTreeDescendants(root)];
+		const dx = group.x + group.width / 2 - root.canvasNode.x - root.canvasNode.width / 2;
+		const dy = group.y + group.height / 2 - root.canvasNode.y - root.canvasNode.height / 2;
+		for (const tree of descendants) tree.canvasNode.moveTo({ x: tree.canvasNode.x + dx, y: tree.canvasNode.y + dy });
+		this.onForestLayout?.(canvas, targetGroupId);
+		this.refresh(canvas);
 	}
 	ungroupTree(root, sourceGroupId) {
 		const canvas = this.lastCanvas;
 		if (!canvas) return;
-		const groupNodeIds = getGroupIds(canvas);
+		const groupIds = getGroupIds(canvas);
 		let maxY = -Infinity;
-		for (const gid of groupNodeIds) {
-			const g = canvas.nodes.get(gid);
-			if (g) maxY = Math.max(maxY, g.y + g.height);
+		for (const id of groupIds) {
+			const group = canvas.nodes.get(id);
+			if (group) maxY = Math.max(maxY, group.y + group.height);
 		}
-		const MARGIN = 80;
-		const dx = 0;
-		const dy = maxY + MARGIN - root.canvasNode.y;
-		root.canvasNode.moveTo({ x: root.canvasNode.x, y: maxY + MARGIN });
-		for (const desc of getDescendants(root)) {
-			desc.canvasNode.moveTo({
-				x: desc.canvasNode.x + dx,
-				y: desc.canvasNode.y + dy
-			});
-		}
-		if (this.onForestLayout) {
-			this.onForestLayout(canvas, sourceGroupId);
-		}
+		const descendants = [root, ...outlineTreeDescendants(root)];
+		const dy = maxY + 80 - root.canvasNode.y;
+		for (const tree of descendants) tree.canvasNode.moveTo({ x: tree.canvasNode.x, y: tree.canvasNode.y + dy });
+		if (sourceGroupId) this.onForestLayout?.(canvas, sourceGroupId);
+		this.refresh(canvas);
 	}
-	startGroupRename(labelSpan, group, canvas) {
-		var _a;
-		const originalText = (_a = labelSpan.textContent) != null ? _a : '';
-		labelSpan.contentEditable = 'true';
-		labelSpan.focus();
-		const range = document.createRange();
-		range.selectNodeContents(labelSpan);
-		const sel = window.getSelection();
-		sel == null ? void 0 : sel.removeAllRanges();
-		sel == null ? void 0 : sel.addRange(range);
+	startGroupRename(label, group, canvas) {
+		const originalText = label.textContent || '';
+		label.contentEditable = 'true';
+		label.setAttribute('role', 'textbox');
+		label.setAttribute('aria-label', `Rename group ${group.label}`);
+		label.focus();
+		const range = canvas.view?.containerEl?.ownerDocument?.createRange?.() || document.createRange();
+		range.selectNodeContents?.(label);
+		const selection = label.ownerDocument?.defaultView?.getSelection?.();
+		selection?.removeAllRanges?.();
+		selection?.addRange?.(range);
 		let done = false;
-		const commit = () => {
-			var _a2;
+		const dispose = () => {
+			label.removeEventListener('keydown', onKeydown);
+			label.removeEventListener('blur', commit);
+			label.removeEventListener('click', stop);
+			this.session.disposers.delete(dispose);
+		};
+		const finish = (commitValue) => {
 			if (done) return;
 			done = true;
-			const newLabel =
-				((_a2 = labelSpan.textContent) != null ? _a2 : '').trim() ||
-				'Untitled Group';
-			labelSpan.contentEditable = 'false';
-			labelSpan.textContent = newLabel;
-			cleanup();
-			if (newLabel === originalText) return;
+			const nextLabel = commitValue ? String(label.textContent || '').trim() || 'Untitled Group' : originalText;
+			label.contentEditable = 'false';
+			label.removeAttribute('role');
+			label.removeAttribute('aria-label');
+			label.textContent = nextLabel;
+			dispose();
+			if (!commitValue || nextLabel === originalText || !canvas) return;
 			const data = canvas.getData();
-			const nodeData = data.nodes.find((n) => n.id === group.node.id);
-			if (nodeData) {
-				nodeData.label = newLabel;
-				canvas.setData(data);
+			const record = Array.isArray(data.nodes) ? data.nodes.find((item) => item.id === group.node.id) : null;
+			if (!record) return;
+			record.label = nextLabel;
+			canvas.setData(data);
+			canvas.requestSave?.();
+			this.refresh(canvas);
+		};
+		const commit = () => finish(true);
+		const cancel = () => finish(false);
+		const stop = (event) => event.stopPropagation();
+		const onKeydown = (event) => {
+			event.stopPropagation();
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				finish(true);
+			} else if (event.key === 'Escape') {
+				event.preventDefault();
+				finish(false);
 			}
 		};
-		const cancel = () => {
-			done = true;
-			labelSpan.contentEditable = 'false';
-			labelSpan.textContent = originalText;
-			cleanup();
+		label.addEventListener('keydown', onKeydown);
+		label.addEventListener('blur', commit);
+		label.addEventListener('click', stop);
+		const tracked = () => {
+			label.removeEventListener('keydown', onKeydown);
+			label.removeEventListener('blur', commit);
+			label.removeEventListener('click', stop);
 		};
-		const onKeydown = (e) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				commit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				cancel();
-			}
-		};
-		const onBlur = () => commit();
-		const onClick = (e) => e.stopPropagation();
-		const cleanup = () => {
-			labelSpan.removeEventListener('keydown', onKeydown);
-			labelSpan.removeEventListener('blur', onBlur);
-			labelSpan.removeEventListener('click', onClick);
-		};
-		labelSpan.addEventListener('keydown', onKeydown);
-		labelSpan.addEventListener('blur', onBlur);
-		labelSpan.addEventListener('click', onClick);
+		this.session.disposers.add(tracked);
 	}
-	/**
-	 * Clear the outline (no canvas active).
-	 */
+	showUnavailable(message, canvas = null) {
+		this.activateCanvasSession(canvas);
+		this.lastCanvas = canvas;
+		this.model = null;
+		this.contentEl.empty();
+		this.contentEl.setAttribute('role', 'status');
+		this.contentEl.setAttribute('aria-live', 'polite');
+		this.contentEl.createDiv({ cls: 'tomindmap-outline-empty', text: String(message || 'Map outline is unavailable') });
+	}
 	clear() {
+		this.disposeCanvasSession();
+		this.session.canvas = null;
+		this.session.generation++;
 		this.canvasLeaf = null;
 		this.lastCanvas = null;
+		this.model = null;
 		this.selectedRoots.clear();
 		this.groupElMap.clear();
 		this.allItemEls.clear();
+		this.allTreeItems.clear();
 		this.collapsedGroups.clear();
 		this.collapsedNodes.clear();
+		this.groupIds = [];
 		this.collapsibleNodeIds = [];
 		this.activeNodeId = null;
-		this.draggedRoot = null;
-		this.dragSourceGroupId = null;
+		this.contentEl.setAttribute('role', 'status');
+		this.contentEl.setAttribute('aria-live', 'polite');
 		this.contentEl.empty();
-		this.contentEl.createDiv({
-			cls: 'tomindmap-outline-empty',
-			text: 'Open a canvas to see root nodes'
-		});
+		this.contentEl.createDiv({ cls: 'tomindmap-outline-empty', text: 'Open a mind-map canvas to see its outline' });
 	}
 };
-const MARKDOWN_IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
-	'avif',
-	'bmp',
-	'gif',
-	'jpeg',
-	'jpg',
-	'png',
-	'svg',
-	'webp'
-]);
-function markdownResourceTarget(target) {
-	return String(target || '')
-		.trim()
-		.replace(/\\/g, '/')
-		.replace(/</g, '%3C')
-		.replace(/>/g, '%3E');
-}
-function markdownResourceLabel(target, alias = '') {
-	let label = String(alias || '').trim();
-	if (!label) {
-		const clean = String(target || '')
-			.split(/[?#]/)[0]
-			.replace(/\\/g, '/');
-		const basename = clean.split('/').filter(Boolean).pop() || clean;
-		try {
-			label = decodeURIComponent(basename);
-		} catch (_) {
-			label = basename;
-		}
-	}
-	return (label || 'Attachment')
-		.replace(/\\/g, '\\\\')
-		.replace(/\[/g, '\\[')
-		.replace(/\]/g, '\\]');
-}
-function isMarkdownImageTarget(target) {
-	const clean = String(target || '').split(/[?#]/)[0];
-	const extension = clean.includes('.')
-		? clean.slice(clean.lastIndexOf('.') + 1).toLowerCase()
-		: '';
-	return MARKDOWN_IMAGE_EXTENSIONS.has(extension);
-}
-function markdownResourceLink(target, alias = '', preferEmbed = false) {
-	const normalizedTarget = markdownResourceTarget(target);
-	if (!normalizedTarget) return 'Untitled';
-	const label = markdownResourceLabel(normalizedTarget, alias);
-	return preferEmbed && isMarkdownImageTarget(normalizedTarget)
-		? `![${label}](<${normalizedTarget}>)`
-		: `[${label}](<${normalizedTarget}>)`;
-}
 function canvasNodeFilePath(node) {
 	const values = [
 		node?.unknownData?.file,
@@ -1629,66 +1271,14 @@ function canvasNodeUrl(node) {
 }
 function canvasNodeMarkdownText(node) {
 	if (!node) return 'Untitled';
-	const filePath = canvasNodeFilePath(node);
-	if (filePath) return markdownResourceLink(filePath, '', true);
-	const url = canvasNodeUrl(node);
-	if (url)
-		return markdownResourceLink(
-			url,
-			MediaDrop.linkLabel(url).replace(/[\[\]]/g, ''),
-			true
-		);
-	return (
-		String(node.text || node.unknownData?.text || '').trim() || 'Untitled'
-	);
+	return MarkdownMindMapCodec.serializeTopicText({
+		...node,
+		text: node.text ?? node.unknownData?.text,
+		file: canvasNodeFilePath(node) || undefined,
+		url: canvasNodeUrl(node) || undefined
+	});
 }
-function canvasNodeContentKind(node) {
-	if (canvasNodeFilePath(node)) return 'file';
-	if (canvasNodeUrl(node)) return 'link';
-	return 'text';
-}
-function canvasNodeContentMatches(left, right) {
-	const leftKind = canvasNodeContentKind(left);
-	const rightKind = canvasNodeContentKind(right);
-	if (leftKind !== rightKind) return false;
-	if (leftKind === 'file')
-		return canvasNodeFilePath(left) === canvasNodeFilePath(right);
-	if (leftKind === 'link')
-		return canvasNodeUrl(left) === canvasNodeUrl(right);
-	const normalize = (text) =>
-		String(text || '')
-			.replace(/\r\n?/g, '\n')
-			.trim();
-	return (
-		normalize(left?.text ?? left?.unknownData?.text) ===
-		normalize(right?.text ?? right?.unknownData?.text)
-	);
-}
-function getRootTitle(text) {
-	const raw = String(text || '').trim();
-	const firstLine = raw.split('\n')[0].trim();
-	const fence = firstLine.match(/^(```|~~~)\s*([A-Za-z0-9_-]*)/);
-	if (fence) return fence[2] ? `Code · ${fence[2]}` : 'Code block';
-	const image = firstLine.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
-	if (image) return image[1] || image[2].split('/').pop() || 'Image';
-	const wikiEmbed = firstLine.match(/^!\[\[([^|\]]+)/);
-	if (wikiEmbed) return wikiEmbed[1].split('/').pop() || 'Embed';
-	if (/^\|.*\|$/.test(firstLine))
-		return (
-			firstLine
-				.replace(/^\||\|$/g, '')
-				.split('|')
-				.map((part) => part.trim())
-				.filter(Boolean)
-				.join(' · ') || 'Table'
-		);
-	return (
-		firstLine
-			.replace(/^#+\s*/, '')
-			.replace(/^[-+*]\s+/, '')
-			.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') || 'Untitled'
-	);
-}
+
 
 const TOMINMAP_TITLE_ONLY = 'tomindmapTitleOnly';
 const TOMINMAP_CARD_KIND = 'tomindmapCardKind';
@@ -1801,1701 +1391,6 @@ function serializedBranchData(canvas, branchNodes, rootNode) {
 	return { nodes, edges };
 }
 
-// src/import/markdown-mindmap.ts
-function portableTopicText(text) {
-	const value = String(text || '')
-		.trim()
-		.replace(/^\s{0,3}#{1,6}\s+/, '');
-	return value || 'Untitled';
-}
-function extractTopicIdentity(text, explicitId) {
-	let id = explicitId || null;
-	const cleaned = String(text || '')
-		.replace(
-			/<!--\s*tomindmap:id=([A-Za-z0-9_-]+)\s*-->/gi,
-			(match, foundId) => {
-				if (!id) id = foundId;
-				return '';
-			}
-		)
-		.replace(/[ \t]+\n/g, '\n')
-		.trim();
-	return { id, text: cleaned || 'Untitled' };
-}
-function frontmatterStringArray(frontmatter, property) {
-	const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const match = String(frontmatter || '').match(
-		new RegExp(`^\\s{2}${escaped}:\\s*(\\[[^\\n]*\\])\\s*$`, 'm')
-	);
-	if (!match) return [];
-	try {
-		const ids = JSON.parse(match[1]);
-		return Array.isArray(ids)
-			? ids.filter((value) => typeof value === 'string')
-			: [];
-	} catch (error) {
-		return [];
-	}
-}
-function topicIdentityKey(text) {
-	const value = getRootTitle(text)
-		.normalize('NFKC')
-		.toLowerCase()
-		.replace(/\s+/g, ' ')
-		.trim();
-	let hash = 2166136261;
-	for (let index = 0; index < value.length; index++) {
-		hash ^= value.charCodeAt(index);
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(36);
-}
-function topicIdentityLabel(text) {
-	return getRootTitle(text).normalize('NFKC').replace(/\s+/g, ' ').trim();
-}
-function topicLabelSimilarity(left, right) {
-	const normalize = (value) =>
-		String(value || '')
-			.normalize('NFKC')
-			.toLowerCase()
-			.replace(/[^\p{L}\p{N}]+/gu, ' ')
-			.trim();
-	const a = normalize(left);
-	const b = normalize(right);
-	if (!a || !b) return 0;
-	if (a === b) return 1;
-	const tokenSet = (value) => new Set(value.split(/\s+/).filter(Boolean));
-	const aTokens = tokenSet(a);
-	const bTokens = tokenSet(b);
-	let commonTokens = 0;
-	for (const token of aTokens) {
-		if (bTokens.has(token)) commonTokens++;
-	}
-	const tokenScore = commonTokens / Math.max(aTokens.size, bTokens.size, 1);
-	const bigrams = (value) => {
-		const result = [];
-		const compact = value.replace(/\s+/g, ' ');
-		for (let index = 0; index < compact.length - 1; index++)
-			result.push(compact.slice(index, index + 2));
-		return result;
-	};
-	const aBigrams = bigrams(a);
-	const bBigrams = bigrams(b);
-	const remaining = new Map();
-	for (const pair of aBigrams)
-		remaining.set(pair, (remaining.get(pair) || 0) + 1);
-	let commonBigrams = 0;
-	for (const pair of bBigrams) {
-		const count = remaining.get(pair) || 0;
-		if (count > 0) {
-			commonBigrams++;
-			remaining.set(pair, count - 1);
-		}
-	}
-	const bigramScore =
-		(2 * commonBigrams) / Math.max(1, aBigrams.length + bBigrams.length);
-	const containmentScore =
-		a.includes(b) || b.includes(a)
-			? Math.min(a.length, b.length) / Math.max(a.length, b.length)
-			: 0;
-	return Math.max(tokenScore, bigramScore, containmentScore);
-}
-function frontmatterWithTopicIds(
-	frontmatter,
-	topicIds,
-	topicKeys,
-	topicLabels
-) {
-	let value = String(frontmatter || '').trim();
-	if (!value.startsWith('---'))
-		value = value ? `---\n${value}\n---` : '---\n---';
-	const lines = value.replace(/\r\n?/g, '\n').split('\n');
-	const cleaned = [];
-	for (let index = 0; index < lines.length; index++) {
-		if (/^tomindmap:\s*$/.test(lines[index])) {
-			while (
-				index + 1 < lines.length &&
-				(/^\s+/.test(lines[index + 1]) || !lines[index + 1].trim())
-			)
-				index++;
-			continue;
-		}
-		cleaned.push(lines[index]);
-	}
-	let closing = cleaned.length - 1;
-	while (closing > 0 && cleaned[closing].trim() !== '---') closing--;
-	const metadata = [
-		'tomindmap:',
-		'  version: 1',
-		`  topicIds: ${JSON.stringify(topicIds)}`,
-		`  topicKeys: ${JSON.stringify(topicKeys)}`,
-		`  topicLabels: ${JSON.stringify(topicLabels)}`
-	];
-	cleaned.splice(closing, 0, ...metadata);
-	return cleaned.join('\n');
-}
-function markdownWithTopicMetadata(markdown, topicIds, topicKeys, topicLabels) {
-	const original = String(markdown || '');
-	const bom = original.startsWith('\uFEFF') ? '\uFEFF' : '';
-	const source = bom ? original.slice(1) : original;
-	const eol = source.includes('\r\n') ? '\r\n' : '\n';
-	const metadata = [
-		'tomindmap:',
-		'  version: 1',
-		`  topicIds: ${JSON.stringify(topicIds)}`,
-		`  topicKeys: ${JSON.stringify(topicKeys)}`,
-		`  topicLabels: ${JSON.stringify(topicLabels)}`
-	].join(eol);
-	const opening = source.match(/^---[ \t]*(\r\n|\n|\r)/);
-	if (!opening)
-		return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
-	const contentStart = opening[0].length;
-	const closingPattern = /^---[ \t]*(?:\r\n|\n|\r|$)/gm;
-	closingPattern.lastIndex = contentStart;
-	const closing = closingPattern.exec(source);
-	if (!closing)
-		return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
-	const frontmatterBody = source.slice(contentStart, closing.index);
-	const linePattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
-	const lineRecords = [];
-	let match;
-	while ((match = linePattern.exec(frontmatterBody))) {
-		if (!match[0]) break;
-		lineRecords.push({
-			start: match.index,
-			end: match.index + match[0].length,
-			text: match[0].replace(/(?:\r\n|\n|\r)$/, '')
-		});
-	}
-	const blockStartIndex = lineRecords.findIndex((line) =>
-		/^tomindmap:[ \t]*$/.test(line.text)
-	);
-	let updatedBody;
-	if (blockStartIndex >= 0) {
-		let blockEndIndex = blockStartIndex + 1;
-		while (
-			blockEndIndex < lineRecords.length &&
-			/^[ \t]+/.test(lineRecords[blockEndIndex].text)
-		)
-			blockEndIndex++;
-		const start = lineRecords[blockStartIndex].start;
-		const end =
-			blockEndIndex < lineRecords.length
-				? lineRecords[blockEndIndex].start
-				: frontmatterBody.length;
-		const replacement =
-			metadata +
-			(end > start &&
-			/(?:\r\n|\n|\r)$/.test(frontmatterBody.slice(start, end))
-				? eol
-				: '');
-		updatedBody =
-			frontmatterBody.slice(0, start) +
-			replacement +
-			frontmatterBody.slice(end);
-	} else {
-		const separator =
-			frontmatterBody.length === 0 ||
-			/(?:\r\n|\n|\r)$/.test(frontmatterBody)
-				? ''
-				: eol;
-		updatedBody = frontmatterBody + separator + metadata + eol;
-	}
-	return (
-		bom +
-		source.slice(0, contentStart) +
-		updatedBody +
-		source.slice(closing.index)
-	);
-}
-function withoutLegacyPluginComments(markdown) {
-	return String(markdown || '')
-		.replace(/[ \t]*<!--\s*tomindmap:id=[A-Za-z0-9_-]+\s*-->/gi, '')
-		.replace(
-			/^[ \t]*<!--\s*\/?tomindmap:(?:node|content)(?:\s+id=[A-Za-z0-9_-]+)?\s*-->[ \t]*(?:\r\n|\n|\r|$)/gim,
-			''
-		);
-}
-function markdownFrontmatterForCanvas(canvas, options = {}) {
-	const data = canvas.getData();
-	const stored =
-		typeof data.mindmapMarkdownFrontmatter === 'string'
-			? data.mindmapMarkdownFrontmatter.trim()
-			: '';
-	if (stored)
-		return stored.startsWith('---') ? stored : `---\n${stored}\n---`;
-	if (options.exportMarkmapFrontmatter === false) return '';
-	const title =
-		canvas.view && canvas.view.file
-			? canvas.view.file.basename
-			: 'Mind map';
-	const configuredLevel = Number(options.markmapColorFreezeLevel);
-	const freezeLevel = Math.max(
-		0,
-		Math.min(10, Number.isFinite(configuredLevel) ? configuredLevel : 2)
-	);
-	return `---\ntitle: ${JSON.stringify(title)}\nmarkmap:\n  colorFreezeLevel: ${freezeLevel}\n---`;
-}
-function isStandaloneMarkdownBlock(text) {
-	const trimmed = String(text || '').trim();
-	const lines = trimmed.split('\n');
-	return (
-		/^(```|~~~|\$\$)/.test(trimmed) ||
-		/^>\s?/.test(trimmed) ||
-		/^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) ||
-		/^!\[\[[^\]]+\]\]\s*$/.test(trimmed) ||
-		/^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(
-			trimmed
-		) ||
-		(lines.length >= 2 &&
-			/^\s*\|.*\|\s*$/.test(lines[0]) &&
-			/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]))
-	);
-}
-function isStructuralListBlock(text) {
-	const trimmed = String(text || '').trim();
-	if (isMediaResourceMarkdown(trimmed)) return false;
-	return isStandaloneMarkdownBlock(trimmed);
-}
-function isMediaResourceMarkdown(text) {
-	const trimmed = String(text || '').trim();
-	return (
-		/^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) ||
-		/^!\[\[[^\]]+\]\]\s*$/.test(trimmed)
-	);
-}
-function markmapHeadingSafe(text) {
-	const firstLine = String(text || '')
-		.trim()
-		.split('\n')[0];
-	return (
-		firstLine.length > 0 &&
-		!isStandaloneMarkdownBlock(text) &&
-		!/^(?:[-+*]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/.test(firstLine)
-	);
-}
-function markdownWithPortableCardLinks(text, idToSlug) {
-	return String(text || '')
-		.replace(
-			/obsidian:\/\/tomindmap-navigate\?canvas=[^)\s]+&id=([A-Za-z0-9_-]+)/g,
-			(match, id) => (idToSlug.has(id) ? `#${idToSlug.get(id)}` : match)
-		)
-		.replace(/!\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g, (match, target, alias) =>
-			markdownResourceLink(target, alias, true)
-		)
-		.replace(
-			/(^|[^!])\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g,
-			(match, prefix, target, alias) =>
-				`${prefix}${markdownResourceLink(target, alias, false)}`
-		);
-}
-function headingSlug(text) {
-	return (
-		getRootTitle(text)
-			.toLowerCase()
-			.normalize('NFKD')
-			.replace(/[\u0300-\u036f]/g, '')
-			.replace(/<[^>]*>/g, '')
-			.replace(/[^\p{L}\p{N}\s-]/gu, '')
-			.trim()
-			.replace(/\s+/g, '-') || 'topic'
-	);
-}
-function canvasToMindMapMarkdown(canvas, options = {}) {
-	const forest = (
-		Array.isArray(options.rootTrees)
-			? options.rootTrees
-			: buildForest(canvas)
-	)
-		.slice()
-		.sort(
-			(a, b) =>
-				a.canvasNode.y - b.canvasNode.y ||
-				a.canvasNode.x - b.canvasNode.x
-		);
-	if (forest.length === 0) return '';
-	const sortBranchChronology = (tree, isRoot = false) => {
-		tree.children = MarkdownOrder.orderChildren(
-			tree.canvasNode,
-			tree.children,
-			isRoot
-		);
-		for (const child of tree.children) sortBranchChronology(child, false);
-	};
-	for (const root of forest) sortBranchChronology(root, true);
-	const allTrees = [];
-	for (const root of forest) allTrees.push(root, ...getDescendants(root));
-	const textById = new Map(
-		allTrees.map((tree) => [
-			tree.canvasNode.id,
-			canvasNodeMarkdownText(tree.canvasNode)
-		])
-	);
-	const slugCounts = /* @__PURE__ */ new Map();
-	const idToSlug = /* @__PURE__ */ new Map();
-	for (const tree of allTrees) {
-		const base = headingSlug(textById.get(tree.canvasNode.id));
-		const count = (slugCounts.get(base) || 0) + 1;
-		slugCounts.set(base, count);
-		idToSlug.set(
-			tree.canvasNode.id,
-			count === 1 ? base : `${base}-${count}`
-		);
-	}
-	const topicIds = [];
-	const topicKeys = [];
-	const topicLabels = [];
-	const collectTopicIds = (tree) => {
-		topicIds.push(tree.canvasNode.id);
-		const text = textById.get(tree.canvasNode.id);
-		topicKeys.push(topicIdentityKey(text));
-		topicLabels.push(topicIdentityLabel(text));
-		for (const child of tree.children) collectTopicIds(child);
-	};
-	for (const root of forest) collectTopicIds(root);
-	const frontmatter =
-		options.includeFrontmatter === false
-			? ''
-			: frontmatterWithTopicIds(
-					markdownFrontmatterForCanvas(canvas, options),
-					topicIds,
-					topicKeys,
-					topicLabels
-				);
-	const lines = frontmatter ? [frontmatter, ''] : [];
-	const rawText = (tree) =>
-		markdownWithPortableCardLinks(
-			portableTopicText(textById.get(tree.canvasNode.id)),
-			idToSlug
-		);
-	const emitIndentedBlock = (text, indent) => {
-		const prefix = '  '.repeat(indent);
-		for (const line of String(text).split('\n'))
-			lines.push(`${prefix}${line}`);
-	};
-	const emitListNode = (tree, indent) => {
-		const raw = rawText(tree);
-		if (isStructuralListBlock(raw)) {
-			if (lines.length > 0 && lines[lines.length - 1] !== '')
-				lines.push('');
-			emitIndentedBlock(raw, indent);
-			if (lines[lines.length - 1] !== '') lines.push('');
-			for (const child of tree.children) emitListNode(child, indent + 1);
-			return;
-		}
-		const parts = raw.split('\n');
-		const first = parts.shift() || 'Untitled';
-		const prefix = '  '.repeat(indent);
-		const keepsOwnMarker = /^(?:[-+*]\s+\[[ xX]\]|\d+[.)]\s+)/.test(first);
-		lines.push(`${prefix}${keepsOwnMarker ? first : `- ${first}`}`);
-		if (parts.length > 0) {
-			for (const line of parts) lines.push(`${prefix}  ${line}`);
-		}
-		for (const child of tree.children) emitListNode(child, indent + 1);
-	};
-	const emitHeadingNode = (tree, level) => {
-		const raw = rawText(tree);
-		const parts = raw.split('\n');
-		const title = parts.shift() || 'Untitled';
-		lines.push('', `${'#'.repeat(level)} ${title}`);
-		if (parts.length > 0) lines.push(...parts);
-		emitHeadingChildren(tree.children, level + 1);
-	};
-	const emitHeadingChildren = (children, level) => {
-		if (children.length === 0) return;
-		const useHeadingLevel =
-			level <= 6 &&
-			children.every((child) => {
-				const raw = rawText(child);
-				return (
-					(isStructuralListBlock(raw) &&
-						child.children.length === 0) ||
-					markmapHeadingSafe(raw)
-				);
-			});
-		if (!useHeadingLevel) {
-			for (const child of children) emitListNode(child, 0);
-			return;
-		}
-		for (const child of children) {
-			const raw = rawText(child);
-			if (isStructuralListBlock(raw)) {
-				lines.push('');
-				emitIndentedBlock(raw, 0);
-				emitHeadingChildren(child.children, level + 1);
-			} else {
-				emitHeadingNode(child, level);
-			}
-		}
-	};
-	for (let i = 0; i < forest.length; i++) {
-		const root = forest[i];
-		if (i > 0) lines.push('');
-		const rootRaw = rawText(root);
-		const rootParts = rootRaw.split('\n');
-		lines.push(`# ${rootParts.shift() || 'Untitled'}`);
-		if (rootParts.length > 0) lines.push(...rootParts);
-		emitHeadingChildren(root.children, 2);
-	}
-	return lines.join('\n').trim() + '\n';
-}
-function selectedMindMapTrees(canvas) {
-	const forest = buildForest(canvas);
-	const groupIds = getGroupIds(canvas);
-	const selectedIds = new Set(
-		Array.from(canvas.selection || [])
-			.filter(
-				(item) => item && 'nodeEl' in item && !groupIds.has(item.id)
-			)
-			.map((item) => item.id)
-	);
-	if (selectedIds.size === 0) return [];
-	const treesById = new Map();
-	const stack = forest.slice();
-	while (stack.length > 0) {
-		const tree = stack.pop();
-		treesById.set(tree.canvasNode.id, tree);
-		stack.push(...tree.children);
-	}
-	return Array.from(selectedIds, (id) => treesById.get(id)).filter((tree) => {
-		if (!tree) return false;
-		for (let parent = tree.parent; parent; parent = parent.parent) {
-			if (selectedIds.has(parent.canvasNode.id)) return false;
-		}
-		return true;
-	});
-}
-function portableMindMapMarkdown(canvas, rootTrees = null) {
-	return canvasToMindMapMarkdown(canvas, {
-		includeFrontmatter: false,
-		...(rootTrees ? { rootTrees } : {})
-	});
-}
-function cleanImportedTopic(text) {
-	let value = String(text || '').trim();
-	const shaped =
-		value.match(/^[A-Za-z0-9_-]*\(\((.*)\)\)$/) ||
-		value.match(/^[A-Za-z0-9_-]*\{\{(.*)\}\}$/) ||
-		value.match(/^[A-Za-z0-9_-]*\[(.*)\]$/) ||
-		value.match(/^[A-Za-z0-9_-]*\((.*)\)$/);
-	if (shaped) value = shaped[1];
-	if (/^\[[ xX]\]\s+/.test(value)) value = `- ${value}`;
-	return value.replace(/<br\s*\/?>/gi, '\n').trim() || 'Untitled';
-}
-function parseMarkdownMindMapDocument(markdown) {
-	const roots = [];
-	const usedIds = /* @__PURE__ */ new Set();
-	const headingStack = [];
-	const listStack = [];
-	let listAnchor = null;
-	let lastNode = null;
-	let inFrontmatter = false;
-	let inFence = false;
-	let mindmapFence = false;
-	let mermaidMode = false;
-	let sawH1 = false;
-	const frontmatterLines = [];
-	const addNode = (text, parent, explicitId, source = null) => {
-		const identity = extractTopicIdentity(text, explicitId);
-		let id = identity.id || genId();
-		while (usedIds.has(id)) id = genId();
-		usedIds.add(id);
-		const cleanText = cleanImportedTopic(identity.text);
-		let type = 'text';
-		let file = null;
-		let url = null;
-		const wikiMatch = /^!\[\[([^|\]#]+)(?:[|#][^\]]*)?\]\]\s*$/.exec(
-			cleanText
-		);
-		const imageMatch =
-			/^!\[([^\]]*)\]\(\s*<([^>]+)>\s*\)\s*$/.exec(cleanText) ||
-			/^!\[([^\]]*)\]\(\s*([^\s)]+)\s*\)\s*$/.exec(cleanText);
-		const linkMatch =
-			/^\[([^\]]+)\]\(\s*<([^>]+)>\s*\)\s*$/.exec(cleanText) ||
-			/^\[([^\]]+)\]\(\s*([^\s)]+)\s*\)\s*$/.exec(cleanText);
-		const resourceMatch = imageMatch || linkMatch;
-		const resourceTarget = resourceMatch?.[2] || '';
-		if (wikiMatch) {
-			type = 'file';
-			file = wikiMatch[1];
-		} else if (
-			resourceMatch &&
-			['http:', 'https:', 'obsidian:', 'file:', 'app:'].some((proto) =>
-				resourceTarget.startsWith(proto)
-			)
-		) {
-			type = 'link';
-			url = resourceTarget;
-		} else if (
-			resourceMatch &&
-			MediaDrop.extractFilePathFromUrl(cleanText)
-		) {
-			type = 'file';
-			file = resourceTarget;
-		}
-		const node = {
-			id,
-			legacyId: identity.id ? id : null,
-			type,
-			file,
-			url,
-			text: cleanText,
-			position: 'right',
-			children: [],
-			source
-		};
-		if (parent) parent.children.push(node);
-		else roots.push(node);
-		lastNode = node;
-		return node;
-	};
-	const addIndented = (text, indent, anchor, source = null) => {
-		while (
-			listStack.length > 0 &&
-			listStack[listStack.length - 1].indent >= indent
-		)
-			listStack.pop();
-		const parent =
-			listStack.length > 0
-				? listStack[listStack.length - 1].node
-				: anchor;
-		const node = addNode(text, parent, null, source);
-		listStack.push({ indent, node });
-		return node;
-	};
-	const lines = String(markdown || '')
-		.replace(/\r\n?/g, '\n')
-		.split('\n');
-	const currentParent = () =>
-		listStack.length > 0
-			? listStack[listStack.length - 1].node
-			: listAnchor;
-	const stripCommonIndent = (blockLines) => {
-		const nonEmpty = blockLines.filter((line) => line.trim());
-		const common =
-			nonEmpty.length > 0
-				? Math.min(
-						...nonEmpty.map(
-							(line) =>
-								(line.match(/^[ \t]*/) || [''])[0].replace(
-									/\t/g,
-									'    '
-								).length
-						)
-					)
-				: 0;
-		return blockLines
-			.map((line) => line.slice(Math.min(common, line.length)))
-			.join('\n')
-			.trim();
-	};
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		if (index === 0 && line.trim() === '---') {
-			inFrontmatter = true;
-			frontmatterLines.push('---');
-			continue;
-		}
-		if (inFrontmatter) {
-			frontmatterLines.push(line);
-			if (line.trim() === '---') {
-				inFrontmatter = false;
-			}
-			continue;
-		}
-		if (/^\s*<!--\s*tomindmap:content\s*-->\s*$/.test(line)) {
-			const content = [];
-			while (
-				++index < lines.length &&
-				!/^\s*<!--\s*\/tomindmap:content\s*-->\s*$/.test(lines[index])
-			)
-				content.push(lines[index]);
-			if (lastNode && content.length > 0)
-				lastNode.text =
-					`${lastNode.text}\n${stripCommonIndent(content)}`.trim();
-			continue;
-		}
-		const portableNodeMarker = line.match(
-			/^\s*<!--\s*tomindmap:node(?:\s+id=([A-Za-z0-9_-]+))?\s*-->\s*$/
-		);
-		if (portableNodeMarker) {
-			const startLine = index;
-			const content = [];
-			while (
-				++index < lines.length &&
-				!/^\s*<!--\s*\/tomindmap:node\s*-->\s*$/.test(lines[index])
-			)
-				content.push(lines[index]);
-			const block = stripCommonIndent(content);
-			if (block)
-				addNode(block, currentParent(), portableNodeMarker[1], {
-					startLine,
-					endLine: index + 1,
-					kind: 'block',
-					indent: ''
-				});
-			continue;
-		}
-		const fenceMatch = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_-]*)/);
-		if (fenceMatch) {
-			if (!inFence) {
-				const language = fenceMatch[2].toLowerCase();
-				if (language === 'mermaid') {
-					inFence = true;
-					mindmapFence = true;
-				} else {
-					const startLine = index;
-					const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-					const removeWrapperIndent = (value) =>
-						value.startsWith(wrapperIndent)
-							? value.slice(wrapperIndent.length)
-							: value;
-					const block = [removeWrapperIndent(line)];
-					const closingFence =
-						fenceMatch[1][0] === '`'
-							? /^\s*`{3,}\s*$/
-							: /^\s*~{3,}\s*$/;
-					while (++index < lines.length) {
-						block.push(removeWrapperIndent(lines[index]));
-						if (closingFence.test(lines[index])) break;
-					}
-					addNode(block.join('\n'), currentParent(), null, {
-						startLine,
-						endLine: index + 1,
-						kind: 'block',
-						indent: wrapperIndent
-					});
-				}
-			} else {
-				inFence = false;
-				mindmapFence = false;
-				mermaidMode = false;
-				listStack.length = 0;
-			}
-			continue;
-		}
-		if (inFence && !mindmapFence) continue;
-		if (!line.trim()) continue;
-		if (line.trim().toLowerCase() === 'mindmap') {
-			mermaidMode = true;
-			listStack.length = 0;
-			listAnchor = null;
-			continue;
-		}
-		if (/^\s*\$\$\s*$/.test(line)) {
-			const startLine = index;
-			const block = [line.trim()];
-			while (++index < lines.length) {
-				block.push(lines[index]);
-				if (/^\s*\$\$\s*$/.test(lines[index])) break;
-			}
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: (line.match(/^[ \t]*/) || [''])[0]
-			});
-			continue;
-		}
-		if (
-			/^\s*\|.*\|\s*$/.test(line) &&
-			index + 1 < lines.length &&
-			/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[index + 1])
-		) {
-			const startLine = index;
-			const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-			const block = [line.trimStart()];
-			while (
-				index + 1 < lines.length &&
-				/^\s*\|.*\|\s*$/.test(lines[index + 1])
-			)
-				block.push(lines[++index].trimStart());
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: wrapperIndent
-			});
-			continue;
-		}
-		if (/^\s*>\s?/.test(line)) {
-			const startLine = index;
-			const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-			const block = [line.trimStart()];
-			while (index + 1 < lines.length) {
-				if (/^\s*>\s?/.test(lines[index + 1])) {
-					block.push(lines[++index].trimStart());
-					continue;
-				}
-				if (
-					!lines[index + 1].trim() &&
-					index + 2 < lines.length &&
-					/^\s*>\s?/.test(lines[index + 2])
-				) {
-					block.push(lines[++index]);
-					continue;
-				}
-				break;
-			}
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: wrapperIndent
-			});
-			continue;
-		}
-		const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
-		if (heading && !mermaidMode) {
-			const level = heading[1].length;
-			if (level === 1) sawH1 = true;
-			while (
-				headingStack.length > 0 &&
-				headingStack[headingStack.length - 1].level >= level
-			)
-				headingStack.pop();
-			const parent =
-				headingStack.length > 0
-					? headingStack[headingStack.length - 1].node
-					: null;
-			const node = addNode(heading[2], parent, null, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'heading',
-				level,
-				prefix: `${heading[1]} `
-			});
-			headingStack.push({ level, node });
-			listAnchor = node;
-			listStack.length = 0;
-			continue;
-		}
-		const list = line.match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
-		if (list && !mermaidMode) {
-			const indent = list[1].replace(/\t/g, '    ').length;
-			const marker = list[2];
-			const content = list[3];
-			const preserved = /^\d/.test(marker)
-				? `${marker} ${content}`
-				: /^\[[ xX]\]\s+/.test(content)
-					? `- ${content}`
-					: content;
-			addIndented(preserved, indent, listAnchor, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'list',
-				indent: list[1],
-				marker,
-				prefix: `${list[1]}${marker} `
-			});
-			continue;
-		}
-		const leading = line.match(/^([ \t]*)(.*)$/);
-		const indent = leading[1].replace(/\t/g, '    ').length;
-		const content = leading[2].trim();
-		if (!content) continue;
-		if (mermaidMode || indent > 0) {
-			addIndented(content, indent, listAnchor, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'plain',
-				indent: leading[1],
-				prefix: leading[1]
-			});
-			if (!listAnchor && listStack.length === 1) listAnchor = null;
-			continue;
-		}
-		listStack.length = 0;
-		const parent = listAnchor;
-		const node = addNode(content, parent, null, {
-			startLine: index,
-			endLine: index + 1,
-			kind: 'plain',
-			indent: leading[1],
-			prefix: leading[1]
-		});
-		if (!parent) listAnchor = node;
-	}
-	const frontmatter = frontmatterLines.join('\n').trim();
-	const titleMatch = frontmatter.match(/^title:\s*(.+?)\s*$/m);
-	const frontmatterTitle = titleMatch
-		? titleMatch[1].trim().replace(/^["']|["']$/g, '')
-		: '';
-	if (frontmatterTitle && !sawH1 && roots.length > 0) {
-		let id = genId();
-		while (usedIds.has(id)) id = genId();
-		usedIds.add(id);
-		const syntheticRoot = {
-			id,
-			legacyId: null,
-			text: frontmatterTitle,
-			position: 'right',
-			children: roots.splice(0)
-		};
-		roots.push(syntheticRoot);
-	}
-	const metadataIds = frontmatterStringArray(frontmatter, 'topicIds').filter(
-		(id) => /^[A-Za-z0-9_-]+$/.test(id)
-	);
-	const metadataKeys = frontmatterStringArray(frontmatter, 'topicKeys');
-	const metadataLabels = frontmatterStringArray(frontmatter, 'topicLabels');
-	const orderedNodes = [];
-	const collectOrderedNodes = (node) => {
-		orderedNodes.push(node);
-		for (const child of node.children) collectOrderedNodes(child);
-	};
-	for (const root of roots) collectOrderedNodes(root);
-	const assignedIds = /* @__PURE__ */ new Set();
-	const metadataIndexByNode = /* @__PURE__ */ new Map();
-	const metadataIndexesByKey = /* @__PURE__ */ new Map();
-	for (
-		let index = 0;
-		index < Math.min(metadataIds.length, metadataKeys.length);
-		index++
-	) {
-		let indexes = metadataIndexesByKey.get(metadataKeys[index]);
-		if (!indexes) {
-			indexes = [];
-			metadataIndexesByKey.set(metadataKeys[index], indexes);
-		}
-		indexes.push(index);
-	}
-	const claimedMetadataIndexes = /* @__PURE__ */ new Set();
-	for (const node of orderedNodes) {
-		const indexes = metadataIndexesByKey.get(topicIdentityKey(node.text));
-		if (!indexes) continue;
-		const match = indexes.find(
-			(index) => !claimedMetadataIndexes.has(index)
-		);
-		if (match === void 0) continue;
-		metadataIndexByNode.set(node, match);
-		claimedMetadataIndexes.add(match);
-	}
-	const unmatchedNodes = orderedNodes.filter(
-		(node) => !metadataIndexByNode.has(node)
-	);
-	const similarityPairs = [];
-	for (const node of unmatchedNodes) {
-		for (
-			let index = 0;
-			index < Math.min(metadataIds.length, metadataLabels.length);
-			index++
-		) {
-			if (claimedMetadataIndexes.has(index)) continue;
-			const score = topicLabelSimilarity(
-				metadataLabels[index],
-				topicIdentityLabel(node.text)
-			);
-			if (score >= 0.34) similarityPairs.push({ node, index, score });
-		}
-	}
-	similarityPairs.sort(
-		(a, b) =>
-			b.score - a.score ||
-			Math.abs(orderedNodes.indexOf(a.node) - a.index) -
-				Math.abs(orderedNodes.indexOf(b.node) - b.index)
-	);
-	const similarityMatchedNodes = /* @__PURE__ */ new Set();
-	for (const pair of similarityPairs) {
-		if (
-			similarityMatchedNodes.has(pair.node) ||
-			claimedMetadataIndexes.has(pair.index)
-		)
-			continue;
-		metadataIndexByNode.set(pair.node, pair.index);
-		similarityMatchedNodes.add(pair.node);
-		claimedMetadataIndexes.add(pair.index);
-	}
-	const unmatchedMetadataIndexes = metadataIds
-		.map((_, index) => index)
-		.filter((index) => !claimedMetadataIndexes.has(index));
-	let stableIdCount = 0;
-	for (let index = 0; index < orderedNodes.length; index++) {
-		const node = orderedNodes[index];
-		let metadataIndex = metadataIndexByNode.get(node);
-		if (metadataIndex === void 0 && unmatchedMetadataIndexes.length > 0)
-			metadataIndex = unmatchedMetadataIndexes.shift();
-		let candidate =
-			node.legacyId ||
-			(metadataIndex !== void 0 ? metadataIds[metadataIndex] : null) ||
-			node.id;
-		if (
-			(node.legacyId || metadataIndex !== void 0) &&
-			!assignedIds.has(candidate)
-		)
-			stableIdCount++;
-		while (!candidate || assignedIds.has(candidate)) candidate = genId();
-		node.id = candidate;
-		delete node.legacyId;
-		assignedIds.add(candidate);
-	}
-	const metadataCurrent =
-		metadataIds.length === orderedNodes.length &&
-		metadataKeys.length === orderedNodes.length &&
-		metadataLabels.length === orderedNodes.length &&
-		orderedNodes.every(
-			(node, index) =>
-				metadataIds[index] === node.id &&
-				metadataKeys[index] === topicIdentityKey(node.text) &&
-				metadataLabels[index] === topicIdentityLabel(node.text)
-		);
-	const topicIds = orderedNodes.map((node) => node.id);
-	const topicKeys = orderedNodes.map((node) => topicIdentityKey(node.text));
-	const topicLabels = orderedNodes.map((node) =>
-		topicIdentityLabel(node.text)
-	);
-	const topicSources = orderedNodes.map((node) => ({
-		id: node.id,
-		parentId:
-			orderedNodes.find((candidate) => candidate.children.includes(node))
-				?.id || null,
-		...node.source
-	}));
-	const setPosition = (node, position) => {
-		node.position = position;
-		for (const child of node.children) setPosition(child, position);
-	};
-	for (const root of roots) {
-		const weight = (node) =>
-			1 + node.children.reduce((sum, child) => sum + weight(child), 0);
-		const weights = root.children.map(weight);
-		const total = weights.reduce((sum, value) => sum + value, 0);
-		let prefix = 0;
-		let split = root.children.length > 0 ? 1 : 0;
-		let bestDifference = Infinity;
-		for (let index = 0; index <= root.children.length; index++) {
-			const difference = Math.abs(prefix - (total - prefix));
-			if (
-				difference < bestDifference ||
-				(difference === bestDifference && index > split)
-			) {
-				bestDifference = difference;
-				split = index;
-			}
-			prefix += weights[index] || 0;
-		}
-		root.children.forEach((child, index) =>
-			setPosition(child, index < split ? 'right' : 'left')
-		);
-	}
-	return {
-		roots,
-		frontmatter,
-		stableIdCount,
-		metadataCurrent,
-		topicIds,
-		topicKeys,
-		topicLabels,
-		topicSources
-	};
-}
-function parseMarkdownMindMap(markdown) {
-	return parseMarkdownMindMapDocument(markdown).roots;
-}
-function markdownMindMapToCanvas(markdown, opts) {
-	const parsed = parseMarkdownMindMapDocument(markdown);
-	const roots = parsed.roots;
-	if (roots.length === 0) return null;
-	const nodes = [];
-	const edges = [];
-	let currentY = 0;
-	const treeGap = Math.max(120, opts.verticalGap * 6);
-	for (const root of roots) {
-		const height = layoutTree(root, 0, currentY, opts, nodes, edges);
-		currentY += height + treeGap;
-	}
-	return {
-		nodes,
-		edges,
-		frontmatter: parsed.frontmatter,
-		stableIdCount: parsed.stableIdCount,
-		metadataCurrent: parsed.metadataCurrent,
-		topicIds: parsed.topicIds,
-		topicKeys: parsed.topicKeys,
-		topicLabels: parsed.topicLabels,
-		topicSources: parsed.topicSources,
-		rootIds: roots
-			.map((_, index) => {
-				let seen = -1;
-				for (const node of nodes) {
-					if (!edges.some((edge) => edge.toNode === node.id)) {
-						seen++;
-						if (seen === index) return node.id;
-					}
-				}
-				return null;
-			})
-			.filter(Boolean)
-	};
-}
-function canvasDataAdapter(data, file) {
-	const nodeMap = /* @__PURE__ */ new Map();
-	for (const item of data.nodes || []) {
-		let text = 'Untitled';
-		if (item.type === 'group') {
-			text = item.label || 'Group';
-		} else {
-			text = canvasNodeMarkdownText(item);
-		}
-		nodeMap.set(item.id, {
-			...item,
-			text
-		});
-	}
-	const edgeMap = /* @__PURE__ */ new Map();
-	for (const item of data.edges || []) {
-		const fromNode = nodeMap.get(item.fromNode);
-		const toNode = nodeMap.get(item.toNode);
-		if (!fromNode || !toNode) continue;
-		edgeMap.set(item.id, {
-			...item,
-			from: { node: fromNode, side: item.fromSide },
-			to: { node: toNode, side: item.toSide }
-		});
-	}
-	return {
-		nodes: nodeMap,
-		edges: edgeMap,
-		getData: () => data,
-		view: { file }
-	};
-}
-function canvasDataToMindMapMarkdown(data, file, options = {}) {
-	return canvasToMindMapMarkdown(canvasDataAdapter(data, file), options);
-}
-function reconcileCanvasData(existingData, imported) {
-	const current =
-		existingData && typeof existingData === 'object' ? existingData : {};
-	const existingNodes = new Map(
-		(current.nodes || []).map((node) => [node.id, node])
-	);
-	const pendingResizeIds = new Set(
-		Array.isArray(current.mindmapPendingResize)
-			? current.mindmapPendingResize
-			: []
-	);
-	const normalizeText = (text) =>
-		String(text || '')
-			.replace(/\r\n?/g, '\n')
-			.trim();
-	const nodes = [];
-	for (const incoming of imported.nodes) {
-		const existing = existingNodes.get(incoming.id);
-		if (existing) {
-			const isMediaNode =
-				existing.type === 'file' ||
-				existing.type === 'link' ||
-				existing.file ||
-				existing.url ||
-				incoming.type === 'file' ||
-				incoming.type === 'link';
-			const contentChanged = isMediaNode
-				? !canvasNodeContentMatches(existing, incoming)
-				: normalizeText(existing.text) !== normalizeText(incoming.text);
-			if (isMediaNode) {
-				pendingResizeIds.delete(incoming.id);
-			} else if (contentChanged) {
-				pendingResizeIds.add(incoming.id);
-			} else {
-				pendingResizeIds.delete(incoming.id);
-			}
-			nodes.push({
-				...existing,
-				...incoming,
-				width: isMediaNode
-					? existing.width
-					: contentChanged
-						? incoming.width
-						: existing.width,
-				height: isMediaNode
-					? existing.height
-					: contentChanged
-						? incoming.height
-						: existing.height
-			});
-		} else {
-			if (incoming.type !== 'file' && incoming.type !== 'link')
-				pendingResizeIds.add(incoming.id);
-			nodes.push({ ...incoming });
-		}
-	}
-	const groupIds = /* @__PURE__ */ new Set();
-	for (const node of current.nodes || []) {
-		if (node.type === 'group') {
-			groupIds.add(node.id);
-			nodes.push(node);
-		}
-	}
-	const existingEdges = new Map(
-		(current.edges || []).map((edge) => [
-			`${edge.fromNode}\0${edge.toNode}`,
-			edge
-		])
-	);
-	const edges = imported.edges.map((incoming) => {
-		const existing = existingEdges.get(
-			`${incoming.fromNode}\0${incoming.toNode}`
-		);
-		return existing
-			? {
-					...incoming,
-					...existing,
-					fromNode: incoming.fromNode,
-					toNode: incoming.toNode
-				}
-			: incoming;
-	});
-	const retainedIds = new Set(nodes.map((node) => node.id));
-	for (const edge of current.edges || []) {
-		if (!groupIds.has(edge.fromNode) && !groupIds.has(edge.toNode))
-			continue;
-		if (retainedIds.has(edge.fromNode) && retainedIds.has(edge.toNode))
-			edges.push(edge);
-	}
-	const reconciled = {
-		...current,
-		nodes,
-		edges,
-		mindmap: true,
-		mindmapMarkdownFrontmatter:
-			imported.frontmatter || current.mindmapMarkdownFrontmatter || ''
-	};
-	delete reconciled.mindmapAutoAdjust;
-	const retainedTopicIds = new Set(imported.nodes.map((node) => node.id));
-	const pending = Array.from(pendingResizeIds).filter((id) =>
-		retainedTopicIds.has(id)
-	);
-	if (pending.length > 0) reconciled.mindmapPendingResize = pending;
-	else delete reconciled.mindmapPendingResize;
-	return reconciled;
-}
-function convertMarkdownAnchorsToCardLinks(nodes, canvasPath) {
-	const slugToId = /* @__PURE__ */ new Map();
-	for (const node of nodes) {
-		const slug = headingSlug(node.text);
-		if (!slugToId.has(slug)) slugToId.set(slug, node.id);
-	}
-	for (const node of nodes) {
-		node.text = String(node.text || '').replace(
-			/\]\(#([^)]+)\)/g,
-			(match, rawAnchor) => {
-				let anchor = rawAnchor;
-				try {
-					anchor = decodeURIComponent(rawAnchor);
-				} catch (error) {}
-				const targetId = slugToId.get(anchor.toLowerCase());
-				if (!targetId) return match;
-				return `](obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${targetId})`;
-			}
-		);
-	}
-}
-function canvasMatchesImportedMarkdown(canvas, imported, canvasPath) {
-	if (!imported) return false;
-	const groupIds = getGroupIds(canvas);
-	const liveNodes = Array.from(canvas.nodes.values()).filter(
-		(node) => !groupIds.has(node.id)
-	);
-	const incomingNodes = imported.nodes.map((node) => ({ ...node }));
-	convertMarkdownAnchorsToCardLinks(incomingNodes, canvasPath);
-	if (liveNodes.length !== incomingNodes.length) return false;
-	const liveById = new Map(liveNodes.map((node) => [node.id, node]));
-	for (const incoming of incomingNodes) {
-		const live = liveById.get(incoming.id);
-		if (!live || !canvasNodeContentMatches(live, incoming)) return false;
-	}
-	const topicIds = new Set(incomingNodes.map((node) => node.id));
-	const edgeKey = (edge) => `${edge.fromNode}\0${edge.toNode}`;
-	const incomingEdges = new Set(
-		imported.edges
-			.filter(
-				(edge) =>
-					topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)
-			)
-			.map(edgeKey)
-	);
-	const liveEdges = new Set(
-		(canvas.getData().edges || [])
-			.filter(
-				(edge) =>
-					topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)
-			)
-			.map(edgeKey)
-	);
-	if (incomingEdges.size !== liveEdges.size) return false;
-	for (const key of incomingEdges) {
-		if (!liveEdges.has(key)) return false;
-	}
-	return true;
-}
-function canvasOrderMatchesImportedMarkdown(canvas, imported) {
-	return MarkdownOrder.orderMatches(canvas, imported, getGroupIds);
-}
-function canvasTopicPreorder(canvas) {
-	return MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
-}
-function markdownLineRecords(markdown) {
-	const source = String(markdown || '');
-	const records = [];
-	const pattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
-	let match;
-	while ((match = pattern.exec(source))) {
-		if (!match[0]) break;
-		const eolMatch = match[0].match(/(?:\r\n|\n|\r)$/);
-		records.push({
-			start: match.index,
-			contentEnd:
-				match.index +
-				match[0].length -
-				(eolMatch ? eolMatch[0].length : 0),
-			end: match.index + match[0].length
-		});
-	}
-	return records;
-}
-/**
- * Reorder existing sibling subtrees by moving their original source slices.
- * Topic text, tables, code blocks, embeds, whitespace between sibling slots,
- * and every nested source block remain byte-for-byte intact.
- */
-function reorderMarkdownTopicsPreservingSource(markdown, canvas) {
-	return MarkdownOrder.reorderPreservingSource(markdown, canvas, {
-		getGroupIds,
-		parseDocument: parseMarkdownMindMapDocument,
-		lineRecords: markdownLineRecords,
-		withMetadata: markdownWithTopicMetadata,
-		withoutLegacyComments: withoutLegacyPluginComments,
-		identityKey: topicIdentityKey,
-		identityLabel: topicIdentityLabel
-	});
-}
-function patchMarkdownFromCanvasPreservingSource(
-	markdown,
-	canvas,
-	imported,
-	canvasPath
-) {
-	if (!imported || !Array.isArray(imported.topicSources)) return null;
-	const source = String(markdown || '');
-	const sourceEol = source.includes('\r\n')
-		? '\r\n'
-		: source.includes('\r')
-			? '\r'
-			: '\n';
-	const lineRecords = markdownLineRecords(source);
-	const groupIds = getGroupIds(canvas);
-	const liveNodes = Array.from(canvas.nodes.values()).filter(
-		(node) => !groupIds.has(node.id)
-	);
-	const liveById = new Map(liveNodes.map((node) => [node.id, node]));
-	const importedNodes = imported.nodes.map((node) => ({ ...node }));
-	convertMarkdownAnchorsToCardLinks(importedNodes, canvasPath);
-	const importedById = new Map(importedNodes.map((node) => [node.id, node]));
-	const sourceById = new Map(
-		imported.topicSources.map((record) => [record.id, record])
-	);
-	const topicIds = new Set([...liveById.keys(), ...importedById.keys()]);
-	const parentMap = (edges) => {
-		const result = /* @__PURE__ */ new Map();
-		for (const edge of edges || []) {
-			if (!topicIds.has(edge.fromNode) || !topicIds.has(edge.toNode))
-				continue;
-			if (
-				result.has(edge.toNode) &&
-				result.get(edge.toNode) !== edge.fromNode
-			)
-				return null;
-			result.set(edge.toNode, edge.fromNode);
-		}
-		return result;
-	};
-	const importedParents = parentMap(imported.edges);
-	const liveParents = parentMap(canvas.getData().edges || []);
-	if (!importedParents || !liveParents) return null;
-	const commonIds = new Set(
-		[...liveById.keys()].filter((id) => importedById.has(id))
-	);
-	for (const id of commonIds) {
-		const before = importedParents.get(id) || null;
-		const after = liveParents.get(id) || null;
-		if (before !== after) return null;
-	}
-	const removedIds = [...importedById.keys()].filter(
-		(id) => !liveById.has(id)
-	);
-	const addedIds = new Set(
-		[...liveById.keys()].filter((id) => !importedById.has(id))
-	);
-	const idToSlug = /* @__PURE__ */ new Map();
-	const slugCounts = /* @__PURE__ */ new Map();
-	for (const node of liveNodes) {
-		const base = headingSlug(canvasNodeMarkdownText(node));
-		const count = (slugCounts.get(base) || 0) + 1;
-		slugCounts.set(base, count);
-		idToSlug.set(node.id, count === 1 ? base : `${base}-${count}`);
-	}
-	const portableText = (node) =>
-		markdownWithPortableCardLinks(canvasNodeMarkdownText(node), idToSlug);
-	const patches = [];
-	const rangeFor = (record) => {
-		if (
-			!record ||
-			!Number.isInteger(record.startLine) ||
-			!Number.isInteger(record.endLine)
-		)
-			return null;
-		const first = lineRecords[record.startLine];
-		const last = lineRecords[record.endLine - 1];
-		return first && last
-			? {
-					start: first.start,
-					end: last.end,
-					trailingEol: source.slice(last.contentEnd, last.end)
-				}
-			: null;
-	};
-	const renderExisting = (record, text) => {
-		const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
-		if (record.kind === 'block') {
-			const indent = record.indent || '';
-			return lines.map((line) => `${indent}${line}`).join('\n');
-		}
-		if (record.kind === 'heading') {
-			const first = lines.shift() || 'Untitled';
-			return `${record.prefix || '# '}${first}${lines.length ? `\n${lines.join('\n')}` : ''}`;
-		}
-		let first = lines.shift() || 'Untitled';
-		if (record.kind === 'list') {
-			if (/^\d/.test(record.marker || ''))
-				first = first.replace(
-					new RegExp(
-						`^${String(record.marker).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+`
-					),
-					''
-				);
-			else first = first.replace(/^[-+*]\s+/, '');
-		}
-		const continuationIndent =
-			record.kind === 'list'
-				? `${record.indent || ''}  `
-				: record.indent || '';
-		return `${record.prefix || ''}${first}${lines.length ? `\n${lines.map((line) => `${continuationIndent}${line}`).join('\n')}` : ''}`;
-	};
-	for (const id of commonIds) {
-		const live = liveById.get(id);
-		const incoming = importedById.get(id);
-		if (canvasNodeContentMatches(live, incoming)) continue;
-		const record = sourceById.get(id);
-		const range = rangeFor(record);
-		if (!range) return null;
-		patches.push({
-			...range,
-			replacement:
-				renderExisting(record, portableText(live)).replace(
-					/\n/g,
-					sourceEol
-				) + range.trailingEol
-		});
-	}
-	for (const id of removedIds) {
-		const range = rangeFor(sourceById.get(id));
-		if (!range) return null;
-		patches.push({ ...range, replacement: '' });
-	}
-	const liveChildren = /* @__PURE__ */ new Map();
-	for (const id of liveById.keys()) liveChildren.set(id, []);
-	const liveRoots = [];
-	for (const node of liveNodes) {
-		const parentId = liveParents.get(node.id);
-		if (parentId && liveChildren.has(parentId))
-			liveChildren.get(parentId).push(node);
-		else liveRoots.push(node);
-	}
-	const spatialSort = (a, b) =>
-		a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id));
-	liveRoots.sort(spatialSort);
-	const liveRootIds = new Set(liveRoots.map((node) => node.id));
-	for (const [parentId, children] of liveChildren) {
-		const parent = liveById.get(parentId);
-		liveChildren.set(
-			parentId,
-			MarkdownOrder.orderChildren(
-				parent,
-				children,
-				liveRootIds.has(parentId)
-			)
-		);
-	}
-	const addedPreorder = (node) => {
-		const result = [node.id];
-		for (const child of liveChildren.get(node.id) || []) {
-			if (addedIds.has(child.id)) result.push(...addedPreorder(child));
-		}
-		return result;
-	};
-	const renderAddedTree = (node, style) => {
-		const text = portableText(node);
-		const richBlock = isStructuralListBlock(text);
-		const lines = [];
-		let childStyle;
-		if (isMediaResourceMarkdown(text)) {
-			const indent = style.kind === 'list' ? style.indent || '' : '';
-			lines.push(`${indent}- ${text}`);
-			childStyle = { kind: 'list', indent: `${indent}  ` };
-		} else if (richBlock) {
-			lines.push(text);
-			childStyle = { kind: 'list', indent: '' };
-		} else if (style.kind === 'heading' && style.level <= 6) {
-			lines.push(`${'#'.repeat(style.level)} ${text}`);
-			childStyle =
-				style.level < 6
-					? { kind: 'heading', level: style.level + 1 }
-					: { kind: 'list', indent: '' };
-		} else {
-			const indent = style.indent || '';
-			lines.push(`${indent}- ${text}`);
-			childStyle = { kind: 'list', indent: `${indent}  ` };
-		}
-		for (const child of liveChildren.get(node.id) || []) {
-			if (addedIds.has(child.id))
-				lines.push('', renderAddedTree(child, childStyle));
-		}
-		return lines.join('\n');
-	};
-	const addedGroups = /* @__PURE__ */ new Map();
-	for (const id of addedIds) {
-		const parentId = liveParents.get(id) || null;
-		if (parentId && addedIds.has(parentId)) continue;
-		if (parentId && !importedById.has(parentId)) return null;
-		const key = parentId || '';
-		if (!addedGroups.has(key)) addedGroups.set(key, []);
-		addedGroups.get(key).push(liveById.get(id));
-	}
-	const originalOrder = (imported.topicIds || []).filter((id) =>
-		liveById.has(id)
-	);
-	const descendantsOf = (parentId) => {
-		const result = new Set([parentId]);
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const [childId, candidateParent] of importedParents) {
-				if (result.has(candidateParent) && !result.has(childId)) {
-					result.add(childId);
-					changed = true;
-				}
-			}
-		}
-		return result;
-	};
-	const subtreeRangeCache = /* @__PURE__ */ new Map();
-	const subtreeRangeFor = (id) => {
-		if (subtreeRangeCache.has(id)) return subtreeRangeCache.get(id);
-		const ranges = Array.from(descendantsOf(id))
-			.map((descendantId) => rangeFor(sourceById.get(descendantId)))
-			.filter(Boolean);
-		const range =
-			ranges.length > 0
-				? {
-						start: Math.min(
-							...ranges.map((candidate) => candidate.start)
-						),
-						end: Math.max(
-							...ranges.map((candidate) => candidate.end)
-						)
-					}
-				: null;
-		subtreeRangeCache.set(id, range);
-		return range;
-	};
-	const visualOrder = MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
-	const visualIndex = new Map(visualOrder.map((id, index) => [id, index]));
-	const insertionPlans = [];
-	for (const [parentKey, roots] of addedGroups) {
-		const parentId = parentKey || null;
-		let style = { kind: 'heading', level: 1 };
-		if (parentId) {
-			const parentRecord = sourceById.get(parentId);
-			if (!parentRecord) return null;
-			if (
-				parentRecord.kind === 'heading' &&
-				Number(parentRecord.level) < 6
-			)
-				style = {
-					kind: 'heading',
-					level: Number(parentRecord.level) + 1
-				};
-			else
-				style = {
-					kind: 'list',
-					indent: `${parentRecord.indent || ''}  `
-				};
-		}
-		const addedRootIds = new Set(roots.map((root) => root.id));
-		const siblings = parentId
-			? liveChildren.get(parentId) || []
-			: liveRoots;
-		for (let index = 0; index < siblings.length; ) {
-			if (!addedRootIds.has(siblings[index].id)) {
-				index++;
-				continue;
-			}
-			const run = [];
-			while (
-				index < siblings.length &&
-				addedRootIds.has(siblings[index].id)
-			)
-				run.push(siblings[index++]);
-			const nextExisting =
-				siblings
-					.slice(index)
-					.find((sibling) => !addedIds.has(sibling.id)) || null;
-			const previousExisting =
-				siblings
-					.slice(0, index - run.length)
-					.reverse()
-					.find((sibling) => !addedIds.has(sibling.id)) || null;
-			let offset;
-			if (nextExisting) {
-				const nextRange = subtreeRangeFor(nextExisting.id);
-				if (!nextRange) return null;
-				offset = nextRange.start;
-			} else if (previousExisting) {
-				const previousRange = subtreeRangeFor(previousExisting.id);
-				if (!previousRange) return null;
-				offset = previousRange.end;
-			} else if (parentId) {
-				const parentRange = rangeFor(sourceById.get(parentId));
-				if (!parentRange) return null;
-				offset = parentRange.end;
-			} else {
-				offset = source.length;
-			}
-			insertionPlans.push({
-				offset,
-				desiredIndex: Math.min(
-					...run.map(
-						(root) =>
-							visualIndex.get(root.id) ?? Number.MAX_SAFE_INTEGER
-					)
-				),
-				rendered: run
-					.map((root) => renderAddedTree(root, style))
-					.join('\n\n'),
-				newIds: run.flatMap(addedPreorder)
-			});
-		}
-	}
-	insertionPlans.sort(
-		(a, b) => a.offset - b.offset || a.desiredIndex - b.desiredIndex
-	);
-	const mergedInsertionPlans = [];
-	for (const plan of insertionPlans) {
-		const previous = mergedInsertionPlans[mergedInsertionPlans.length - 1];
-		if (previous && previous.offset === plan.offset) {
-			previous.rendered += `\n${plan.rendered}`;
-			previous.newIds.push(...plan.newIds);
-		} else {
-			mergedInsertionPlans.push({ ...plan, newIds: [...plan.newIds] });
-		}
-	}
-	for (const plan of mergedInsertionPlans) {
-		const prefix =
-			plan.offset > 0 && !/[\r\n]$/.test(source.slice(0, plan.offset))
-				? sourceEol
-				: '';
-		const replacement = `${prefix}${plan.rendered.replace(/\n/g, sourceEol)}${sourceEol}`;
-		patches.push({ start: plan.offset, end: plan.offset, replacement });
-	}
-	const orderEntries = originalOrder.map((id) => ({
-		offset: rangeFor(sourceById.get(id))?.start ?? source.length,
-		inserted: false,
-		ids: [id]
-	}));
-	for (const plan of mergedInsertionPlans)
-		orderEntries.push({
-			offset: plan.offset,
-			inserted: true,
-			desiredIndex: plan.desiredIndex,
-			ids: plan.newIds
-		});
-	orderEntries.sort(
-		(a, b) =>
-			a.offset - b.offset ||
-			Number(b.inserted) - Number(a.inserted) ||
-			(a.desiredIndex ?? Number.MAX_SAFE_INTEGER) -
-				(b.desiredIndex ?? Number.MAX_SAFE_INTEGER)
-	);
-	const sourceOrder = orderEntries.flatMap((entry) => entry.ids);
-	patches.sort((a, b) => b.start - a.start || b.end - a.end);
-	for (let index = 1; index < patches.length; index++) {
-		if (patches[index - 1].start < patches[index].end) return null;
-	}
-	let patched = source;
-	for (const patch of patches)
-		patched =
-			patched.slice(0, patch.start) +
-			patch.replacement +
-			patched.slice(patch.end);
-	const metadata = {
-		topicIds: sourceOrder,
-		topicKeys: sourceOrder.map((id) =>
-			topicIdentityKey(canvasNodeMarkdownText(liveById.get(id)))
-		),
-		topicLabels: sourceOrder.map((id) =>
-			topicIdentityLabel(canvasNodeMarkdownText(liveById.get(id)))
-		)
-	};
-	const withMetadata = markdownWithTopicMetadata(
-		withoutLegacyPluginComments(patched),
-		metadata.topicIds,
-		metadata.topicKeys,
-		metadata.topicLabels
-	);
-	return addedIds.size === 0 && removedIds.length === 0
-		? reorderMarkdownTopicsPreservingSource(withMetadata, canvas)
-		: withMetadata;
-}
-function extractLocalMediaTargets(markdown) {
-	const targets = /* @__PURE__ */ new Set();
-	const add = (raw) => {
-		if (!raw) return;
-		let target = String(raw)
-			.trim()
-			.replace(/^<|>$/g, '')
-			.replace(/^["']|["']$/g, '');
-		if (
-			!target ||
-			/^(?:https?:|data:|blob:|obsidian:|mailto:|#)/i.test(target)
-		)
-			return;
-		try {
-			target = decodeURIComponent(target);
-		} catch (error) {}
-		targets.add(target);
-	};
-	let match;
-	const wikiEmbed = /!\[\[([^|\]#]+)(?:#[^|\]]*)?(?:\|[^\]]*)?\]\]/g;
-	while ((match = wikiEmbed.exec(markdown))) add(match[1]);
-	const markdownEmbed =
-		/!\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/g;
-	while ((match = markdownEmbed.exec(markdown))) add(match[1]);
-	const htmlMedia =
-		/<(?:img|audio|video|source|iframe|object|embed)\b[^>]*(?:src|data)=["']([^"']+)["'][^>]*>/gi;
-	while ((match = htmlMedia.exec(markdown))) add(match[1]);
-	const mediaLink =
-		/(?<!!)\[[^\]]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/g;
-	while ((match = mediaLink.exec(markdown))) {
-		const path = match[1].replace(/^<|>$/g, '').split(/[?#]/)[0];
-		if (
-			/\.(?:avif|bmp|gif|jpe?g|png|svg|webp|pdf|mp3|m4a|ogg|wav|flac|mp4|m4v|mov|webm|ogv)$/i.test(
-				path
-			)
-		)
-			add(match[1]);
-	}
-	return Array.from(targets);
-}
 var MarkdownMindMapModal = class extends import_obsidian4.Modal {
 	constructor(app, onImport) {
 		super(app);
@@ -3632,21 +1527,11 @@ function printableNodeSnapshot(node) {
 		const styleText = computedStyleText(originals[index]);
 		if (styleText) clones[index].setAttribute('style', styleText);
 	}
-	for (const unsafe of Array.from(
-		clone.querySelectorAll(
-			'script,style,button,.canvas-node-resizer,.canvas-node-connection-point'
-		)
-	))
-		unsafe.remove();
-	for (const element of Array.from(clone.querySelectorAll('*'))) {
-		for (const attribute of Array.from(element.attributes)) {
-			if (/^on/i.test(attribute.name))
-				element.removeAttribute(attribute.name);
-		}
-	}
+	const ownerDocument = source.ownerDocument || globalThis.document;
+	const safe = sanitizeExportElement(clone, { document: ownerDocument });
 	const sourceRect = source.getBoundingClientRect();
 	return {
-		html: clone.outerHTML,
+		html: serializeXmlSafe(safe, { document: ownerDocument }),
 		rect: sourceRect
 	};
 }
@@ -3677,6 +1562,15 @@ function edgeCurve(from, to, fromSide, toSide) {
 	const middle = (x1 + x2) / 2;
 	return `M ${x1} ${y1} C ${middle} ${y1}, ${middle} ${y2}, ${x2} ${y2}`;
 }
+function edgePath(from, to, fromSide, toSide, lineType, curve, curvature) {
+	if (lineType === 'straight' || curve === false) {
+		const [x1, y1] = edgeAnchor(from, fromSide);
+		const [x2, y2] = edgeAnchor(to, toSide);
+		return `M ${x1} ${y1} L ${x2} ${y2}`;
+	}
+	return edgeCurve(from, to, fromSide, toSide);
+}
+
 function exportMarkerId(color) {
 	return `arrow-${String(color || 'default').replace(/[^a-z0-9_-]/gi, '_')}`;
 }
@@ -3688,7 +1582,7 @@ function canvasPrintDocument(canvas, scope) {
 	if (scope === 'selection') {
 		for (const item of canvas.selection) {
 			if (typeof item === 'string') selectedIds.add(item);
-			else if (item && 'nodeEl' in item) selectedIds.add(item.id);
+			else if (item && typeof item === 'object' && 'nodeEl' in item) selectedIds.add(item.id);
 		}
 	}
 	const records = [];
@@ -3708,6 +1602,15 @@ function canvasPrintDocument(canvas, scope) {
 				domRect.top > wrapperRect.bottom)
 		)
 			continue;
+		const nodeX = Number(node.x);
+		const nodeY = Number(node.y);
+		const nodeWidth = Number(node.width);
+		const nodeHeight = Number(node.height);
+		if (
+			![nodeX, nodeY, nodeWidth, nodeHeight].every(Number.isFinite) ||
+			nodeWidth <= 0 || nodeHeight <= 0 || nodeWidth > 100000 || nodeHeight > 100000
+		)
+			continue;
 		const viewportMode = scope === 'viewport';
 		const titleOnly = !!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY];
 		const rendered =
@@ -3722,8 +1625,8 @@ function canvasPrintDocument(canvas, scope) {
 					: node.text || canvasNodeMarkdownText(nodeData);
 		const logicalScale = viewportMode
 			? 1
-			: domRect && node.width
-				? domRect.width / node.width
+			: domRect && nodeWidth
+				? domRect.width / nodeWidth
 				: 1;
 		const visualEl =
 			node.nodeEl?.querySelector?.('.canvas-node-container') ||
@@ -3737,23 +1640,34 @@ function canvasPrintDocument(canvas, scope) {
 						x:
 							(viewportMode
 								? domRect.left - wrapperRect.left
-								: node.x) +
+								: nodeX) +
 							(rendered.rect.left - domRect.left) / logicalScale,
 						y:
 							(viewportMode
 								? domRect.top - wrapperRect.top
-								: node.y) +
+								: nodeY) +
 							(rendered.rect.top - domRect.top) / logicalScale,
 						width: rendered.rect.width / logicalScale,
 						height: rendered.rect.height / logicalScale
 					}
 				: null;
+		const cardState = [
+			canvas.selection?.has?.(node) ? 'selected' : '',
+			node.isEditing ? 'editing' : '',
+			titleOnly ? 'linked' : '',
+			canvasNodeUnknownData(node).collapsed ? 'collapsed' : '',
+			Array.isArray(data.mindmapMissingMedia?.[node.id]) &&
+			data.mindmapMissingMedia[node.id].length > 0
+				? 'missing-media'
+				: ''
+		].filter(Boolean).join(' ');
 		records.push({
 			id: node.id,
-			x: viewportMode ? domRect.left - wrapperRect.left : node.x,
-			y: viewportMode ? domRect.top - wrapperRect.top : node.y,
-			width: viewportMode ? domRect.width : node.width,
-			height: viewportMode ? domRect.height : node.height,
+			state: cardState,
+			x: viewportMode ? domRect.left - wrapperRect.left : nodeX,
+			y: viewportMode ? domRect.top - wrapperRect.top : nodeY,
+			width: viewportMode ? domRect.width : nodeWidth,
+			height: viewportMode ? domRect.height : nodeHeight,
 			text: displayText,
 			renderedHtml: rendered?.html || '',
 			contentRect,
@@ -3777,18 +1691,55 @@ function canvasPrintDocument(canvas, scope) {
 	}
 	if (records.length === 0) return null;
 	const byId = new Map(records.map((record) => [record.id, record]));
+	const viewportEndpoint = (node, side) => {
+		const rect = node?.nodeEl?.getBoundingClientRect?.();
+		const record = rect
+			? {
+					x: rect.left - wrapperRect.left,
+					y: rect.top - wrapperRect.top,
+					width: rect.width,
+					height: rect.height
+				}
+			: node;
+		const [x, y] = edgeAnchor(record, side);
+		return {
+			x: Math.max(0, Math.min(wrapperRect.width, x)),
+			y: Math.max(0, Math.min(wrapperRect.height, y)),
+			width: 0,
+			height: 0
+		};
+	};
 	const edges = [];
 	for (const edge of data.edges || []) {
-		const from = byId.get(edge.fromNode);
-		const to = byId.get(edge.toNode);
-		if (from && to)
+		let from = byId.get(edge.fromNode);
+		let to = byId.get(edge.toNode);
+		if (from && to) {
 			edges.push({
 				from,
 				to,
+				id: edge.id,
+				label: edge.label,
 				color: edge.color || '',
 				fromSide: edge.fromSide,
-				toSide: edge.toSide
+				toSide: edge.toSide,
+				fromEnd: edge.fromEnd,
+				toEnd: edge.toEnd,
+				lineType: edge.lineType,
+				curve: edge.curve,
+				curvature: edge.curvature
 			});
+			continue;
+		}
+		if (scope !== 'viewport' || (!from && !to)) continue;
+		from ||= viewportEndpoint(canvas.nodes.get(edge.fromNode), edge.fromSide);
+		to ||= viewportEndpoint(canvas.nodes.get(edge.toNode), edge.toSide);
+		edges.push({
+			from,
+			to,
+			color: edge.color || '',
+			fromSide: edge.fromSide,
+			toSide: edge.toSide
+		});
 	}
 	let minX;
 	let minY;
@@ -3800,10 +1751,16 @@ function canvasPrintDocument(canvas, scope) {
 		maxX = wrapperRect.width;
 		maxY = wrapperRect.height;
 	} else {
-		minX = Math.min(...records.map((record) => record.x));
-		minY = Math.min(...records.map((record) => record.y));
-		maxX = Math.max(...records.map((record) => record.x + record.width));
-		maxY = Math.max(...records.map((record) => record.y + record.height));
+		minX = Infinity;
+		minY = Infinity;
+		maxX = -Infinity;
+		maxY = -Infinity;
+		for (const record of records) {
+			minX = Math.min(minX, record.x);
+			minY = Math.min(minY, record.y);
+			maxX = Math.max(maxX, record.x + record.width);
+			maxY = Math.max(maxY, record.y + record.height);
+		}
 	}
 	const padding =
 		scope === 'viewport'
@@ -3827,9 +1784,18 @@ function canvasPrintDocument(canvas, scope) {
 	const colorOf = (value, fallback) =>
 		palette[value] || (/^#|^rgb|^hsl/.test(value) ? value : fallback);
 	const edgeSvg = edges
-		.map(({ from, to, color, fromSide, toSide }) => {
+		.map(({ from, to, color, fromSide, toSide, fromEnd, toEnd, lineType, curve, curvature, label }) => {
 			const stroke = colorOf(color, '#94a3b8');
-			return `<path d="${edgeCurve(from, to, fromSide, toSide)}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2" marker-end="url(#${exportMarkerId(color)})"/>`;
+			const path = edgePath(from, to, fromSide, toSide, lineType, curve, curvature);
+			const marker = exportMarkerId(color);
+			const start = fromEnd === 'arrow' ? ` marker-start="url(#${marker})"` : '';
+			const end = toEnd !== 'none' ? ` marker-end="url(#${marker})"` : '';
+			const [x1, y1] = edgeAnchor(from, fromSide);
+			const [x2, y2] = edgeAnchor(to, toSide);
+			const labelMarkup = label
+				? `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 4}" text-anchor="middle" font-size="12" fill="${escapeXml(stroke)}">${escapeXml(label)}</text>`
+				: '';
+			return `<path d="${path}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2"${start}${end}/>${labelMarkup}`;
 		})
 		.join('');
 	const wrapperStyle =
@@ -3852,9 +1818,17 @@ function canvasPrintDocument(canvas, scope) {
 				background,
 				accent
 			);
-			const stroke = paint.stroke;
+			let stroke = paint.stroke;
+			let stateStrokeWidth = record.strokeWidth;
+			if (record.state.split(/\s+/).includes('selected')) {
+				stroke = '#2563eb';
+				stateStrokeWidth = Math.max(3, record.strokeWidth + 1);
+			} else if (record.state.split(/\s+/).includes('missing-media')) {
+				stroke = '#dc2626';
+			}
+			const stateAttribute = ` data-tomindmap-card-state="${escapeXml(record.state)}"`;
 			if (record.group) {
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(getRootTitle(record.text))}</text></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(MarkdownMindMapCodec.topicTitle(record.text))}</text></g>`;
 			}
 			const fontSize = record.fontSize;
 			if (record.renderedHtml) {
@@ -3885,7 +1859,7 @@ function canvasPrintDocument(canvas, scope) {
 					width: record.width,
 					height: record.height
 				};
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
 			}
 			const lines = wrapSvgText(record.text, record.width, fontSize);
 			const lineHeight = record.lineHeight;
@@ -3901,7 +1875,7 @@ function canvasPrintDocument(canvas, scope) {
 						`<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
 				)
 				.join('');
-			return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
+			return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
 		})
 		.join('');
 	const title =
@@ -4071,9 +2045,10 @@ function mindMapPdfBytes(jpeg) {
 }
 
 var {
-	freemindToCanvas,
-	layoutTree,
-	parseFreeMindXml
+	DEFAULT_FREEMIND_BUDGETS,
+	FREEMIND_REASON,
+	decodeFreeMind,
+	layoutTree
 } = require('./lib/freemind.js');
 
 // src/main.ts
@@ -4082,16 +2057,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		super(...arguments);
 		this.settings = DEFAULT_SETTINGS;
 		this.liveSizing = new LiveSizingController(this, getGroupIds);
+		this.canvasDecorationState = new WeakMap();
+		this.groupAnimationVersions = new WeakMap();
+		this.canvasGestureOwners = new Set();
+		this.canvasGeneration = 0;
 		this.cleanupClickHandler = null;
-		this.cleanupDragHandler = null;
-		this.cleanupSubtreeDragHandler = null;
 		this.cleanupGroupDragHandler = null;
 		this.cleanupTouchHandler = null;
 		this.touchController = null;
 		this.autoResizeHandle = null;
 		this.interceptedCanvas = null;
 		this.toggleBtnEl = null;
-		this.mediaBtnEl = null;
 		this.cleanupToggleHandler = null;
 		this.cleanupCardSelectionHandler = null;
 		this.cleanupCardDoubleClickHandler = null;
@@ -4107,8 +2083,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.pendingTimers = /* @__PURE__ */ new Set();
 		this.pendingRafs = /* @__PURE__ */ new Set();
 		this.pendingObservers = /* @__PURE__ */ new Set();
-		/** Cleanup for the current render-aware import sizing pass. */
-		this.renderResizeQueueCleanup = null;
 		/** Original canvas methods for unwrapping on cleanup. */
 		this.origCanvasMethods = {};
 		/** Set to true on unload to prevent deferred callbacks from running. */
@@ -4119,12 +2093,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.navSkipTracking = false;
 		this.lastNavCanvas = null;
 		this.cleanupNavHandler = null;
-		this.markdownSyncIndex = /* @__PURE__ */ new Map();
+		this.markdownOwnership = createMarkdownSyncOwnership();
+		this.markdownSyncIndex = new MarkdownSyncIndex();
+		this.markdownSyncCoordinator = new MarkdownSyncCoordinator();
+		this.verifiedMarkdownLinks = new Map();
+		this.verifiedParentLinks = new Map();
 		this.markdownSyncTimers = /* @__PURE__ */ new Map();
 		this.markdownModifyTimers = /* @__PURE__ */ new Map();
 		this.markdownWriteGuards = /* @__PURE__ */ new Map();
 		this.markdownWriteGuardTimers = /* @__PURE__ */ new Map();
 		this.markdownOrderDirty = /* @__PURE__ */ new WeakSet();
+		this.persistenceQueue = Promise.resolve();
 		this.syncApplyingCanvas = /* @__PURE__ */ new WeakSet();
 		this.localCanvasMutations = /* @__PURE__ */ new WeakSet();
 		this.immediateMarkdownWrites = /* @__PURE__ */ new WeakMap();
@@ -4177,7 +2156,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.keyboardHandler.zoomPadding = this.settings.navigationZoomPadding;
 		this.keyboardHandler.onFindRequested = (canvas) => {
-			void this.showOutline(canvas, true);
+			this.runAsync(() => this.showOutline(canvas, true), 'show outline');
 		};
 		this.keyboardHandler.register();
 		this.registerDomEvent(
@@ -4380,7 +2359,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const tree = findTreeForNode(forest, node.id);
 				if (!tree || tree.children.length === 0) return false;
 				if (checking) return true;
-				void this.convertTopicToCleanNotes(canvas, node, true);
+				this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, true), 'convert topic to clean notes');
 			}
 		});
 		this.addCommand({
@@ -4393,7 +2372,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const node = this.canvasApi.getSelectedNode(canvas);
 				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
 				if (checking) return true;
-				void this.convertTopicToCleanNotes(canvas, node, false);
+				this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 			}
 		});
 		this.addCommand({
@@ -4411,7 +2390,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				)
 					return false;
 				if (checking) return true;
-				void this.convertLinkedNodeToNormalTopic(canvas, node);
+				this.runAsync(() => this.convertLinkedNodeToNormalTopic(canvas, node), 'convert linked node to normal topic');
 			}
 		});
 		this.addCommand({
@@ -4424,7 +2403,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const node = this.canvasApi.getSelectedNode(canvas);
 				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
 				if (checking) return true;
-				void this.convertTopicToNestedMindMap(canvas, node);
+				this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map');
 			}
 		});
 		this.addCommand({
@@ -4437,7 +2416,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const parent = canvas.getData?.()?.[TOMINMAP_PARENT];
 				if (!parent?.canvas || !parent?.nodeId) return false;
 				if (checking) return true;
-				void this.openParentMindMap(canvas, parent);
+				this.runAsync(() => this.openParentMindMap(canvas, parent), 'open parent mind map');
 			}
 		});
 		this.registerEvent(
@@ -4452,7 +2431,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.registerView(OUTLINE_VIEW_TYPE, (leaf) => new OutlineView(leaf));
 		this.app.workspace.onLayoutReady(() => {
-			void this.rebuildMarkdownSyncIndex();
+			this.runAsync(() => this.rebuildMarkdownSyncIndex(), 'rebuild markdown sync index');
 			const view = this.app.workspace.getActiveViewOfType(
 				import_obsidian5.ItemView
 			);
@@ -4588,19 +2567,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!(file instanceof import_obsidian5.TFile)) return;
 				if (
 					file.extension === 'md' &&
-					this.markdownSyncIndex.has(file.path)
+					this.markdownSyncIndex.canvasesFor(file.path).length > 0
 				)
 					this.scheduleMarkdownToCanvas(file);
 			})
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
-				void this.handleSyncedFileRename(file, oldPath);
+				this.runAsync(() => this.handleSyncedFileRename(file, oldPath), 'handle synced file rename');
 			})
 		);
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
-				void this.handleSyncedFileDelete(file);
+				this.runAsync(() => this.handleSyncedFileDelete(file), 'handle synced file delete');
 			})
 		);
 		this.registerEvent(
@@ -4610,20 +2589,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					item.setTitle('Copy node link')
 						.setIcon('link')
 						.onClick(() => {
-							const canvasPath = node.canvas.view.file.path;
-							if (node.file) {
-								const vaultName = this.app.vault.getName();
-								void navigator.clipboard.writeText(
-									`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-								);
-							} else if (node.url) {
-								void navigator.clipboard.writeText(node.url);
-							} else {
-								void navigator.clipboard.writeText(
-									`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-								);
-							}
-							new import_obsidian5.Notice('Node link copied');
+							this.runAsync(async () => {
+								const canvasPath = node.canvas?.view?.file?.path || '';
+								let link;
+								if (canvasNodeFilePath(node)) {
+									const vaultName = this.app.vault.getName?.() || '';
+									link = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`;
+								} else if (canvasNodeUrl(node)) link = canvasNodeUrl(node);
+								else link = `obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`;
+								await writeClipboardText(link);
+								new import_obsidian5.Notice('Node link copied');
+							}, 'copy node link');
 						});
 				});
 				if (canvas && this.isMindmapCanvas(canvas))
@@ -4645,9 +2621,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						conversionTree && conversionTree.children.length > 0
 					);
 					const convertWithSubtree = () =>
-						void this.convertTopicToCleanNotes(canvas, node, true);
+						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, true), 'convert topic to clean notes');
 					const convertWithoutSubtree = () =>
-						void this.convertTopicToCleanNotes(canvas, node, false);
+						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 					if (hasBranch) {
 						menu.addItem((item) => {
 							item.setTitle('Convert to file with subtree')
@@ -4921,7 +2897,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas || buildForest(canvas).length === 0) return false;
 				if (checking) return true;
-				void this.copyMindMapMarkdown(canvas);
+				this.runAsync(() => this.copyMindMapMarkdown(canvas), 'copy mind map markdown');
 			}
 		});
 		this.addCommand({
@@ -4979,7 +2955,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const nodes = Array.from(canvas.nodes.values()).filter(
 					(node) => !groupIds.has(node.id)
 				);
-				void this.validateMediaLinks(canvas, nodes, true);
+				this.runAsync(() => this.validateMediaLinks(canvas, nodes, true), 'validate media links');
 			}
 		});
 		this.addCommand({
@@ -5049,21 +3025,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.navSkipTracking = false;
 	}
-	onunload() {
+	async onunload() {
 		this.unloaded = true;
 		if (this.canvasLifecycleTimer !== null) {
 			clearTimeout(this.canvasLifecycleTimer);
 			this.canvasLifecycleTimer = null;
 		}
-		void flushCanvasView(this.interceptedCanvas, this.app.vault).catch(
-			(error) => {
-				console.error(
-					'ToMindMap: could not flush the active Canvas during unload',
-					error
-				);
-			}
-		);
-		this.cancelPendingAsync();
+		const canvas = this.interceptedCanvas;
+		this.disposeCanvasGestures('unload');
+		const drainMarkdownSync = this.markdownSyncCoordinator.flushAll()
+			.then(() => this.markdownSyncCoordinator.dispose())
+			.then((result) => {
+				if (!result.ok) console.warn('ToMindMap: Markdown sync did not drain during unload', result);
+			})
+			.catch((error) => console.warn('ToMindMap: Markdown coordinator unload failed', error));
+		await drainMarkdownSync;
+		try { await this.persistenceQueue; } catch (_) {}
+		try {
+			await flushCanvasView(canvas, this.app.vault);
+		} catch (error) {
+			console.error(
+				'ToMindMap: could not flush the active Canvas during unload',
+				error
+			);
+		}
+		this.cancelPendingAsync(canvas);
+		this.disposeCanvasDecorations(canvas);
 		for (const id of this.markdownSyncTimers.values()) clearTimeout(id);
 		this.markdownSyncTimers.clear();
 		for (const id of this.markdownModifyTimers.values()) clearTimeout(id);
@@ -5076,18 +3063,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupClickHandler) {
 			this.cleanupClickHandler();
 			this.cleanupClickHandler = null;
-		}
-		if (this.cleanupDragHandler) {
-			this.cleanupDragHandler();
-			this.cleanupDragHandler = null;
-		}
-		if (this.cleanupSubtreeDragHandler) {
-			this.cleanupSubtreeDragHandler();
-			this.cleanupSubtreeDragHandler = null;
-		}
-		if (this.cleanupGroupDragHandler) {
-			this.cleanupGroupDragHandler();
-			this.cleanupGroupDragHandler = null;
 		}
 		if (this.cleanupGroupBoundsHandler) {
 			this.cleanupGroupBoundsHandler();
@@ -5108,10 +3083,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupMediaDropHandler) {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
-		}
-		if (this.cleanupNodeDragReparentHandler) {
-			this.cleanupNodeDragReparentHandler();
-			this.cleanupNodeDragReparentHandler = null;
 		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
@@ -5150,10 +3121,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.toggleBtnEl.remove();
 			this.toggleBtnEl = null;
 		}
-		if (this.mediaBtnEl) {
-			this.mediaBtnEl.remove();
-			this.mediaBtnEl = null;
-		}
 	}
 	/**
 	 * Called when the active leaf changes — set up canvas-specific UI.
@@ -5186,6 +3153,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			? this.markdownSyncTimers.get(previousCanvasPath)
 			: null;
 		if (previousCanvas) {
+			this.disposeCanvasGestures('leaf-change');
+			this.cancelPendingAsync(previousCanvas);
+			this.disposeCanvasDecorations(previousCanvas);
 			void flushCanvasView(previousCanvas, this.app.vault).catch(
 				(error) => {
 					console.error(
@@ -5194,29 +3164,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 				}
 			);
+			if (pendingMarkdownWrite) {
+				clearTimeout(pendingMarkdownWrite);
+				this.markdownSyncTimers.delete(previousCanvasPath);
+				this.runAsync(() => this.flushCanvasToMarkdown(previousCanvas), 'flush canvas to markdown');
+			}
 		}
-		if (previousCanvas && pendingMarkdownWrite) {
-			clearTimeout(pendingMarkdownWrite);
-			this.markdownSyncTimers.delete(previousCanvasPath);
-			void this.flushCanvasToMarkdown(previousCanvas);
-		}
-		this.cancelPendingAsync();
 		this.unwrapCanvasMethods();
 		if (this.cleanupClickHandler) {
 			this.cleanupClickHandler();
 			this.cleanupClickHandler = null;
-		}
-		if (this.cleanupDragHandler) {
-			this.cleanupDragHandler();
-			this.cleanupDragHandler = null;
-		}
-		if (this.cleanupSubtreeDragHandler) {
-			this.cleanupSubtreeDragHandler();
-			this.cleanupSubtreeDragHandler = null;
-		}
-		if (this.cleanupGroupDragHandler) {
-			this.cleanupGroupDragHandler();
-			this.cleanupGroupDragHandler = null;
 		}
 		if (this.cleanupGroupBoundsHandler) {
 			this.cleanupGroupBoundsHandler();
@@ -5237,10 +3194,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupMediaDropHandler) {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
-		}
-		if (this.cleanupNodeDragReparentHandler) {
-			this.cleanupNodeDragReparentHandler();
-			this.cleanupNodeDragReparentHandler = null;
 		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
@@ -5287,14 +3240,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.toggleBtnEl.remove();
 				this.toggleBtnEl = null;
 			}
-			if (this.mediaBtnEl) {
-				this.mediaBtnEl.remove();
-				this.mediaBtnEl = null;
-			}
 			this.hideOutline();
 			return;
 		}
 		const canvasData = canvas.getData();
+		this.captureCanvasDecorations(canvas);
 		if (this.isMindmapCanvas(canvas)) {
 			MindmapActions.syncCollapsedVisibility(canvas);
 			this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
@@ -5318,16 +3268,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		this.injectToggleButton(canvas);
 		const onCardPointerDown = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			if (event.button !== 0) return;
-			const target = event.target;
-			if (
-				target?.closest?.(
-					'.canvas-node-connection-point, .canvas-node-resizer, .canvas-node-resizers'
-				)
-			)
-				return;
-			const node = findNodeFromEvent(canvas, event);
+			const node = isPrimaryCardGesture(event, {
+				isEnabled: () => this.isMindmapCanvas(canvas),
+				findNode: (pointerEvent) => findNodeFromEvent(canvas, pointerEvent),
+				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
+			});
 			if (!node) return;
 			canvas.selectOnly(node);
 			canvas.requestFrame();
@@ -5371,45 +3316,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 		this.cleanupKeyboardHandler =
 			this.keyboardHandler.attachToCanvas(canvas);
-		this.cleanupTouchHandler = null;
-		if (this.isTouchUiEnabled()) {
-			this.touchController = new TouchControlsController({
-				canvas,
-				actions: this.keyboardHandler,
-				Menu: import_obsidian5.Menu,
-				setIcon: import_obsidian5.setIcon,
-				isEnabled: () =>
-					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
-				isTopicNode: (node) =>
-					nodeIsConvertibleTopic(canvas, node) ||
-					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
-				onDoubleTap: (node) => {
-					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
-					const file = this.app.vault.getAbstractFileByPath(
-						canvasNodeFilePath(node)
-					);
-					if (!(file instanceof import_obsidian5.TFile)) return false;
-					void this.app.workspace.getLeaf(false).openFile(file);
-					return true;
-				},
-				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
-				buildMenuItems: (menu, node) => {
-					this.app.workspace.trigger('canvas:node-menu', menu, node);
-				}
-			});
-			this.cleanupTouchHandler = this.touchController.attach();
-		}
+		this.syncCanvasBindings(canvas);
 		this.cleanupClickHandler = this.navigation.registerClickHandler(canvas);
 		// Card movement, subtree movement, attachment preview, and commit are
 		// deliberately owned by registerNodeDragReparentHandler. Multiple gesture
 		// owners used to race each other and could save a transient preview.
-		this.cleanupDragHandler = null;
-		this.cleanupSubtreeDragHandler = null;
 		this.cleanupGroupDragHandler = registerGroupDragHandler(
 			canvas,
 			this.canvasApi,
 			() => this.isMindmapCanvas(canvas)
 		);
+		this.canvasGestureOwners.add(this.cleanupGroupDragHandler);
 		const onDragEnd = () => {
 			if (this.isMindmapCanvas(canvas))
 				this.trackedRaf(() => this.updateGroupBounds(canvas));
@@ -5606,21 +3523,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: [];
 			const checkboxIndex = nodeCheckboxes.indexOf(target);
 			if (checkboxIndex < 0) return;
-			let seen = -1;
-			let changed = false;
-			const updated = node.text.replace(
-				/^(\s*[-+*]\s+\[)([ xX])(\])/gm,
-				(match, prefix, state, suffix) => {
-					seen++;
-					if (seen !== checkboxIndex) return match;
-					changed = true;
-					return `${prefix}${state.toLowerCase() === 'x' ? ' ' : 'x'}${suffix}`;
-				}
+			const toggled = MarkdownMindMapCodec.toggleTopicCheckbox(
+				node.text,
+				checkboxIndex
 			);
-			if (!changed) return;
+			if (!toggled.changed) return;
 			event.preventDefault();
 			event.stopImmediatePropagation();
-			node.setText(updated);
+			node.setText(toggled.text);
 			canvas.requestSave();
 			this.waitForPreview(node, () => {
 				if (
@@ -5654,15 +3564,39 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				target.getAttribute('src') ||
 				target.getAttribute('data') ||
 				'embedded media';
-			node.nodeEl.addClass('tomindmap-missing-media');
-			node.nodeEl.setAttribute(
-				'data-tomindmap-missing-media',
-				`Could not load: ${source}`
-			);
-			if (typeof node.setColor === 'function') node.setColor('1');
+			const data = canvas.getData();
+			const markers = {
+				...(data.mindmapMissingMedia && typeof data.mindmapMissingMedia === 'object'
+					? data.mindmapMissingMedia
+					: {})
+			};
+			const missing = Array.isArray(markers[node.id]) ? markers[node.id].slice() : [];
+			if (!missing.includes(source)) missing.push(source);
+			markers[node.id] = missing;
+			data.mindmapMissingMedia = markers;
+			canvas.setData(data);
+			this.applyMissingMediaMarkers(canvas);
+			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+				this.branchColors.applyColors(canvas);
+			canvas.requestSave();
+		};
+		const onMediaLoad = (event) => {
+			if (!this.isMindmapCanvas(canvas)) return;
+			const node = findNodeFromEvent(canvas, event);
+			if (!node) return;
+			const data = canvas.getData();
+			const markers = data.mindmapMissingMedia;
+			if (!markers || !Array.isArray(markers[node.id])) return;
+			delete markers[node.id];
+			data.mindmapMissingMedia = markers;
+			canvas.setData(data);
+			this.applyMissingMediaMarkers(canvas);
+			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+				this.branchColors.applyColors(canvas);
 			canvas.requestSave();
 		};
 		canvas.wrapperEl.addEventListener('error', onMediaLoadError, true);
+		canvas.wrapperEl.addEventListener('load', onMediaLoad, true);
 		this.cleanupRichContentHandler = () => {
 			canvas.wrapperEl.removeEventListener(
 				'click',
@@ -5674,10 +3608,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				onMediaLoadError,
 				true
 			);
+			canvas.wrapperEl.removeEventListener(
+				'load',
+				onMediaLoad,
+				true
+			);
 		};
 		this.cleanupMediaDropHandler = this.registerMediaDropHandler(canvas);
 		this.cleanupNodeDragReparentHandler =
 			this.registerNodeDragReparentHandler(canvas);
+		this.canvasGestureOwners.add(this.cleanupNodeDragReparentHandler);
 		const handleEditExit = (canvas2, editedNode) => {
 				const finalized = removeEmptyNodeOnEditExit(
 					canvas2,
@@ -5701,13 +3641,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							focus,
 							this.settings.navigationZoomPadding
 						);
-					void this.flushCanvasToMarkdown(canvas2);
+					this.runAsync(() => this.flushCanvasToMarkdown(canvas2), 'flush canvas to markdown');
 					return true;
 				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (!this.isMindmapCanvas(canvas2)) return;
-					void this.renameCanvasFromRootTopic(canvas2, editedNode);
+					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
 					if (!this.isAutoAdjustCanvas(canvas2)) return;
 					this.resizeNodesWhenRendered(
 						canvas2,
@@ -5730,31 +3670,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			(_a2 = this.autoResizeHandle) == null ? void 0 : _a2.finalizeNode();
 		};
 		this.keyboardHandler.onAfterFinishEditing = handleEditExit;
-		if (this.settings.mouseNavigation) {
-			const onPointerDown = (e) => {
-				if (e.button === 3) {
-					e.preventDefault();
-					e.stopImmediatePropagation();
-					this.navigateBack(canvas);
-				}
-				if (e.button === 4) {
-					e.preventDefault();
-					e.stopImmediatePropagation();
-					this.navigateForward(canvas);
-				}
-			};
-			canvas.wrapperEl.addEventListener(
-				'pointerdown',
-				onPointerDown,
-				true
-			);
-			this.cleanupNavHandler = () =>
-				canvas.wrapperEl.removeEventListener(
-					'pointerdown',
-					onPointerDown,
-					true
-				);
-		}
 		if (this.settings.autoColor && this.isMindmapCanvas(canvas)) {
 			this.branchColors.applyColors(canvas);
 		}
@@ -5841,7 +3756,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					structuralReflowQueued = false;
 					if (!this.isMindmapCanvas(canvas)) return;
 					pruneEmptyLeafTopics(canvas, this.canvasApi);
-					this.layoutEngine.layout(canvas);
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.layoutEngine.layout(canvas, { preserveRootSides: true });
 					this.updateGroupBounds(canvas);
 					canvas.requestSave();
 				});
@@ -5880,11 +3796,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.liveSizing.getPreviewSizer(node);
 				}
 			};
-			refreshPreviewGeometry();
+			const refreshCanvasDecorations = () => {
+				refreshPreviewGeometry();
+				if (this.isMindmapCanvas(canvas)) {
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
+				}
+			};
+			refreshCanvasDecorations();
 			if (typeof MutationObserver !== 'undefined' && canvas.wrapperEl) {
-				const previewObserver = new MutationObserver(
-					refreshPreviewGeometry
-				);
+				let previewRefreshQueued = false;
+				const previewObserver = new MutationObserver(() => {
+					if (previewRefreshQueued) return;
+					previewRefreshQueued = true;
+					this.trackedRaf(() => {
+						previewRefreshQueued = false;
+						if (
+							this.interceptedCanvas !== canvas ||
+							!this.isMindmapCanvas(canvas)
+						) return;
+						refreshCanvasDecorations();
+					});
+				});
 				previewObserver.observe(canvas.wrapperEl, {
 					childList: true,
 					subtree: true
@@ -5938,28 +3871,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.hideOutline();
 		}
 		this.trackedTimeout(() => this.ensureRootTopic(canvas), 120);
-		const canvasFile = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (canvasFile && markdownPath) {
-			this.indexMarkdownLink(canvasFile.path, markdownPath);
-			const source = this.app.vault.getAbstractFileByPath(markdownPath);
-			if (source instanceof import_obsidian5.TFile) {
+		const canvasFile = canvas.view?.file;
+		if (canvasFile) {
+			void (async () => {
+				const owned = await this.resolveMarkdownLinkForCanvas(canvas);
+				if (!owned.ok) return;
+				const source = owned.link.file;
+				if (!(source instanceof import_obsidian5.TFile)) return;
 				const canvasModified = Number(canvasFile.stat?.mtime || 0);
 				const markdownModified = Number(source.stat?.mtime || 0);
 				if (canvasModified > markdownModified) {
-					this.trackedTimeout(
-						() => void this.flushCanvasToMarkdown(canvas),
-						80
-					);
+					this.trackedTimeout(() => { void this.flushCanvasToMarkdown(canvas).catch(() => {}); }, 80);
 				} else {
-					this.trackedTimeout(
-						() => void this.syncMarkdownFileToCanvases(source),
-						80
-					);
+					this.trackedTimeout(() => { void this.syncMarkdownFileToCanvases(source).catch(() => {}); }, 80);
 				}
-			} else {
-				void this.detachMarkdownSync(canvas, false);
-			}
+			})().catch((error) => console.warn('ToMindMap: could not initialize owned sync', error));
 		}
 	}
 	refreshOutline(canvas) {
@@ -5987,90 +3913,80 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * Collect a node and all its descendants via BFS.
 	 */
 	collectSubtreeNodes(canvas, root) {
-		const result = [root];
-		const visited = /* @__PURE__ */ new Set([root.id]);
-		const queue = [root.id];
-		for (let cursor = 0; cursor < queue.length; cursor++) {
-			const id = queue[cursor];
-			for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
-				const childId = edge.to.node.id;
-				if (!visited.has(childId)) {
-					visited.add(childId);
-					result.push(edge.to.node);
-					queue.push(childId);
-				}
-			}
-		}
-		return result;
+		if (!root) return [];
+		return [root, ...this.canvasApi.getDescendantNodes(canvas, root)];
 	}
 	/**
 	 * Recalculate bounds for all groups to tightly fit their contained subtrees.
 	 * A root node belongs to a group if its center is inside the group's current bounds.
 	 */
 	updateGroupBounds(canvas) {
-		var _a;
 		const PADDING = 20;
 		const groupIds = getGroupIds(canvas);
 		if (groupIds.size === 0) return;
-		let changed = false;
-		for (const groupId of groupIds) {
-			const group = canvas.nodes.get(groupId);
-			if (!group) continue;
-			const gx = group.x;
-			const gy = group.y;
-			const gw = group.width;
-			const gh = group.height;
-			const contained = /* @__PURE__ */ new Set();
-			for (const node of canvas.nodes.values()) {
-				if (groupIds.has(node.id)) continue;
-				const cx = node.x + node.width / 2;
-				const cy = node.y + node.height / 2;
-				if (cx >= gx && cx <= gx + gw && cy >= gy && cy <= gy + gh) {
-					for (const n of this.collectSubtreeNodes(canvas, node)) {
-						contained.add(n);
-					}
-				}
+		const graph = this.canvasApi.getGraphQuery?.(canvas) || {
+			visibleForest: () => buildForest(canvas, { includeHidden: false }),
+			descendantsOf: (root) => this.collectSubtreeNodes(canvas, root).slice(1)
+		};
+		const groups = Array.from(groupIds, (id) => canvas.nodes.get(id)).filter(Boolean);
+		const contained = new Map(groups.map((group) => [group.id, new Set()]));
+		for (const root of graph.visibleForest()) {
+			const node = root.canvasNode;
+			const centerX = node.x + node.width / 2;
+			const centerY = node.y + node.height / 2;
+			let owner = null;
+			for (const group of groups) {
+				if (
+					centerX < group.x || centerX > group.x + group.width ||
+					centerY < group.y || centerY > group.y + group.height
+				) continue;
+				if (
+					!owner ||
+					group.width * group.height < owner.width * owner.height
+				) owner = group;
 			}
-			if (contained.size === 0) continue;
-			let minX = Infinity,
-				minY = Infinity,
-				maxX = -Infinity,
-				maxY = -Infinity;
-			for (const node of contained) {
+			if (!owner) continue;
+			contained.get(owner.id).add(node);
+			for (const descendant of graph.descendantsOf(node))
+				contained.get(owner.id).add(descendant);
+		}
+		let changed = false;
+		for (const group of groups) {
+			const nodes = contained.get(group.id);
+			if (!nodes || nodes.size === 0) continue;
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const node of nodes) {
 				minX = Math.min(minX, node.x);
 				minY = Math.min(minY, node.y);
 				maxX = Math.max(maxX, node.x + node.width);
 				maxY = Math.max(maxY, node.y + node.height);
 			}
-			const newX = minX - PADDING;
-			const newY = minY - PADDING;
-			const newW = maxX - minX + PADDING * 2;
-			const newH = maxY - minY + PADDING * 2;
-			if (newX !== gx || newY !== gy || newW !== gw || newH !== gh) {
-				(_a = group.nodeEl) == null
-					? void 0
-					: _a.addClass('mindmap-group-animating');
-				group.moveAndResize({
-					x: newX,
-					y: newY,
-					width: newW,
-					height: newH
-				});
-				changed = true;
-			}
-		}
-		if (changed) {
-			canvas.requestSave();
+			const next = {
+				x: minX - PADDING,
+				y: minY - PADDING,
+				width: maxX - minX + PADDING * 2,
+				height: maxY - minY + PADDING * 2
+			};
+			if (
+				next.x === group.x && next.y === group.y &&
+				next.width === group.width && next.height === group.height
+			) continue;
+			group.nodeEl?.addClass('mindmap-group-animating');
+			group.moveAndResize(next);
+			const version = (this.groupAnimationVersions.get(group) || 0) + 1;
+			this.groupAnimationVersions.set(group, version);
 			this.trackedTimeout(() => {
-				var _a2;
-				for (const groupId of groupIds) {
-					const group = canvas.nodes.get(groupId);
-					(_a2 = group == null ? void 0 : group.nodeEl) == null
-						? void 0
-						: _a2.removeClass('mindmap-group-animating');
-				}
+				if (this.groupAnimationVersions.get(group) !== version) return;
+				if (this.interceptedCanvas !== canvas || !this.isMindmapCanvas(canvas))
+					return;
+				group.nodeEl?.removeClass('mindmap-group-animating');
 			}, 260);
+			changed = true;
 		}
+		if (changed) canvas.requestSave();
 	}
 	getPreviewSizer(node) {
 		return this.liveSizing.getPreviewSizer(node);
@@ -6084,438 +4000,226 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * can make that subtree overlap its siblings. Other root maps stay untouched.
 	 */
 	relayoutAffectedBranches(canvas, nodes, layoutOptions = {}) {
-		const forest = buildForest(canvas);
-		const rootIds = /* @__PURE__ */ new Set();
-		for (const node of nodes) {
-			let tree = findTreeForNode(forest, node.id);
-			if (!tree) continue;
-			while (tree.parent) tree = tree.parent;
-			rootIds.add(tree.canvasNode.id);
-		}
+		const rootIds = new Set(
+			nodes
+				.map((node) => this.canvasApi.getAffectedRootNode(canvas, node))
+				.filter(Boolean)
+				.map((root) => root.id)
+		);
 		for (const rootId of rootIds)
 			this.layoutEngine.layoutChildren(canvas, rootId, null, layoutOptions);
 		this.updateGroupBounds(canvas);
 	}
-	handleAutoAdjustDrag(canvas, node) {
-		if (!this.isMindmapCanvas(canvas) || !this.isAutoAdjustCanvas(canvas))
-			return;
-		this.reflowCompleteCanvas(canvas);
-	}
-	reflowCompleteCanvas(canvas) {
-		reflowCanvasAfterMove(canvas, {
-			isMindmap: (candidate) => this.isMindmapCanvas(candidate),
-			layout: this.layoutEngine,
-			updateGroups: (candidate) => this.updateGroupBounds(candidate),
-			autoColor: () => this.settings.autoColor,
-			colors: this.branchColors,
-			markOrderDirty: (candidate) =>
-				this.markMarkdownOrderDirty(candidate)
-		});
+	applyStructuralMutation(canvas, changedNodes = [], options = {}) {
+		if (!canvas || !this.isMindmapCanvas(canvas))
+			return { ok: false, reason: 'ineligible', rootIds: [] };
+		this.canvasApi.invalidateEdgeIndex();
+		MindmapActions.syncCollapsedVisibility(canvas);
+		this.markMarkdownOrderDirty(canvas);
+		const rootIds = [...new Set(
+			changedNodes
+				.map((node) => this.canvasApi.getAffectedRootNode(canvas, node))
+				.filter(Boolean)
+				.map((root) => root.id)
+		)];
+		if (options.layout !== false) {
+			if (rootIds.length > 0) {
+				for (const rootId of rootIds)
+					this.layoutEngine.layoutChildren(canvas, rootId, null, options.layoutOptions || {});
+			} else {
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
+			}
+		}
+		if (this.settings.autoColor && options.color !== false)
+			this.branchColors.applyColors(canvas);
+		this.updateGroupBounds(canvas);
+		this.updateNodeTypeAttributes(canvas);
+		if (options.save !== false) canvas.requestSave();
+		return { ok: true, rootIds };
 	}
 	getAutoNodeSize(node) {
 		return this.liveSizing.measure(node);
-	}
-	/**
-	 * Resize text cards in both dimensions for automatic mindmap layout.
-	 */
-	resizeNodes(canvas, nodes) {
-		return this.liveSizing.resizeNodes(canvas, nodes);
 	}
 	/**
 	 * Render Markdown off-screen so virtualized Canvas cards can be measured
 	 * before they have ever appeared in the viewport.
 	 */
 	async measureMarkdownNodesOffscreen(canvas, nodes, isCurrent) {
-		var _a, _b, _c;
-		const MarkdownRenderer = import_obsidian5.MarkdownRenderer;
-		const Component = import_obsidian5.Component;
 		if (
-			typeof document === 'undefined' ||
-			!document.body ||
-			!MarkdownRenderer ||
-			typeof MarkdownRenderer.renderMarkdown !== 'function' ||
-			!Component
-		)
-			return /* @__PURE__ */ new Map();
+			typeof document === 'undefined' || !document.body ||
+			typeof import_obsidian5.MarkdownRenderer?.renderMarkdown !== 'function' ||
+			!import_obsidian5.Component
+		) return new Map();
 		let host = null;
 		let component = null;
-		const sourcePath =
-			this.getMarkdownSyncPath(canvas.getData()) ||
-			((_b = (_a = canvas.view) == null ? void 0 : _a.file) == null
-				? void 0
-				: _b.path) ||
-			'';
-		const minWidth = Math.max(
-			80,
-			Math.min(this.settings.minNodeWidth, this.settings.maxNodeWidth)
-		);
+		const sourcePath = this.verifiedMarkdownLinks.get(canvas.view?.file?.path)?.path || canvas.view?.file?.path || '';
+		const minWidth = Math.max(80, Math.min(this.settings.minNodeWidth, this.settings.maxNodeWidth));
 		const maxWidth = Math.max(minWidth, this.settings.maxNodeWidth);
 		const fallbackHeight = this.settings.defaultNodeHeight;
 		const maxHeight = this.settings.maxNodeHeight;
-		const entries = [];
-		const findCalibrationNode = () =>
-			Array.from(canvas.nodes.values()).find((node) => {
-				const sizer = this.liveSizing.getPreviewSizer(node);
-				const preview =
-					sizer == null
-						? void 0
-						: sizer.closest('.markdown-preview-view');
-				return !!(preview && preview.parentElement && node.contentEl);
-			}) || null;
-		const waitForCalibrationNode = () =>
-			new Promise((resolve) => {
-				let settled = false;
-				let observer = null;
-				let interval = null;
-				let timeout = null;
-				const finish = (node) => {
-					if (settled) return;
-					settled = true;
-					if (observer) observer.disconnect();
-					if (interval !== null) clearInterval(interval);
-					if (timeout !== null) clearTimeout(timeout);
-					resolve(node);
-				};
-				const check = () => {
-					if (!isCurrent()) {
-						finish(null);
-						return;
-					}
-					const node = findCalibrationNode();
-					if (node) finish(node);
-				};
-				if (
-					canvas.wrapperEl &&
-					typeof MutationObserver !== 'undefined'
-				) {
-					observer = new MutationObserver(check);
-					observer.observe(canvas.wrapperEl, {
-						childList: true,
-						subtree: true
-					});
+		const findCalibrationNode = () => Array.from(canvas.nodes.values()).find((node) => {
+			const sizer = this.liveSizing.getPreviewSizer(node);
+			const preview = sizer?.closest?.('.markdown-preview-view');
+			return Boolean(preview?.parentElement && node.contentEl);
+		}) || null;
+		const waitForCalibrationNode = () => new Promise((resolve) => {
+			let settled = false;
+			let observer = null;
+			let interval = null;
+			let timeout = null;
+			const finish = (node) => {
+				if (settled) return;
+				settled = true;
+				observer?.disconnect();
+				if (interval !== null) clearInterval(interval);
+				if (timeout !== null) clearTimeout(timeout);
+				resolve(node);
+			};
+			const check = () => {
+				if (!isCurrent()) return finish(null);
+				const node = findCalibrationNode();
+				if (node) finish(node);
+			};
+			if (canvas.wrapperEl && typeof MutationObserver !== 'undefined') {
+				observer = new MutationObserver(check);
+				observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
+			}
+			interval = setInterval(check, 80);
+			timeout = setTimeout(() => finish(null), 1200);
+			check();
+		});
+		const nextFrame = () => new Promise((resolve) => {
+			const frameWindow = host?.ownerDocument?.defaultView;
+			if (typeof frameWindow?.requestAnimationFrame === 'function') frameWindow.requestAnimationFrame(() => resolve());
+			else if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+			else setTimeout(resolve, 0);
+		});
+		const makeInert = (element) => {
+			element.setAttribute?.('inert', '');
+			element.setAttribute?.('aria-hidden', 'true');
+			for (const media of [element, ...(element.querySelectorAll?.('iframe,object,embed,video,audio,img') || [])]) {
+				if (media.tagName === 'IFRAME') {
+					media.setAttribute('sandbox', '');
+					media.setAttribute('loading', 'lazy');
+				} else if (media.tagName === 'VIDEO' || media.tagName === 'AUDIO') {
+					media.setAttribute('preload', 'none');
+					media.setAttribute('controls', 'false');
+					media.setAttribute('autoplay', 'false');
 				}
-				interval = setInterval(check, 80);
-				timeout = setTimeout(() => finish(null), 1200);
-				check();
-			});
+			}
+		};
 		try {
-			// Canvas virtualizes Markdown previews. Wait for one genuine renderer,
-			// then use its own document so theme CSS, fonts and wrapping are exact.
-			const calibrationNode =
-				findCalibrationNode() || (await waitForCalibrationNode());
-			if (!calibrationNode) return /* @__PURE__ */ new Map();
-			const calibrationSizer =
-				this.liveSizing.getPreviewSizer(calibrationNode);
-			const measurementDocument =
-				(calibrationSizer == null
-					? void 0
-					: calibrationSizer.ownerDocument) || document;
-			if (!measurementDocument.body) return /* @__PURE__ */ new Map();
-			const calibrationCard = calibrationSizer.closest(
-				'.markdown-preview-view'
-			);
+			const calibrationNode = findCalibrationNode() || await waitForCalibrationNode();
+			if (!calibrationNode) return new Map();
+			const calibrationSizer = this.liveSizing.getPreviewSizer(calibrationNode);
+			const measurementDocument = calibrationSizer?.ownerDocument || document;
+			if (!measurementDocument.body) return new Map();
+			const calibrationCard = calibrationSizer.closest('.markdown-preview-view');
 			const calibrationEmbedContent = calibrationCard.parentElement;
-			const calibrationContent =
-				calibrationCard.closest('.canvas-node-content') ||
-				calibrationNode.contentEl;
-			if (!calibrationEmbedContent || !calibrationContent)
-				return /* @__PURE__ */ new Map();
-			const calibrationChromeHeight =
-				this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
-			const calibrationChromeWidth =
-				this.liveSizing.getPreviewChromeWidth(calibrationNode) || 0;
+			const calibrationContent = calibrationCard.closest('.canvas-node-content') || calibrationNode.contentEl;
+			if (!calibrationEmbedContent || !calibrationContent) return new Map();
+			const calibrationChromeHeight = this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
+			const calibrationChromeWidth = this.liveSizing.getPreviewChromeWidth(calibrationNode) || 0;
 			host = measurementDocument.createElement('div');
 			host.className = 'tomindmap-measurement-host';
-			Object.assign(host.style, {
-				position: 'fixed',
-				left: '-100000px',
-				top: '0',
-				visibility: 'hidden',
-				pointerEvents: 'none',
-				display: 'block'
-			});
+			Object.assign(host.style, { position: 'fixed', left: '-100000px', top: '0', visibility: 'hidden', pointerEvents: 'none', display: 'block' });
 			measurementDocument.body.appendChild(host);
-			component = new Component();
-			if (typeof component.load === 'function') component.load();
-			const nextFrame = () =>
-				new Promise((resolve) => {
-					const frameWindow = measurementDocument.defaultView;
-					if (
-						frameWindow &&
-						typeof frameWindow.requestAnimationFrame === 'function'
-					)
-						frameWindow.requestAnimationFrame(() => resolve());
-					else if (typeof requestAnimationFrame === 'function')
-						requestAnimationFrame(() => resolve());
-					else setTimeout(resolve, 0);
-				});
-			const batchSize = 32;
-			for (let start = 0; start < nodes.length; start += batchSize) {
-				if (!isCurrent()) return /* @__PURE__ */ new Map();
-				const batch = nodes.slice(start, start + batchSize);
-				await Promise.all(
-					batch.map(async (node) => {
-						const estimated = this.getAutoNodeSize(node);
-						const targetWidth = Math.max(
-							minWidth,
-							Math.min(
-								maxWidth,
-								Math.max(Number(node.width) || 0, estimated.width)
-							)
-						);
-						const initialHeight = String(node.text || '').trim()
-							? Math.max(1, Number(estimated.floorHeight) || 0)
-							: fallbackHeight;
-						const shell = measurementDocument.createElement('div');
-						shell.className =
-							'canvas-node tomindmap-measurement-node';
-						Object.assign(shell.style, {
-							position: 'relative',
-							display: 'block',
-							width: `${targetWidth}px`,
-							height: 'auto',
-							minHeight: '0',
-							overflow: 'visible'
-						});
-						shell.style.setProperty(
-							'--canvas-node-width',
-							`${targetWidth}px`
-						);
-						const content = calibrationContent.cloneNode(false);
-						content.removeAttribute('id');
-						content.removeAttribute('style');
-						content.classList.add(
-							'canvas-node-content',
-							'markdown-embed'
-						);
-						Object.assign(content.style, {
-							width: '100%',
-							height: 'auto',
-							minHeight: '0',
-							overflow: 'visible',
-							position: 'relative'
-						});
-						const embedContent =
-							calibrationEmbedContent.cloneNode(false);
-						embedContent.removeAttribute('id');
-						embedContent.removeAttribute('style');
-						embedContent.classList.add('markdown-embed-content');
-						embedContent.style.height = 'auto';
-						embedContent.style.minHeight = '0';
-						embedContent.style.overflow = 'visible';
-						const card = calibrationCard
-							? calibrationCard.cloneNode(false)
-							: measurementDocument.createElement('div');
-						card.removeAttribute('id');
-						card.removeAttribute('style');
-						card.classList.add(
-							'markdown-preview-view',
-							'markdown-rendered'
-						);
-						card.style.height = 'auto';
-						card.style.minHeight = '0';
-						card.style.overflow = 'visible';
-						const sizer = calibrationSizer.cloneNode(false);
-						sizer.removeAttribute('id');
-						sizer.removeAttribute('style');
-						sizer.classList.add('markdown-preview-sizer');
-						sizer.style.boxSizing = 'border-box';
-						sizer.style.height = 'auto';
-						sizer.style.minHeight = '0';
-						sizer.style.overflow = 'visible';
-						sizer.style.padding = 'var(--size-4-1)';
-						card.appendChild(sizer);
-						embedContent.appendChild(card);
-						content.appendChild(embedContent);
-						shell.appendChild(content);
-						host.appendChild(shell);
-						await MarkdownRenderer.renderMarkdown(
-							String(node.text || ''),
-							sizer,
-							sourcePath,
-							component
-						);
-						this.liveSizing.applyPreviewGeometry(sizer);
-						entries.push({
-							node,
-							shell,
-							card,
-							content,
-							embedContent,
-							sizer,
-							estimated,
-							targetWidth,
-							targetHeight: initialHeight
-						});
-					})
-				);
-				await nextFrame();
-			}
-			if ((_c = measurementDocument.fonts) == null ? void 0 : _c.ready) {
-				await Promise.race([
-					measurementDocument.fonts.ready,
-					new Promise((resolve) => setTimeout(resolve, 500))
-				]);
-			}
-			await nextFrame();
-			if (!isCurrent()) return /* @__PURE__ */ new Map();
-			// Tables deliberately clip/wrap their cells at the current card width,
-			// which hides their intrinsic width from ordinary scroll measurements.
-			// Probe rigid content at max-content in the hidden clone, then restore
-			// normal Canvas wrapping before the final height pass.
-			const probedStyles = [];
-			const probeStyle = (element, declarations) => {
-				probedStyles.push([element, element.getAttribute('style')]);
-				for (const [property, value] of declarations)
-					element.style.setProperty(property, value, 'important');
-			};
-			for (const entry of entries) {
-				const { shell, content, embedContent, card, sizer, estimated } =
-					entry;
-				for (const element of Array.from(
-					sizer.querySelectorAll('table')
-				)) {
-					probeStyle(element, [
-						['width', 'max-content'],
-						['max-width', 'none'],
-						['table-layout', 'auto']
-					]);
-					for (const cell of Array.from(
-						element.querySelectorAll('th, td')
-					)) {
-						probeStyle(cell, [
-							['max-width', 'none'],
-							['white-space', 'nowrap'],
-							['overflow', 'visible'],
-							['text-overflow', 'clip']
-						]);
+			component = new import_obsidian5.Component();
+			component.load?.();
+			if (measurementDocument.fonts?.ready)
+				await Promise.race([measurementDocument.fonts.ready, new Promise((resolve) => setTimeout(resolve, 500))]);
+			const result = new Map();
+			for (const node of nodes) {
+				if (!isCurrent()) return result;
+				let shell = null;
+				try {
+					const estimated = this.getAutoNodeSize(node);
+					const targetWidth = Math.max(minWidth, Math.min(maxWidth, Math.max(Number(node.width) || 0, estimated.width)));
+					const initialHeight = String(node.text || '').trim() ? Math.max(1, Number(estimated.floorHeight) || 0) : fallbackHeight;
+					shell = measurementDocument.createElement('div');
+					shell.className = 'canvas-node tomindmap-measurement-node';
+					Object.assign(shell.style, { position: 'relative', display: 'block', width: `${targetWidth}px`, height: 'auto', minHeight: '0', overflow: 'visible' });
+					shell.style.setProperty('--canvas-node-width', `${targetWidth}px`);
+					const content = calibrationContent.cloneNode(false);
+					content.removeAttribute('id');
+					content.removeAttribute('style');
+					content.classList.add('canvas-node-content', 'markdown-embed');
+					Object.assign(content.style, { width: '100%', height: 'auto', minHeight: '0', overflow: 'visible', position: 'relative' });
+					const embedContent = calibrationEmbedContent.cloneNode(false);
+					embedContent.removeAttribute('id');
+					embedContent.removeAttribute('style');
+					embedContent.classList.add('markdown-embed-content');
+					Object.assign(embedContent.style, { height: 'auto', minHeight: '0', overflow: 'visible' });
+					const card = calibrationCard.cloneNode(false);
+					card.removeAttribute('id');
+					card.removeAttribute('style');
+					card.classList.add('markdown-preview-view', 'markdown-rendered');
+					Object.assign(card.style, { height: 'auto', minHeight: '0', overflow: 'visible' });
+					const sizer = calibrationSizer.cloneNode(false);
+					sizer.removeAttribute('id');
+					sizer.removeAttribute('style');
+					sizer.classList.add('markdown-preview-sizer');
+					Object.assign(sizer.style, { boxSizing: 'border-box', height: 'auto', minHeight: '0', overflow: 'visible', padding: 'var(--size-4-1)' });
+					card.appendChild(sizer);
+					embedContent.appendChild(card);
+					content.appendChild(embedContent);
+					shell.appendChild(content);
+					makeInert(shell);
+					host.appendChild(shell);
+					await import_obsidian5.MarkdownRenderer.renderMarkdown(String(node.text || ''), sizer, sourcePath, component);
+					this.liveSizing.applyPreviewGeometry(sizer);
+					await nextFrame();
+					const probed = [];
+					const probe = (element, declarations) => {
+						probed.push([element, element.getAttribute('style')]);
+						for (const [property, value] of declarations) element.style.setProperty(property, value, 'important');
+					};
+					for (const table of sizer.querySelectorAll('table')) {
+						probe(table, [['width', 'max-content'], ['max-width', 'none'], ['table-layout', 'auto']]);
+						for (const cell of table.querySelectorAll('th, td'))
+							probe(cell, [['max-width', 'none'], ['white-space', 'nowrap'], ['overflow', 'visible'], ['text-overflow', 'clip']]);
 					}
+					await nextFrame();
+					let intrinsicWidth = estimated.contentKind === 'text' ? this.liveSizing.measureIntrinsicWidth(sizer) + calibrationChromeWidth : 0;
+					for (const element of [sizer, ...sizer.querySelectorAll('*')]) {
+						const tagName = String(element.tagName || '').toLowerCase();
+						const clientWidth = Number(element.clientWidth || 0);
+						const scrollWidth = Number(element.scrollWidth || 0);
+						if (clientWidth > 0 && scrollWidth > clientWidth + 1) intrinsicWidth = Math.max(intrinsicWidth, targetWidth + scrollWidth - clientWidth);
+						if (/^(?:table|img|video|audio|iframe|embed|object)$/.test(tagName)) intrinsicWidth = Math.max(intrinsicWidth, Number(element.scrollWidth || 0) + Math.max(0, targetWidth - Number(card.clientWidth || 0)), Number(element.offsetWidth || 0) + Math.max(0, targetWidth - Number(card.clientWidth || 0)));
+					}
+					for (const [element, styleText] of probed) {
+						if (styleText === null) element.removeAttribute('style');
+						else element.setAttribute('style', styleText);
+					}
+					let width = estimated.contentKind === 'text' ? Math.min(maxWidth, Math.max(minWidth, estimated.width)) : Math.min(maxWidth, Math.max(minWidth, estimated.width, Math.ceil(intrinsicWidth / 10) * 10 || 0));
+					shell.style.width = `${width}px`;
+					shell.style.setProperty('--canvas-node-width', `${width}px`);
+					for (let pass = 0; pass < 4; pass++) {
+						await nextFrame();
+						const overflow = this.liveSizing.measureHorizontalOverflow(card);
+						if (overflow <= 0 || width >= maxWidth) break;
+						const nextWidth = Math.min(maxWidth, width + Math.ceil(overflow));
+						if (nextWidth <= width) break;
+						width = nextWidth;
+						shell.style.width = `${width}px`;
+						shell.style.setProperty('--canvas-node-width', `${width}px`);
+					}
+					const intrinsicHeight = this.liveSizing.measureIntrinsicHeight(sizer);
+					const oneLineHeight = this.liveSizing.minimumTextHeight(sizer);
+					const height = Math.min(maxHeight, Math.max(oneLineHeight, intrinsicHeight || this.liveSizing.measureContentHeight(sizer) || fallbackHeight) + calibrationChromeHeight);
+					if (isCurrent()) result.set(node.id, { width: Math.round(width), height });
+				} finally {
+					shell?.remove();
 				}
-			}
-			if (probedStyles.length > 0) await nextFrame();
-			for (const entry of entries) {
-				const { card, sizer, estimated } = entry;
-				let intrinsicWidth =
-					estimated.contentKind === 'text'
-						? this.liveSizing.measureIntrinsicWidth(sizer) +
-							calibrationChromeWidth
-						: 0;
-				for (const element of [
-					sizer,
-					...Array.from(sizer.querySelectorAll('*'))
-				]) {
-					const tagName = String(element.tagName || '').toLowerCase();
-					const clientWidth = Number(element.clientWidth || 0);
-					const scrollWidth = Number(element.scrollWidth || 0);
-					if (clientWidth > 0 && scrollWidth > clientWidth + 1)
-						intrinsicWidth = Math.max(
-							intrinsicWidth,
-							entry.targetWidth + scrollWidth - clientWidth
-						);
-					if (
-						/^(?:table|img|video|audio|iframe|embed|object)$/.test(
-							tagName
-						)
-					)
-						intrinsicWidth = Math.max(
-							intrinsicWidth,
-							Number(element.scrollWidth || 0) +
-								Math.max(
-									0,
-									entry.targetWidth -
-										Number(card.clientWidth || 0)
-								),
-							Number(element.offsetWidth || 0) +
-								Math.max(
-									0,
-									entry.targetWidth -
-										Number(card.clientWidth || 0)
-								)
-						);
-				}
-				entry.intrinsicWidth = intrinsicWidth;
-			}
-			for (const [element, styleText] of probedStyles) {
-				if (styleText === null) element.removeAttribute('style');
-				else element.setAttribute('style', styleText);
-			}
-			for (const entry of entries) {
-				const { estimated, shell } = entry;
-				const width = estimated.contentKind === 'text'
-					? Math.min(maxWidth, Math.max(minWidth, estimated.width))
-					: Math.min(
-							maxWidth,
-							Math.max(
-								minWidth,
-								estimated.width,
-								Math.ceil(entry.intrinsicWidth / 10) * 10 || 0
-							)
-						);
-				entry.targetWidth = width;
-				shell.style.width = `${width}px`;
-				shell.style.setProperty('--canvas-node-width', `${width}px`);
-			}
-			// Resolve any remaining horizontal overflow after restoring the real
-			// wrapping rules. All cards advance together, so this remains batched.
-			for (let pass = 0; pass < 4; pass++) {
-				await nextFrame();
-				let grew = false;
-				for (const entry of entries) {
-					const overflow = this.liveSizing.measureHorizontalOverflow(
-						entry.card
-					);
-					if (overflow <= 0 || entry.targetWidth >= maxWidth)
-						continue;
-					const nextWidth = Math.min(
-						maxWidth,
-						entry.targetWidth + Math.ceil(overflow)
-					);
-					if (nextWidth <= entry.targetWidth) continue;
-					entry.targetWidth = nextWidth;
-					entry.shell.style.width = `${nextWidth}px`;
-					entry.shell.style.setProperty(
-						'--canvas-node-width',
-						`${nextWidth}px`
-					);
-					grew = true;
-				}
-				if (!grew) break;
-			}
-			await nextFrame();
-			const result = /* @__PURE__ */ new Map();
-			for (const { node, estimated, targetWidth, sizer } of entries) {
-				const width = Math.min(
-					maxWidth,
-					Math.max(
-						minWidth,
-						Math.round(targetWidth || estimated.width)
-					)
-				);
-				const intrinsicHeight =
-					this.liveSizing.measureIntrinsicHeight(sizer);
-				const oneLineHeight = this.liveSizing.minimumTextHeight(sizer);
-				const height = Math.min(
-					maxHeight,
-					Math.max(
-						oneLineHeight,
-						intrinsicHeight ||
-							this.liveSizing.measureContentHeight(sizer) ||
-							fallbackHeight
-					) + calibrationChromeHeight
-				);
-				result.set(node.id, { width, height });
 			}
 			return result;
 		} catch (error) {
-			console.error(
-				'ToMindMap: off-screen Markdown measurement failed',
-				error
-			);
-			return /* @__PURE__ */ new Map();
+			console.error('ToMindMap: off-screen Markdown measurement failed', error);
+			return new Map();
 		} finally {
-			if (component && typeof component.unload === 'function')
-				component.unload();
-			if (host) host.remove();
+			component?.unload?.();
+			host?.remove();
 		}
 	}
 	/**
@@ -6524,19 +4228,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * in one shared observer/timer queue and perform one coalesced final layout.
 	 */
 	resizeNodesWhenRendered(canvas, nodes, onSettled, layoutOptions = {}) {
+		if (!canvas || !this.isMindmapCanvas(canvas)) {
+			const result = {
+				status: SIZING_STATUS.CANCELLED,
+				canvas,
+				requestedIds: [],
+				measurements: new Map()
+			};
+			onSettled?.(result);
+			return Promise.resolve(result);
+		}
 		return this.liveSizing.resizeNodesWhenRendered(
 			canvas,
 			nodes,
 			onSettled,
 			layoutOptions
 		);
-	}
-	/**
-	 * After a width change, use the re-rendered preview for a precise height and
-	 * reflow only the roots that contained adjusted nodes.
-	 */
-	resizeNodesRetry(canvas, nodes) {
-		return this.liveSizing.resizeNodesRetry(canvas, nodes);
 	}
 	finishInsertNode(canvas, newNode, nearNode) {
 		if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
@@ -6552,11 +4259,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.branchColors.applyColors(canvas);
 		}
 		this.updateGroupBounds(canvas);
-		this.canvasApi.selectAndEdit(
-			canvas,
-			newNode,
-			this.settings.navigationZoomPadding
-		);
+		this.selectAndEditTracked(canvas, newNode, this.settings.navigationZoomPadding);
 	}
 	async showOutline(canvas, focusSearch = false) {
 		let leaf =
@@ -6596,6 +4299,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		(_a = parent.selectTab) == null ? void 0 : _a.call(parent, leaf);
 	}
+	decodeMarkdownDocument(markdown, options = {}) {
+		return MarkdownMindMapCodec.decodeMarkdownMindMap(markdown, {
+			budgets: MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS,
+			...options
+		});
+	}
+	layoutMarkdownDocument(markdown, options = {}) {
+		return MarkdownMindMapCodec.layoutMarkdownMindMap(markdown, {
+			...this.markdownLayoutOptions(),
+			...options,
+			layout: layoutTree
+		});
+	}
+	encodeMarkdownDocument(canvas, options = {}) {
+		return MarkdownMindMapCodec.encodeMindMapMarkdown(canvas, {
+			...this.settings,
+			...options
+		});
+	}
 	markdownLayoutOptions() {
 		return {
 			nodeWidth: this.settings.defaultNodeWidth,
@@ -6608,6 +4330,206 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	getMarkdownSyncPath(data) {
 		const sync = data && data.mindmapMarkdownSync;
 		return sync && typeof sync.path === 'string' ? sync.path : '';
+	}
+	async confirmLegacyLink(kind, link) {
+		const target = kind === 'parent' ? link?.canvas : link?.path;
+		return new Promise((resolve) => {
+			const modal = new import_obsidian5.Modal(this.app);
+			let settled = false;
+			const finish = (value) => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+				modal.close();
+			};
+			modal.onOpen = () => {
+				modal.contentEl.empty();
+				modal.contentEl.createEl('h2', { text: 'Confirm legacy mind-map link' });
+				modal.contentEl.createEl('p', {
+					text: `Allow ToMindMap to claim ${target || 'this untrusted link'}? A private ownership record and target metadata will be written only after confirmation.`
+				});
+				const actions = modal.contentEl.createDiv({ cls: 'modal-button-container' });
+				const cancel = actions.createEl('button', { text: 'Cancel' });
+				const confirm = actions.createEl('button', { text: 'Adopt link', cls: 'mod-cta' });
+				cancel.addEventListener('click', () => finish(false));
+				confirm.addEventListener('click', () => finish(true));
+			};
+			modal.open();
+		});
+	}
+	restoreOwnershipSnapshot(records = []) {
+		const previousPaths = new Set(records.map((record) => record.canvasPath));
+		for (const canvasPath of new Set(this.markdownOwnership.records.map((record) => record.canvasPath))) {
+			if (!previousPaths.has(canvasPath)) this.markdownOwnership.removeCanvas(canvasPath);
+		}
+		for (const record of records) this.markdownOwnership.upsert(record, { replaceExisting: true });
+	}
+	restoreOwnershipRecords(canvasPath, records = []) {
+		this.markdownOwnership.removeCanvas(canvasPath);
+		for (const record of records) this.markdownOwnership.upsert(record, { replaceExisting: true });
+	}
+	async resolveMarkdownLinkForCanvas(canvas, { confirmLegacy = false } = {}) {
+		const data = canvas?.getData?.() || {};
+		const rawLink = data.mindmapMarkdownSync;
+		const canvasPath = canvas?.view?.file?.path;
+		if (!rawLink || !canvasPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		let resolved = await resolveMarkdownSyncLink(
+			rawLink,
+			canvasPath,
+			this.markdownOwnership,
+			this.app.vault
+		);
+		if (!resolved.ok && resolved.reason === LINK_REASON.NEEDS_CONFIRMATION && confirmLegacy) {
+			if (!(await this.confirmLegacyLink('markdown', rawLink)))
+				return resolved;
+			const adopted = await adoptMarkdownSyncLink(
+				rawLink,
+				canvasPath,
+				this.markdownOwnership,
+				this.app.vault,
+				{ confirmed: true }
+			);
+			if (!adopted.ok) return adopted;
+			const before = await this.app.vault.cachedRead(adopted.targetPatch.file);
+			const previousRecords = this.markdownOwnership.recordsForCanvas(canvasPath);
+			const previousLink = data.mindmapMarkdownSync;
+			let targetPatched = false;
+			try {
+				await this.app.vault.process(adopted.targetPatch.file, (current) => {
+					if (current !== before) throw new Error('Markdown target changed during adoption');
+					targetPatched = true;
+					return adopted.targetPatch.markdown;
+				});
+				const saved = this.markdownOwnership.upsert(adopted.registryRecord);
+				if (!saved.ok) throw new Error('Ownership registry rejected the adoption');
+				await this.persistPluginData();
+				data.mindmapMarkdownSync = adopted.link;
+				canvas.setData(data);
+				canvas.requestSave();
+				await flushCanvasView(canvas, this.app.vault);
+				if (!this.indexMarkdownLink(canvasPath, adopted.link.path)) {
+					throw new Error('Markdown sync index is full');
+				}
+				this.verifiedMarkdownLinks.set(canvasPath, adopted.link);
+				resolved = { ok: true, link: adopted.link };
+			} catch (error) {
+				if (targetPatched) {
+					try {
+						await this.app.vault.process(adopted.targetPatch.file, (current) =>
+							current === adopted.targetPatch.markdown ? before : current
+						);
+					} catch (_) {}
+				}
+				this.restoreOwnershipRecords(canvasPath, previousRecords);
+				try { await this.persistPluginData(); } catch (_) {}
+				try {
+					data.mindmapMarkdownSync = previousLink;
+					canvas.setData(data);
+					canvas.requestSave?.();
+					await flushCanvasView(canvas, this.app.vault);
+				} catch (_) {}
+				console.warn('ToMindMap: legacy Markdown adoption was not completed', error);
+				return { ok: false, reason: LINK_REASON.FAILED, error };
+			}
+		}
+		if (resolved.ok) {
+			if (!this.indexMarkdownLink(canvasPath, resolved.link.path))
+				return { ok: false, reason: LINK_REASON.FAILED };
+			this.verifiedMarkdownLinks.set(canvasPath, resolved.link);
+		}
+		return resolved;
+	}
+	async resolveParentLinkForCanvas(canvas, parentLink, { confirmLegacy = false } = {}) {
+		const childPath = canvas?.view?.file?.path;
+		if (!parentLink || !childPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		let resolved = await resolveParentLink(
+			parentLink,
+			childPath,
+			this.markdownOwnership,
+			this.app.vault
+		);
+		if (!resolved.ok && resolved.reason === LINK_REASON.NEEDS_CONFIRMATION && confirmLegacy) {
+			if (!(await this.confirmLegacyLink('parent', parentLink))) return resolved;
+			const adopted = await adoptParentLink(
+				parentLink,
+				childPath,
+				this.markdownOwnership,
+				this.app.vault,
+				{ confirmed: true }
+			);
+			if (!adopted.ok) return adopted;
+			const parentOpen = this.getOpenCanvasByPath(adopted.targetPatch.canvas);
+			const applyParentPatch = (raw) => {
+				const parentData = JSON.parse(raw);
+				const card = (parentData.nodes || []).find((node) => node.id === adopted.targetPatch.nodeId);
+				if (!card) return raw;
+				card.unknownData = adopted.targetPatch.unknownDataPatch;
+				return JSON.stringify(parentData, null, '\t');
+			};
+			const before = await this.app.vault.cachedRead(adopted.targetPatch.file);
+			const previousRecords = this.markdownOwnership.recordsForCanvas(childPath);
+			const childDataBefore = JSON.parse(JSON.stringify(canvas.getData()));
+			const parentDataBefore = parentOpen?.getData?.();
+			const parentCardBefore = parentOpen?.nodes?.get(adopted.targetPatch.nodeId)?.unknownData;
+			let parentPatched = false;
+			let parentAfter = null;
+			try {
+				if (parentOpen) {
+					const parentData = parentOpen.getData();
+					const card = parentOpen.nodes.get(adopted.targetPatch.nodeId);
+					if (!card) throw new Error('Parent card disappeared');
+					card.unknownData = adopted.targetPatch.unknownDataPatch;
+					parentOpen.setData(parentData);
+					parentOpen.requestSave();
+					await flushCanvasView(parentOpen, this.app.vault);
+					parentPatched = true;
+				} else {
+					await this.app.vault.process(adopted.targetPatch.file, (raw) => {
+						if (raw !== before) throw new Error('Parent Canvas changed during adoption');
+						parentPatched = true;
+						parentAfter = applyParentPatch(raw);
+						return parentAfter;
+					});
+				}
+				const saved = this.markdownOwnership.upsert(adopted.registryRecord);
+				if (!saved.ok) throw new Error('Ownership registry rejected the adoption');
+				await this.persistPluginData();
+				const childData = canvas.getData();
+				childData.mindmapParent = adopted.link;
+				canvas.setData(childData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+				resolved = { ok: true, link: adopted.link };
+			} catch (error) {
+				if (parentPatched && !parentOpen) {
+					try {
+						await this.app.vault.process(adopted.targetPatch.file, (current) =>
+							current === parentAfter ? before : current
+						);
+					} catch (_) {}
+				}
+				if (parentOpen && parentDataBefore) {
+					try {
+						parentOpen.setData(parentDataBefore);
+						if (parentOpen.nodes?.has(adopted.targetPatch.nodeId))
+							parentOpen.nodes.get(adopted.targetPatch.nodeId).unknownData = parentCardBefore;
+						parentOpen.requestSave?.();
+						await flushCanvasView(parentOpen, this.app.vault);
+					} catch (_) {}
+				}
+				try {
+					canvas.setData(childDataBefore);
+					canvas.requestSave?.();
+					await flushCanvasView(canvas, this.app.vault);
+				} catch (_) {}
+				this.restoreOwnershipRecords(childPath, previousRecords);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: legacy parent-link adoption was not completed', error);
+				return { ok: false, reason: LINK_REASON.FAILED, error };
+			}
+		}
+		if (resolved.ok) this.verifiedParentLinks.set(childPath, resolved.link);
+		return resolved;
 	}
 	getOpenCanvasByPath(path) {
 		for (const leaf of this.app.workspace.getLeavesOfType('canvas')) {
@@ -6623,92 +4545,86 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		return null;
 	}
 	getIndexedMarkdownPath(canvasPath) {
-		for (const [markdownPath, canvasPaths] of this.markdownSyncIndex) {
-			if (canvasPaths.has(canvasPath)) return markdownPath;
-		}
-		return '';
+		return this.markdownSyncIndex.markdownFor(canvasPath);
 	}
 	indexMarkdownLink(canvasPath, markdownPath) {
-		this.unindexCanvas(canvasPath);
-		if (!markdownPath) return;
-		let canvasPaths = this.markdownSyncIndex.get(markdownPath);
-		if (!canvasPaths) {
-			canvasPaths = /* @__PURE__ */ new Set();
-			this.markdownSyncIndex.set(markdownPath, canvasPaths);
-		}
-		canvasPaths.add(canvasPath);
+		if (!canvasPath || !markdownPath) return false;
+		const previous = this.markdownSyncIndex.markdownFor(canvasPath);
+		const linked = this.markdownSyncIndex.link(canvasPath, markdownPath);
+		if (!linked && previous) this.markdownSyncIndex.link(canvasPath, previous);
+		return linked;
 	}
 	unindexCanvas(canvasPath) {
-		for (const [markdownPath, canvasPaths] of this.markdownSyncIndex) {
-			canvasPaths.delete(canvasPath);
-			if (canvasPaths.size === 0)
-				this.markdownSyncIndex.delete(markdownPath);
-		}
+		return this.markdownSyncIndex.unlink(canvasPath);
+	}
+	captureIndexSnapshot() {
+		return Array.from(this.markdownSyncIndex.markdownByCanvas.entries());
+	}
+	restoreIndexSnapshot(snapshot) {
+		this.markdownSyncIndex.clear();
+		for (const [canvasPath, markdownPath] of snapshot)
+			this.markdownSyncIndex.link(canvasPath, markdownPath);
 	}
 	async rebuildMarkdownSyncIndex() {
 		this.markdownSyncIndex.clear();
-		const canvasFiles = this.app.vault
-			.getFiles()
-			.filter((file) => file.extension === 'canvas');
-		await Promise.all(
-			canvasFiles.map(async (file) => {
+		if (!this.markdownOwnership?.isValid?.()) return 0;
+		const files = (this.app.vault.getFiles?.() || [])
+			.filter((file) => file instanceof import_obsidian5.TFile && file.extension === 'canvas')
+			.slice(0, 5000);
+		let indexed = 0;
+		for (let start = 0; start < files.length; start += 16) {
+			const batch = files.slice(start, start + 16);
+			const results = await Promise.all(batch.map(async (file) => {
 				try {
-					const data = JSON.parse(
-						await this.app.vault.cachedRead(file)
+					const data = JSON.parse(await this.app.vault.cachedRead(file));
+					const rawLink = data?.mindmapMarkdownSync;
+					if (!rawLink || typeof rawLink !== 'object') return false;
+					const resolved = await resolveMarkdownSyncLink(
+						rawLink,
+						file.path,
+						this.markdownOwnership,
+						this.app.vault
 					);
-					const markdownPath = this.getMarkdownSyncPath(data);
-					if (markdownPath)
-						this.indexMarkdownLink(file.path, markdownPath);
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not inspect sync metadata in ${file.path}`,
-						error
-					);
+					if (!resolved.ok) return false;
+					return this.indexMarkdownLink(file.path, resolved.link.path);
+				} catch (_) {
+					return false;
 				}
-			})
-		);
+			}));
+			for (const result of results) if (result) indexed++;
+		}
+		return indexed;
 	}
 	scheduleCanvasToMarkdown(canvas) {
 		if (this.syncApplyingCanvas.has(canvas)) return;
-		const file = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (!file || !markdownPath) return;
-		// A local Canvas mutation is newer than any queued Markdown reapply.
-		// Cancel that stale direction before it can reconcile the just-added node
-		// out of the Canvas during the 350ms Canvas-to-Markdown debounce.
-		const pendingMarkdownApply =
-			this.markdownModifyTimers.get(markdownPath);
-		if (pendingMarkdownApply !== undefined) {
-			clearTimeout(pendingMarkdownApply);
-			this.markdownModifyTimers.delete(markdownPath);
-		}
-		const previous = this.markdownSyncTimers.get(file.path);
-		if (previous) clearTimeout(previous);
-		const timer = setTimeout(() => {
-			this.markdownSyncTimers.delete(file.path);
-			void this.writeCanvasToLinkedMarkdown(canvas);
-		}, 350);
-		this.markdownSyncTimers.set(file.path, timer);
+		void (async () => {
+			try {
+				const resolved = await this.resolveMarkdownLinkForCanvas(canvas);
+				if (!resolved.ok) return;
+				const file = canvas.view?.file;
+				if (!file) return;
+				const path = resolved.link.path;
+				const pending = this.markdownModifyTimers.get(path);
+				if (pending !== undefined) {
+					clearTimeout(pending);
+					this.markdownModifyTimers.delete(path);
+				}
+				void this.markdownSyncCoordinator.schedule(path, () =>
+					this.writeCanvasToLinkedMarkdown(canvas, resolved.link)
+				);
+			} catch (error) {
+				console.warn('ToMindMap: could not schedule Canvas-to-Markdown sync', error);
+			}
+		})();
 	}
-	flushCanvasToMarkdown(canvas) {
+	async flushCanvasToMarkdown(canvas) {
 		const file = canvas?.view?.file;
-		if (!file || !this.getMarkdownSyncPath(canvas.getData()))
-			return Promise.resolve();
-		const pending = this.markdownSyncTimers.get(file.path);
-		if (pending !== void 0) {
-			clearTimeout(pending);
-			this.markdownSyncTimers.delete(file.path);
-		}
-		const previous =
-			this.immediateMarkdownWrites.get(canvas) || Promise.resolve();
-		const write = previous
-			.catch(() => {})
-			.then(() => this.writeCanvasToLinkedMarkdown(canvas));
-		this.immediateMarkdownWrites.set(canvas, write);
-		return write.finally(() => {
-			if (this.immediateMarkdownWrites.get(canvas) === write)
-				this.immediateMarkdownWrites.delete(canvas);
-		});
+		if (!file) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const resolved = await this.resolveMarkdownLinkForCanvas(canvas);
+		if (!resolved.ok) return resolved;
+		return this.markdownSyncCoordinator.flush(resolved.link.path, () =>
+			this.writeCanvasToLinkedMarkdown(canvas, resolved.link)
+		);
 	}
 	markMarkdownOrderDirty(canvas) {
 		if (canvas) this.markdownOrderDirty.add(canvas);
@@ -6742,213 +4658,191 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				changed = current !== content;
 				return changed ? content : current;
 			});
-			if (conflicted)
-				throw new Error(
-					`"${file.path}" changed while ToMindMap was preparing an update`
-				);
+			if (conflicted) {
+				this.clearMarkdownWriteGuard(file.path);
+				return { ok: false, reason: LINK_REASON.CONFLICT };
+			}
 			if (!changed) this.clearMarkdownWriteGuard(file.path);
+			return { ok: true };
 		} catch (error) {
 			this.clearMarkdownWriteGuard(file.path);
-			throw error;
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
-	async writeCanvasToLinkedMarkdown(canvas) {
-		const canvasFile = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (!canvasFile || !markdownPath) return;
-		const source = this.app.vault.getAbstractFileByPath(markdownPath);
+	async writeCanvasToLinkedMarkdown(canvas, resolvedLink = null) {
+		const canvasPath = canvas?.view?.file?.path;
+		if (!canvasPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(canvasFile instanceof import_obsidian5.TFile))
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		const owned = resolvedLink || await this.resolveMarkdownLinkForCanvas(canvas);
+		if (!owned?.ok) return owned || { ok: false, reason: LINK_REASON.NO_LINK };
+		const source = owned.link.file;
+		const markdownPath = owned.link.path;
 		if (!(source instanceof import_obsidian5.TFile)) {
 			await this.detachMarkdownSync(canvas, false);
-			new import_obsidian5.Notice(
-				'Markdown sync detached because the linked file no longer exists'
-			);
-			return;
+			new import_obsidian5.Notice('Markdown sync detached because the linked file no longer exists');
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
 		}
 		const groupIds = getGroupIds(canvas);
-		const topicNodes = Array.from(canvas.nodes.values()).filter(
-			(node) => !groupIds.has(node.id)
-		);
-		if (topicNodes.some((node) => node.isEditing)) return;
+		const topicNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+		if (topicNodes.some((node) => node.isEditing))
+			return { ok: false, reason: LINK_REASON.EDITING };
 		let finalizedBlankTopic = false;
 		for (const node of topicNodes) {
-			if (isTextTopicCard(node, groupIds) && !node.text.trim()) {
-				node.setText('Untitled');
+			if (isTextTopicCard(node, groupIds) && !String(node.text || '').trim()) {
+				node.setText?.('Untitled');
 				finalizedBlankTopic = true;
 			}
 		}
 		if (finalizedBlankTopic) canvas.requestSave();
 		try {
 			const current = await this.app.vault.read(source);
-			const imported = markdownMindMapToCanvas(
-				current,
-				this.markdownLayoutOptions()
-			);
-			const graphMatches = imported
-				? canvasMatchesImportedMarkdown(
-						canvas,
-						imported,
-						canvasFile.path
-					)
-				: false;
-			const orderMatches = imported
-				? canvasOrderMatchesImportedMarkdown(canvas, imported)
-				: false;
+			const decoded = this.layoutMarkdownDocument(current, this.markdownLayoutOptions());
+			if (!decoded.ok) {
+				new import_obsidian5.Notice(`Markdown sync skipped: ${decoded.reason}`);
+				return;
+			}
+			const imported = decoded.value;
+			const graphMatches = MarkdownMindMapCodec.canvasMatchesDocument(canvas, imported, canvasFile.path);
+			const orderMatches = MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, imported);
 			const orderWasChangedInCanvas = this.markdownOrderDirty.has(canvas);
-			const requiresOrderUpdate =
-				graphMatches && !orderMatches && orderWasChangedInCanvas;
 			let markdown;
-			if (
-				imported &&
-				graphMatches &&
-				(orderMatches || !orderWasChangedInCanvas)
-			) {
-				markdown = markdownWithTopicMetadata(
-					withoutLegacyPluginComments(current),
-					imported.topicIds || [],
-					imported.topicKeys || [],
-					imported.topicLabels || []
+			if (graphMatches && (orderMatches || !orderWasChangedInCanvas)) {
+				markdown = MarkdownMindMapCodec.markdownWithTopicMetadata(
+					MarkdownMindMapCodec.withoutLegacyPluginComments(current),
+					{
+						topicIds: imported.topicIds || [],
+						topicKeys: imported.topicKeys || [],
+						topicLabels: imported.topicLabels || []
+					}
 				);
 			} else {
-				try {
-					markdown = patchMarkdownFromCanvasPreservingSource(
-						current,
-						canvas,
-						imported,
-						canvasFile.path
-					);
-					const patchedImport = markdown
-						? markdownMindMapToCanvas(
-								markdown,
-								this.markdownLayoutOptions()
-							)
-						: null;
+				const plan = MarkdownMindMapCodec.planMarkdownSourceUpdate(
+					current,
+					canvas,
+					imported,
+					canvasFile.path
+				);
+				if (plan.ok) {
+					const patched = this.layoutMarkdownDocument(plan.value.markdown, this.markdownLayoutOptions());
 					if (
-						!patchedImport ||
-						!canvasMatchesImportedMarkdown(
-							canvas,
-							patchedImport,
-							canvasFile.path
-						) ||
-						(requiresOrderUpdate &&
-							!canvasOrderMatchesImportedMarkdown(
-								canvas,
-								patchedImport
-							))
-					) {
-						markdown =
-							requiresOrderUpdate && graphMatches
-								? markdownWithTopicMetadata(
-										withoutLegacyPluginComments(current),
-										imported.topicIds || [],
-										imported.topicKeys || [],
-										imported.topicLabels || []
-									)
-								: null;
-					}
-				} catch (error) {
-					console.warn(
-						'ToMindMap: localized Markdown update failed; using readable structural fallback',
-						error
-					);
-					markdown = null;
+						patched.ok &&
+						MarkdownMindMapCodec.canvasMatchesDocument(canvas, patched.value, canvasFile.path) &&
+						(!orderWasChangedInCanvas || MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, patched.value))
+					) markdown = plan.value.markdown;
 				}
-				if (!markdown)
-					markdown = canvasToMindMapMarkdown(canvas, this.settings);
+				if (!markdown) {
+					const encoded = this.encodeMarkdownDocument(canvas, this.settings);
+					if (!encoded.ok) {
+						new import_obsidian5.Notice(`Could not encode the mind map: ${encoded.reason}`);
+						return { ok: false, reason: encoded.reason };
+					}
+					markdown = encoded.value.markdown;
+				}
 			}
 			if (markdown && orderWasChangedInCanvas) {
-				try {
-					const ordered = reorderMarkdownTopicsPreservingSource(
-						markdown,
-						canvas
-					);
-					const orderedImport = markdownMindMapToCanvas(
-						ordered,
-						this.markdownLayoutOptions()
-					);
+				const ordered = MarkdownMindMapCodec.planMarkdownTopicReorder(markdown, canvas);
+				if (ordered.ok) {
+					const verified = this.layoutMarkdownDocument(ordered.value.markdown, this.markdownLayoutOptions());
 					if (
-						orderedImport &&
-						canvasMatchesImportedMarkdown(
-							canvas,
-							orderedImport,
-							canvasFile.path
-						) &&
-						canvasOrderMatchesImportedMarkdown(
-							canvas,
-							orderedImport
-						)
-					)
-						markdown = ordered;
-				} catch (error) {
-					console.warn(
-						'ToMindMap: visual chronology could not be applied losslessly',
-						error
-					);
+						verified.ok &&
+						MarkdownMindMapCodec.canvasMatchesDocument(canvas, verified.value, canvasFile.path) &&
+						MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, verified.value)
+					) markdown = ordered.value.markdown;
 				}
 			}
-			const verified = markdownMindMapToCanvas(
-				markdown,
-				this.markdownLayoutOptions()
-			);
-			if (
-				!verified ||
-				!canvasMatchesImportedMarkdown(
-					canvas,
-					verified,
-					canvasFile.path
-				)
-			)
-				console.warn(
-					'ToMindMap: Markdown was written with the readable structural fallback because exact graph verification was unavailable'
-				);
-			await this.writeMarkdownFile(source, markdown, current);
-			this.indexMarkdownLink(canvasFile.path, source.path);
+			const verified = this.layoutMarkdownDocument(markdown || '', this.markdownLayoutOptions());
+			if (!verified.ok || !MarkdownMindMapCodec.canvasMatchesDocument(canvas, verified.value, canvasFile.path))
+				console.warn('ToMindMap: Markdown verification was unavailable; preserving the readable fallback');
+			const written = await this.writeMarkdownFile(source, markdown, current);
+			if (!written.ok) return written;
+			if (!this.indexMarkdownLink(canvasFile.path, source.path))
+				return { ok: false, reason: LINK_REASON.FAILED };
 			this.markdownOrderDirty.delete(canvas);
+			return { ok: true, link: owned.link };
 		} catch (error) {
 			console.error('ToMindMap: Canvas to Markdown sync failed', error);
-			new import_obsidian5.Notice(
-				'Markdown sync could not access the linked file'
-			);
+			new import_obsidian5.Notice('Markdown sync could not access the linked file');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
 	async attachMarkdownSync(canvas) {
-		const canvasFile = canvas.view && canvas.view.file;
-		if (!canvasFile) return;
-		const markdown = canvasToMindMapMarkdown(canvas, this.settings);
+		const canvasFile = canvas?.view?.file;
+		if (!canvasFile) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const encoded = this.encodeMarkdownDocument(canvas, this.settings);
+		if (!encoded.ok) {
+			new import_obsidian5.Notice(`Could not encode the mind map: ${encoded.reason}`);
+			return encoded;
+		}
+		const markdown = encoded.value.markdown;
 		if (!markdown.trim()) {
-			new import_obsidian5.Notice(
-				'Add at least one topic before enabling Markdown sync'
-			);
-			return;
+			new import_obsidian5.Notice('Add at least one topic before enabling Markdown sync');
+			return { ok: false, reason: LINK_REASON.NO_PENDING };
 		}
-		const folder =
-			canvasFile.parent && canvasFile.parent.path
-				? `${canvasFile.parent.path}/`
-				: '';
-		const stem = `${canvasFile.basename} Mindmap`;
-		let markdownPath = `${folder}${stem}.md`;
-		let counter = 2;
-		while (this.app.vault.getAbstractFileByPath(markdownPath)) {
-			markdownPath = `${folder}${stem} ${counter}.md`;
-			counter++;
-		}
+		const folder = canvasFile.parent?.path || '';
+		const markdownPath = allocateFilePath(
+			folder,
+			`${canvasFile.basename} Mindmap`,
+			'md',
+			(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+		);
+		const syncId = createSyncId();
+		const issued = this.markdownOwnership.issueRecord({
+			canvasPath: canvasFile.path,
+			kind: 'markdown',
+			targetPath: markdownPath,
+			syncId,
+			nodeId: null
+		});
+		if (!syncId || !issued.ok) return issued;
+		const patched = patchSyncIdOwnership(markdown, issued.record.syncId);
+		if (!patched.ok) return patched;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const previousRecords = this.markdownOwnership.recordsForCanvas(canvasFile.path);
+		const previousIndexedPath = this.getIndexedMarkdownPath(canvasFile.path);
+		let created = null;
 		try {
-			this.setMarkdownWriteGuard(markdownPath, markdown);
-			const created = await this.app.vault.create(markdownPath, markdown);
+			created = await this.app.vault.create(markdownPath, patched.markdown);
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			await this.persistPluginData();
+			const link = {
+				path: created.path,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			};
 			const data = canvas.getData();
-			data.mindmapMarkdownSync = { path: created.path };
+			data.mindmapMarkdownSync = link;
 			canvas.setData(data);
-			this.indexMarkdownLink(canvasFile.path, created.path);
 			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
+			if (!this.indexMarkdownLink(canvasFile.path, created.path))
+				throw new Error('Markdown sync index is full');
+			this.verifiedMarkdownLinks.set(canvasFile.path, link);
 			new import_obsidian5.Notice(`Syncing with "${created.path}"`);
+			return { ok: true, link };
 		} catch (error) {
-			this.clearMarkdownWriteGuard(markdownPath);
-			console.error(
-				'ToMindMap: could not create Markdown sync file',
-				error
-			);
-			new import_obsidian5.Notice(
-				'Could not create the Markdown sync file'
-			);
+			this.restoreOwnershipRecords(canvasFile.path, previousRecords);
+			if (previousIndexedPath) this.markdownSyncIndex.link(canvasFile.path, previousIndexedPath);
+			else this.unindexCanvas(canvasFile.path);
+			this.verifiedMarkdownLinks.delete(canvasFile.path);
+			try { await this.persistPluginData(); } catch (_) {}
+			try {
+				const currentData = canvas.getData?.();
+				if (currentData && typeof currentData === 'object')
+					delete currentData.mindmapMarkdownSync;
+				canvas.setData({ ...beforeData });
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			if (created) {
+				try { await this.app.vault.delete(created); } catch (_) {}
+			}
+			console.error('ToMindMap: could not create Markdown sync file', error);
+			new import_obsidian5.Notice('Could not create the Markdown sync file');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
 	async detachMarkdownSync(canvas, showNotice = true) {
@@ -6958,7 +4852,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!oldPath) return;
 		delete data.mindmapMarkdownSync;
 		canvas.setData(data);
-		if (canvasFile) this.unindexCanvas(canvasFile.path);
+		if (canvasFile) {
+			this.unindexCanvas(canvasFile.path);
+			const parentRecords = this.markdownOwnership.recordsForCanvas(canvasFile.path)
+				.filter((record) => record.kind === 'parent');
+			this.markdownOwnership.removeCanvas(canvasFile.path);
+			for (const record of parentRecords)
+				this.markdownOwnership.upsert(record, { replaceExisting: true });
+			if (this.markdownSyncIndex.canvasesFor(oldPath).length === 0)
+				this.markdownSyncCoordinator.detach(oldPath);
+			this.verifiedMarkdownLinks.delete(canvasFile.path);
+			await this.persistPluginData();
+		}
 		canvas.requestSave();
 		if (showNotice)
 			new import_obsidian5.Notice(
@@ -6966,152 +4871,230 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 	}
 	scheduleMarkdownToCanvas(file) {
-		const previous = this.markdownModifyTimers.get(file.path);
-		if (previous) clearTimeout(previous);
-		const timer = setTimeout(() => {
-			this.markdownModifyTimers.delete(file.path);
-			void this.syncMarkdownFileToCanvases(file);
-		}, 300);
-		this.markdownModifyTimers.set(file.path, timer);
+		void this.markdownSyncCoordinator.schedule(file.path, () =>
+			this.syncMarkdownFileToCanvases(file)
+		);
 	}
 	async syncMarkdownFileToCanvases(file) {
-		let markdown;
-		try {
-			markdown = await this.app.vault.read(file);
-		} catch (error) {
-			return;
-		}
-		if (this.markdownWriteGuards.get(file.path) === markdown) {
-			this.clearMarkdownWriteGuard(file.path);
-			return;
-		}
-		const linkedCanvases = Array.from(
-			this.markdownSyncIndex.get(file.path) || []
-		);
-		if (linkedCanvases.length === 0) return;
-		let imported = markdownMindMapToCanvas(
-			markdown,
-			this.markdownLayoutOptions()
-		);
-		if (!imported)
-			imported = {
-				nodes: [],
-				edges: [],
-				frontmatter: '',
-				rootIds: [],
-				topicIds: [],
-				topicKeys: [],
-				topicLabels: [],
-				stableIdCount: 0,
-				metadataCurrent: false
-			};
+		const linkedCanvases = this.markdownSyncIndex.canvasesFor(file.path);
+		if (linkedCanvases.length === 0) return { ok: true, skipped: true };
+		const entries = [];
 		for (const canvasPath of linkedCanvases) {
 			const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
 			if (!(canvasFile instanceof import_obsidian5.TFile)) {
 				this.unindexCanvas(canvasPath);
 				continue;
 			}
-			const openCanvas = this.getOpenCanvasByPath(canvasPath);
-			if (openCanvas) {
-				await this.applyMarkdownToLiveCanvas(
-					openCanvas,
-					markdown,
-					imported
+			try {
+				const raw = await this.app.vault.cachedRead(canvasFile);
+				const data = JSON.parse(raw);
+				const rawLink = data?.mindmapMarkdownSync;
+				if (!rawLink || typeof rawLink !== 'object') continue;
+				const owned = await resolveMarkdownSyncLink(
+					rawLink,
+					canvasPath,
+					this.markdownOwnership,
+					this.app.vault
 				);
-			} else {
-				await this.app.vault.process(canvasFile, (raw) => {
-					try {
-						const current = JSON.parse(raw);
-						const incoming = {
-							...imported,
-							nodes: imported.nodes.map((node) => ({ ...node })),
-							edges: imported.edges.map((edge) => ({ ...edge }))
-						};
-						convertMarkdownAnchorsToCardLinks(
-							incoming.nodes,
-							canvasPath
-						);
-						const adapter = canvasDataAdapter(current, canvasFile);
-						if (
-							canvasMatchesImportedMarkdown(
-								adapter,
-								incoming,
-								canvasPath
-							) &&
-							canvasOrderMatchesImportedMarkdown(
-								adapter,
-								incoming
-							)
-						)
-							return raw;
-						const updated = reconcileCanvasData(current, incoming);
-						updated.mindmapMarkdownSync = { path: file.path };
-						return JSON.stringify(updated, null, '	');
-					} catch (error) {
-						console.error(
-							`ToMindMap: could not sync ${canvasPath}`,
-							error
-						);
-						return raw;
-					}
+				if (!owned.ok) continue;
+				entries.push({
+					canvasPath,
+					canvasFile,
+					openCanvas: this.getOpenCanvasByPath(canvasPath),
+					data,
+					canvasRaw: raw,
+					link: owned.link
 				});
+			} catch (_) {
+				// A missing/malformed Canvas is isolated from the other reverse routes.
 			}
 		}
-		const preserved = markdownWithTopicMetadata(
-			withoutLegacyPluginComments(markdown),
-			imported.topicIds || [],
-			imported.topicKeys || [],
-			imported.topicLabels || []
+		if (entries.length === 0) return { ok: true, skipped: true };
+		let markdown;
+		try {
+			markdown = await this.app.vault.read(file);
+		} catch (_) {
+			return { ok: false, reason: LINK_REASON.FAILED };
+		}
+		if (this.markdownWriteGuards.get(file.path) === markdown) {
+			this.clearMarkdownWriteGuard(file.path);
+			return { ok: true };
+		}
+		const decoded = this.layoutMarkdownDocument(markdown, this.markdownLayoutOptions());
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Markdown sync skipped: ${decoded.reason}`);
+			return decoded;
+		}
+		const imported = decoded.value;
+		const failures = [];
+		let retry = false;
+		for (const entry of entries) {
+			try {
+				// Re-read and re-resolve after the asynchronous Markdown read. A
+				// detached, renamed, or replaced link must never receive this
+				// snapshot based on its old index entry.
+				const currentRaw = entry.openCanvas
+					? JSON.stringify(entry.openCanvas.getData())
+					: await this.app.vault.cachedRead(entry.canvasFile);
+				const currentData = entry.openCanvas
+					? entry.openCanvas.getData()
+					: JSON.parse(currentRaw);
+				const currentLink = currentData?.mindmapMarkdownSync;
+				const currentOwned = currentLink
+					? await resolveMarkdownSyncLink(
+							currentLink,
+							entry.canvasPath,
+							this.markdownOwnership,
+							this.app.vault
+						)
+					: { ok: false, reason: LINK_REASON.NO_LINK };
+				if (
+					!currentOwned.ok ||
+					currentOwned.link.path !== entry.link.path ||
+					currentOwned.link.proof !== entry.link.proof
+				) {
+					retry = true;
+					failures.push({ canvasPath: entry.canvasPath, reason: LINK_REASON.CONFLICT });
+					continue;
+				}
+				entry.link = currentOwned.link;
+				const incoming = {
+					...imported,
+					nodes: MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+						imported.nodes.map((node) => ({ ...node })),
+						entry.canvasPath
+					),
+					edges: imported.edges.map((edge) => ({ ...edge }))
+				};
+				if (entry.openCanvas) {
+					const result = await this.applyMarkdownToLiveCanvas(
+						entry.openCanvas,
+						markdown,
+						incoming,
+						entry.link
+					);
+					if (!result?.ok) {
+						const reason = result?.reason || LINK_REASON.FAILED;
+						retry = retry || reason === LINK_REASON.EDITING || reason === LINK_REASON.CONFLICT;
+						failures.push({ canvasPath: entry.canvasPath, reason, error: result?.error });
+					}
+					continue;
+				}
+				let processConflict = false;
+				await this.app.vault.process(entry.canvasFile, (raw) => {
+					if (raw !== currentRaw) {
+						processConflict = true;
+						return raw;
+					}
+					const current = JSON.parse(raw);
+					const adapter = MarkdownMindMapCodec.canvasDataAdapter(current, entry.canvasFile);
+					const matches =
+						MarkdownMindMapCodec.canvasMatchesDocument(adapter, incoming, entry.canvasPath) &&
+						MarkdownMindMapCodec.canvasOrderMatchesDocument(adapter, incoming);
+					const updated = matches
+						? current
+						: MarkdownMindMapCodec.reconcileCanvasData(current, incoming);
+					updated.mindmapMarkdownSync = entry.link;
+					return JSON.stringify(updated, null, '\t');
+				});
+				if (processConflict) {
+					retry = true;
+					failures.push({ canvasPath: entry.canvasPath, reason: LINK_REASON.CONFLICT });
+				}
+			} catch (error) {
+				retry = retry || error?.reason === LINK_REASON.CONFLICT;
+				failures.push({ canvasPath: entry.canvasPath, reason: error?.reason || LINK_REASON.FAILED, error });
+			}
+		}
+		if (failures.length > 0)
+			return { ok: false, reason: retry ? LINK_REASON.CONFLICT : LINK_REASON.FAILED, failures };
+		const preserved = MarkdownMindMapCodec.markdownWithTopicMetadata(
+			MarkdownMindMapCodec.withoutLegacyPluginComments(markdown),
+			{
+				topicIds: imported.topicIds || [],
+				topicKeys: imported.topicKeys || [],
+				topicLabels: imported.topicLabels || []
+			}
 		);
-		if (preserved !== markdown)
-			await this.writeMarkdownFile(file, preserved, markdown);
+		if (preserved !== markdown) {
+			const written = await this.writeMarkdownFile(file, preserved, markdown);
+			if (!written.ok) return written;
+		}
+		return { ok: true };
 	}
-	async applyMarkdownToLiveCanvas(canvas, markdown, prepared) {
+	async applyMarkdownToLiveCanvas(canvas, markdown, prepared, ownedLink = null) {
 		const canvasFile = canvas.view && canvas.view.file;
-		if (!canvasFile) return;
+		if (!canvasFile) return { ok: false, reason: LINK_REASON.NO_LINK };
+		if (!ownedLink?.path || !ownedLink?.proof)
+			return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
 		// A native file drop copies data into the vault before the Canvas card can
 		// be imported. Never let an older Markdown snapshot reconcile during that
 		// asynchronous window, or while its Canvas-to-Markdown save is queued.
 		if (
 			this.localCanvasMutations.has(canvas) ||
-			this.markdownSyncTimers.has(canvasFile.path)
+			this.markdownSyncTimers.has(canvasFile.path) ||
+			this.markdownSyncCoordinator.entries?.get(ownedLink.path)?.pending
 		) {
-			return;
+			return { ok: false, reason: LINK_REASON.EDITING };
 		}
-		const imported = prepared
-			? {
-					...prepared,
-					nodes: prepared.nodes.map((node) => ({ ...node })),
-					edges: prepared.edges.map((edge) => ({ ...edge }))
-				}
-			: markdownMindMapToCanvas(
-					markdown,
-					this.markdownLayoutOptions()
-				) || { nodes: [], edges: [], frontmatter: '', rootIds: [] };
-		convertMarkdownAnchorsToCardLinks(imported.nodes, canvasFile.path);
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const currentLink = beforeData?.mindmapMarkdownSync;
+		const currentOwned = currentLink
+			? await resolveMarkdownSyncLink(
+					currentLink,
+					canvasFile.path,
+					this.markdownOwnership,
+					this.app.vault
+				)
+			: { ok: false, reason: LINK_REASON.UNOWNED_LINK };
 		if (
-			canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path) &&
-			canvasOrderMatchesImportedMarkdown(canvas, imported)
+			!currentOwned.ok ||
+			currentOwned.link.path !== ownedLink.path ||
+			currentOwned.link.proof !== ownedLink.proof
+		)
+			return { ok: false, reason: LINK_REASON.CONFLICT };
+		ownedLink = currentOwned.link;
+		let imported;
+		if (prepared) {
+			imported = {
+				...prepared,
+				nodes: prepared.nodes.map((node) => ({ ...node })),
+				edges: prepared.edges.map((edge) => ({ ...edge }))
+			};
+		} else {
+			const decoded = this.layoutMarkdownDocument(
+				markdown,
+				this.markdownLayoutOptions()
+			);
+			if (!decoded.ok) return decoded;
+			imported = decoded.value;
+		}
+		imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+			imported.nodes,
+			canvasFile.path
+		);
+		if (
+			MarkdownMindMapCodec.canvasMatchesDocument(canvas, imported, canvasFile.path) &&
+			MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, imported)
 		) {
 			if (this.isMindmapCanvas(canvas)) {
 				this.layoutEngine.layout(canvas);
 				this.updateGroupBounds(canvas);
 			}
 			this.refreshOutline(canvas);
-			return;
+			return { ok: true, unchanged: true };
 		}
 		const selected =
 			canvas.selection && canvas.selection.size === 1
 				? canvas.selection.values().next().value
 				: null;
-		const linkedPath = this.getMarkdownSyncPath(canvas.getData());
-		const reconciled = reconcileCanvasData(canvas.getData(), imported);
+		const reconciled = MarkdownMindMapCodec.reconcileCanvasData(canvas.getData(), imported);
 		const pendingResizeIds = new Set(
 			Array.isArray(reconciled.mindmapPendingResize)
 				? reconciled.mindmapPendingResize
 				: []
 		);
-		reconciled.mindmapMarkdownSync = { path: linkedPath };
+		reconciled.mindmapMarkdownSync = ownedLink;
 		this.syncApplyingCanvas.add(canvas);
 		try {
 			canvas.setData(reconciled);
@@ -7147,99 +5130,280 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.settings.navigationZoomPadding
 				);
 			this.refreshOutline(canvas);
+			return { ok: true };
+		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				this.canvasApi.invalidateEdgeIndex();
+				if (this.isMindmapCanvas(canvas)) MindmapActions.syncCollapsedVisibility(canvas);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		} finally {
 			this.syncApplyingCanvas.delete(canvas);
 		}
 	}
-	async updateCanvasSyncMetadata(canvasPath, markdownPath) {
+	async snapshotCanvasState(canvasPath) {
+		const open = this.getOpenCanvasByPath(canvasPath);
+		if (open) return { canvasPath, open, data: JSON.parse(JSON.stringify(open.getData())) };
+		const file = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(file instanceof import_obsidian5.TFile)) return { canvasPath, file: null, raw: null };
+		return { canvasPath, file, raw: await this.app.vault.cachedRead(file) };
+	}
+	async restoreCanvasState(snapshot) {
+		if (!snapshot) return;
+		try {
+			if (snapshot.open) {
+				snapshot.open.setData(snapshot.data);
+				snapshot.open.requestSave?.();
+				await flushCanvasView(snapshot.open, this.app.vault);
+				return;
+			}
+			if (snapshot.file && typeof snapshot.raw === 'string') {
+				await this.app.vault.process(snapshot.file, (current) =>
+					current === snapshot.raw ? current : snapshot.raw
+				);
+			}
+		} catch (_) {}
+	}
+	async updateCanvasLinkMetadata(canvasPath, kind, link) {
+		const key = kind === 'parent' ? 'mindmapParent' : 'mindmapMarkdownSync';
+		const openCanvas = this.getOpenCanvasByPath(canvasPath);
+		if (openCanvas) {
+			const data = openCanvas.getData();
+			if (link) data[key] = link;
+			else delete data[key];
+			openCanvas.setData(data);
+			openCanvas.requestSave();
+			await flushCanvasView(openCanvas, this.app.vault);
+			return { ok: true };
+		}
+		const file = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(file instanceof import_obsidian5.TFile)) return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		let changed = false;
+		await this.app.vault.process(file, (raw) => {
+			try {
+				const data = JSON.parse(raw);
+				if (link) data[key] = link;
+				else delete data[key];
+				changed = true;
+				return JSON.stringify(data, null, '\t');
+			} catch (_) {
+				return raw;
+			}
+		});
+		return changed ? { ok: true } : { ok: false, reason: LINK_REASON.FAILED };
+	}
+	async updateCanvasSyncMetadata(canvasPath, markdownLink, { expectedRaw = null, expectedData = null } = {}) {
+		const link = markdownLink && typeof markdownLink === 'object'
+			? { ...markdownLink }
+			: null;
 		const openCanvas = this.getOpenCanvasByPath(canvasPath);
 		if (openCanvas) {
 			this.syncApplyingCanvas.add(openCanvas);
 			try {
 				const data = openCanvas.getData();
-				if (markdownPath)
-					data.mindmapMarkdownSync = { path: markdownPath };
+				if (expectedData !== null && JSON.stringify(data) !== expectedData) {
+					const error = new Error('Canvas changed during sync metadata update');
+					error.reason = LINK_REASON.CONFLICT;
+					throw error;
+				}
+				if (link) data.mindmapMarkdownSync = link;
 				else delete data.mindmapMarkdownSync;
 				openCanvas.setData(data);
 				openCanvas.requestSave();
+				await flushCanvasView(openCanvas, this.app.vault);
 			} finally {
 				this.syncApplyingCanvas.delete(openCanvas);
 			}
-			return;
+			return { ok: true };
 		}
 		const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
-		if (!(canvasFile instanceof import_obsidian5.TFile)) return;
+		if (!(canvasFile instanceof import_obsidian5.TFile))
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		let changed = false;
 		await this.app.vault.process(canvasFile, (raw) => {
+			if (expectedRaw !== null && raw !== expectedRaw) {
+				const error = new Error('Canvas changed during sync metadata update');
+				error.reason = LINK_REASON.CONFLICT;
+				throw error;
+			}
 			try {
 				const data = JSON.parse(raw);
-				if (markdownPath)
-					data.mindmapMarkdownSync = { path: markdownPath };
+				if (link) data.mindmapMarkdownSync = link;
 				else delete data.mindmapMarkdownSync;
-				return JSON.stringify(data, null, '	');
-			} catch (error) {
+				changed = true;
+				return JSON.stringify(data, null, '\t');
+			} catch (_) {
 				return raw;
 			}
 		});
+		return changed ? { ok: true } : { ok: false, reason: LINK_REASON.FAILED };
 	}
 	async updateNestedParentReferences(oldPath, newPath) {
 		if (!oldPath || !newPath || oldPath === newPath) return;
+		const parentRecords = this.markdownOwnership.records.filter(
+			(record) => record.kind === 'parent' && record.targetPath === oldPath
+		);
+		const migratedLinks = new Map();
+		for (const record of parentRecords) {
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath: record.canvasPath,
+				kind: 'parent',
+				targetPath: newPath,
+				syncId: record.syncId,
+				nodeId: record.nodeId
+			});
+			if (!issued.ok) continue;
+			const upserted = this.markdownOwnership.upsert(issued.record, { replaceExisting: true });
+			if (!upserted.ok) continue;
+			migratedLinks.set(record.canvasPath, {
+				canvas: newPath,
+				nodeId: record.nodeId,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			});
+		}
 		const canvasFiles = (this.app.vault.getFiles?.() || []).filter(
-			(file) =>
-				file instanceof import_obsidian5.TFile &&
-				file.extension === 'canvas' &&
-				file.path !== newPath
+			(file) => file instanceof import_obsidian5.TFile && file.extension === 'canvas'
 		);
 		for (const file of canvasFiles) {
 			const openCanvas = this.getOpenCanvasByPath(file.path);
-			if (openCanvas) {
-				const data = openCanvas.getData();
-				if (data.mindmapParent?.canvas !== oldPath) continue;
-				data.mindmapParent.canvas = newPath;
-				openCanvas.setData(data);
-				openCanvas.requestSave();
-				continue;
-			}
 			try {
-				const raw = await this.app.vault.cachedRead(file);
-				const data = JSON.parse(raw);
-				if (data.mindmapParent?.canvas !== oldPath) continue;
-				data.mindmapParent.canvas = newPath;
-				await this.app.vault.modify(file, JSON.stringify(data, null, '\t'));
-			} catch (error) {
-				console.warn(
-					`ToMindMap: could not update parent link in ${file.path}`,
-					error
+				const data = openCanvas
+					? openCanvas.getData()
+					: JSON.parse(await this.app.vault.cachedRead(file));
+				const rawParent = data.mindmapParent;
+				if (!rawParent || (rawParent.canvas !== oldPath && !migratedLinks.has(file.path))) continue;
+				const link = migratedLinks.get(file.path) || rawParent;
+				const resolved = await resolveParentLink(
+					link,
+					file.path,
+					this.markdownOwnership,
+					this.app.vault
 				);
+				if (!resolved.ok) continue;
+				const nextParent = {
+					canvas: newPath,
+					nodeId: resolved.link.nodeId,
+					syncId: resolved.link.syncId,
+					proof: resolved.link.proof,
+					ownership: resolved.link.ownership
+				};
+				if (openCanvas) {
+					data.mindmapParent = nextParent;
+					openCanvas.setData(data);
+					openCanvas.requestSave();
+				} else {
+					await this.app.vault.process(file, (raw) => {
+						const current = JSON.parse(raw);
+						if (current.mindmapParent?.canvas !== oldPath) return raw;
+						current.mindmapParent = nextParent;
+						return JSON.stringify(current, null, '\t');
+					});
+				}
+			} catch (error) {
+				console.warn(`ToMindMap: could not update parent link in ${file.path}`, error);
 			}
 		}
+		if (migratedLinks.size > 0) await this.persistPluginData();
 	}
 	async handleSyncedFileRename(file, oldPath) {
-		if (
-			file instanceof import_obsidian5.TFile &&
-			file.extension === 'canvas'
-		) {
-			await this.updateNestedParentReferences(oldPath, file.path);
+		if (file instanceof import_obsidian5.TFile && file.extension === 'canvas') {
+			const previousRecords = this.markdownOwnership.recordsForCanvas(oldPath);
+			const previousAllRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			const previousCanvas = await this.snapshotCanvasState(file.path);
+			const previousVerifiedMarkdown = this.verifiedMarkdownLinks.get(oldPath);
+			const previousVerifiedParent = this.verifiedParentLinks.get(oldPath);
+			try {
+				const migration = this.markdownOwnership.renameCanvas(oldPath, file.path);
+				if (!migration.ok) return;
+				const links = [
+					...(migration.links || []),
+					...(migration.parentLinks || [])
+				];
+				for (const link of links) {
+					const kind = link.canvas ? 'parent' : 'markdown';
+					const result = await this.updateCanvasLinkMetadata(file.path, kind, link);
+					if (!result.ok) throw new Error(`Canvas metadata migration failed: ${result.reason}`);
+				}
+				await this.persistPluginData();
+				if (previousVerifiedMarkdown) this.verifiedMarkdownLinks.set(file.path, migration.links?.[0] || null);
+				if (previousVerifiedParent) this.verifiedParentLinks.set(file.path, migration.parentLinks?.[0] || null);
+				if (this.markdownSyncIndex.markdownFor(oldPath))
+					this.markdownSyncIndex.renameCanvas(oldPath, file.path);
+				await this.updateNestedParentReferences(oldPath, file.path);
+			} catch (error) {
+				this.restoreOwnershipSnapshot(previousAllRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				if (previousVerifiedMarkdown) this.verifiedMarkdownLinks.set(oldPath, previousVerifiedMarkdown);
+				else this.verifiedMarkdownLinks.delete(oldPath);
+				if (previousVerifiedParent) this.verifiedParentLinks.set(oldPath, previousVerifiedParent);
+				else this.verifiedParentLinks.delete(oldPath);
+				await this.restoreCanvasState(previousCanvas);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: Canvas rename transaction rolled back', error);
+			}
+			return;
 		}
-		if (this.markdownSyncIndex.has(oldPath)) {
-			const canvasPaths = Array.from(this.markdownSyncIndex.get(oldPath));
-			this.markdownSyncIndex.delete(oldPath);
-			this.markdownSyncIndex.set(file.path, new Set(canvasPaths));
+		const canvasPaths = this.markdownSyncIndex.canvasesFor(oldPath);
+		if (canvasPaths.length === 0) return;
+		const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+		const previousIndex = this.captureIndexSnapshot();
+		const previousVerified = new Map(canvasPaths.map((path) => [path, this.verifiedMarkdownLinks.get(path)]));
+		const snapshots = new Map();
+		try {
+			const updates = [];
+			for (const canvasPath of canvasPaths) {
+				const record = this.markdownOwnership.recordsForCanvas(canvasPath).find(
+					(candidate) => candidate.kind === 'markdown' && candidate.targetPath === oldPath
+				);
+				if (!record) throw new Error(`Ownership record missing for ${canvasPath}`);
+				const issued = this.markdownOwnership.issueRecord({
+					canvasPath,
+					kind: 'markdown',
+					targetPath: file.path,
+					syncId: record.syncId,
+					nodeId: null
+				});
+				if (!issued.ok) throw issued;
+				const upserted = this.markdownOwnership.upsert(issued.record, { replaceExisting: true });
+				if (!upserted.ok) throw upserted;
+				const link = {
+					path: file.path,
+					syncId: issued.record.syncId,
+					proof: issued.record.proof,
+					ownership: { source: 'plugin-data' }
+				};
+				snapshots.set(canvasPath, await this.snapshotCanvasState(canvasPath));
+				const updated = await this.updateCanvasSyncMetadata(canvasPath, link);
+				if (!updated.ok) throw updated;
+				updates.push({ canvasPath, link });
+			}
+			await this.persistPluginData();
+			if (!this.markdownSyncIndex.renameMarkdown(oldPath, file.path))
+				throw new Error('Markdown index route could not be renamed');
+			this.markdownSyncCoordinator.rename(oldPath, file.path);
+			for (const { canvasPath, link } of updates)
+				this.verifiedMarkdownLinks.set(canvasPath, link);
 			if (this.markdownWriteGuards.has(oldPath)) {
 				const guardedContent = this.markdownWriteGuards.get(oldPath);
 				this.clearMarkdownWriteGuard(oldPath);
 				this.setMarkdownWriteGuard(file.path, guardedContent);
 			}
-			await Promise.all(
-				canvasPaths.map((canvasPath) =>
-					this.updateCanvasSyncMetadata(canvasPath, file.path)
-				)
-			);
-			return;
-		}
-		if (String(oldPath).toLowerCase().endsWith('.canvas')) {
-			for (const canvasPaths of this.markdownSyncIndex.values()) {
-				if (canvasPaths.delete(oldPath)) canvasPaths.add(file.path);
+		} catch (error) {
+			this.restoreOwnershipSnapshot(previousRecords);
+			this.restoreIndexSnapshot(previousIndex);
+			for (const [canvasPath, link] of previousVerified) {
+				if (link) this.verifiedMarkdownLinks.set(canvasPath, link);
+				else this.verifiedMarkdownLinks.delete(canvasPath);
 			}
+			for (const snapshot of snapshots.values()) await this.restoreCanvasState(snapshot);
+			try { await this.persistPluginData(); } catch (_) {}
+			console.warn('ToMindMap: Markdown rename transaction rolled back', error);
 		}
 	}
 	async convertLinkedNodeToNormalTopic(canvas, node) {
@@ -7264,19 +5428,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					const parsed = JSON.parse(raw);
 					if (Array.isArray(parsed?.nodes)) sourceData = parsed;
 				} else if (String(filePath).toLowerCase().endsWith('.md')) {
-					sourceData = markdownMindMapToCanvas(
+					const decoded = this.layoutMarkdownDocument(
 						raw,
 						this.markdownLayoutOptions()
 					);
+					if (!decoded.ok) throw new Error(`Markdown decode failed: ${decoded.reason}`);
+					sourceData = decoded.value;
 				}
 			}
 			if (sourceData?.nodes?.length) {
-				const remapped = MindmapActions.remapLinkedCanvasData(
+				const remappedResult = MindmapActions.remapLinkedCanvasData(
 					sourceData,
 					node,
 					new Set(canvas.nodes.keys()),
 					() => genId()
 				);
+				if (!remappedResult.ok) throw new Error(`Linked map decode failed: ${remappedResult.reason}`);
+				const remapped = remappedResult.value;
 				const sourceRoot = remapped.nodes.find(
 					(item) => item.id === remapped.rootId
 				);
@@ -7349,6 +5517,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.deselectAll?.();
 				canvas.select?.(replacementRoot);
 			}
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
 				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
@@ -7389,21 +5558,71 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 	async handleSyncedFileDelete(file) {
 		const path = file.path;
-		if (this.markdownSyncIndex.has(path)) {
-			const canvasPaths = Array.from(this.markdownSyncIndex.get(path));
-			this.markdownSyncIndex.delete(path);
-			await Promise.all(
-				canvasPaths.map((canvasPath) =>
-					this.updateCanvasSyncMetadata(canvasPath, '')
-				)
+		const canvasPaths = this.markdownSyncIndex.canvasesFor(path);
+		if (canvasPaths.length > 0) {
+			const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			const previousVerified = new Map(
+				canvasPaths.map((canvasPath) => [canvasPath, this.verifiedMarkdownLinks.get(canvasPath)])
 			);
-			new import_obsidian5.Notice(
-				'Markdown sync detached because the linked file was deleted'
-			);
+			const snapshots = new Map();
+			try {
+				// Preflight every owner and capture exact bytes before the first write.
+				for (const canvasPath of canvasPaths) {
+					const record = this.markdownOwnership.recordsForCanvas(canvasPath).find(
+						(candidate) => candidate.kind === 'markdown' && candidate.targetPath === path
+					);
+					if (!record) throw new Error(`Ownership record missing for ${canvasPath}`);
+					snapshots.set(canvasPath, await this.snapshotCanvasState(canvasPath));
+				}
+				for (const canvasPath of canvasPaths) {
+					const snapshot = snapshots.get(canvasPath);
+					const result = await this.updateCanvasSyncMetadata(
+						canvasPath,
+						null,
+						snapshot.open
+							? { expectedData: JSON.stringify(snapshot.data) }
+							: { expectedRaw: snapshot.raw }
+					);
+					if (!result.ok) throw result;
+					const parentRecords = this.markdownOwnership.recordsForCanvas(canvasPath)
+						.filter((record) => record.kind === 'parent');
+					this.markdownOwnership.removeCanvas(canvasPath);
+					for (const record of parentRecords)
+						this.markdownOwnership.upsert(record, { replaceExisting: true });
+				}
+				await this.persistPluginData();
+				for (const canvasPath of canvasPaths) this.unindexCanvas(canvasPath);
+				this.markdownSyncCoordinator.detach(path);
+				for (const canvasPath of canvasPaths) this.verifiedMarkdownLinks.delete(canvasPath);
+				new import_obsidian5.Notice('Markdown sync detached because the linked file was deleted');
+			} catch (error) {
+				for (const snapshot of snapshots.values()) await this.restoreCanvasState(snapshot);
+				this.restoreOwnershipSnapshot(previousRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				for (const [canvasPath, link] of previousVerified) {
+					if (link) this.verifiedMarkdownLinks.set(canvasPath, link);
+					else this.verifiedMarkdownLinks.delete(canvasPath);
+				}
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: Markdown delete transaction rolled back', error);
+			}
 			return;
 		}
-		if (String(path).toLowerCase().endsWith('.canvas'))
-			this.unindexCanvas(path);
+		if (String(path).toLowerCase().endsWith('.canvas')) {
+			const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			try {
+				this.markdownOwnership.removeCanvas(path);
+				this.unindexCanvas(path);
+				await this.persistPluginData();
+			} catch (error) {
+				this.restoreOwnershipSnapshot(previousRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: deleted Canvas ownership rollback failed', error);
+			}
+		}
 	}
 	async createCleanNoteForTopic(canvas, node, title, content = '') {
 		const folder = canvasFolderPath(canvas);
@@ -7460,8 +5679,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (!touchesOld) continue;
 			if (!includeInternal && oldIds.has(fromId) && oldIds.has(toId))
 				continue;
-			this.canvasApi.cloneEdge(canvas, edge, replacements);
+			const cloned = this.canvasApi.cloneEdge(canvas, edge, replacements);
+			if (!cloned) throw new Error('Canvas did not create a replacement edge');
+			const clonedFromId = cloned.from?.node?.id;
+			const clonedToId = cloned.to?.node?.id;
+			if (!clonedFromId || !clonedToId) throw new Error('Replacement edge is missing an endpoint');
 		}
+		return edges.length;
 	}
 
 	async convertTopicBranchToMarkdownFile(canvas, node) {
@@ -7476,10 +5700,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			(item) => item.canvasNode
 		);
 		const title = MindmapActions.topicTitleFromNode(node);
-		const exported = portableMindMapMarkdown(canvas, [treeNode]);
-		const content = exported.trim() ? exported : `# ${title}\n`;
+		const encoded = this.encodeMarkdownDocument(canvas, {
+			includeFrontmatter: false,
+			rootTrees: [treeNode]
+		});
+		if (!encoded.ok) throw new Error(`Markdown encode failed: ${encoded.reason}`);
+		const content = encoded.value.markdown.trim()
+			? encoded.value.markdown
+			: `# ${title}\n`;
 		let file = null;
 		let card = null;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			file = await this.createCleanNoteForTopic(
 				canvas,
@@ -7502,6 +5733,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				false,
 				node.id
 			);
+			await flushCanvasView(canvas, this.app.vault);
 			for (const topic of branch.slice().reverse())
 				this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
@@ -7510,8 +5742,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.select?.(card);
 			}
 			this.markMarkdownOrderDirty(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			}
 			this.updateNodeTypeAttributes(canvas);
@@ -7523,6 +5756,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return [file];
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: branch Markdown export failed', error);
 			if (card) {
 				try {
@@ -7561,6 +5799,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const createdFiles = [];
 		const createdCards = [];
 		const replacements = new Map();
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			for (const topic of branch) {
 				const title = MindmapActions.topicTitleFromNode(topic);
@@ -7582,6 +5821,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				replacements,
 				true
 			);
+			await flushCanvasView(canvas, this.app.vault);
 			const selectedIds = new Set(
 				Array.from(canvas.selection || [])
 					.filter((item) => item && 'nodeEl' in item)
@@ -7596,8 +5836,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 			}
 			this.markMarkdownOrderDirty(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			}
 			this.updateNodeTypeAttributes(canvas);
@@ -7609,6 +5850,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return createdFiles;
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: clean-note conversion failed', error);
 			for (const card of createdCards) {
 				try {
@@ -7631,8 +5877,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return null;
 		}
 		const forest = buildForest(canvas);
-		const branchTrees = MindmapActions.getTopicBranch(forest, node, true);
-		const branch = branchTrees
+		const branch = MindmapActions.getTopicBranch(forest, node, true)
 			.map((item) => item.canvasNode)
 			.filter((item) => !getGroupIds(canvas).has(item.id));
 		if (branch.length === 0) return null;
@@ -7642,7 +5887,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		nested.mindmap = true;
 		nested.mindmapNestedVersion = 1;
 		nested.mindmapPendingResize = nested.nodes.map((item) => item.id);
-		const nestedPath = MindmapActions.nextTopicFilePath(
+		const nestedPath = allocateFilePath(
 			canvasFolderPath(canvas),
 			MindmapActions.topicTitleFromNode(rootNode),
 			'canvas',
@@ -7650,11 +5895,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		let created = null;
 		let card = null;
+		let oldCardData = null;
+		let registrySaved = false;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
-			created = await this.app.vault.create(
-				nestedPath,
-				JSON.stringify(nested, null, '\t')
-			);
+			created = await this.app.vault.create(nestedPath, JSON.stringify(nested, null, '\t'));
 			card = this.createTitleOnlyFileCard(
 				canvas,
 				created,
@@ -7662,82 +5907,98 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				'nested-map',
 				MindmapActions.topicTitleFromNode(rootNode)
 			);
-			nested.mindmapParent = {
-				canvas: parentPath,
+			oldCardData = { ...canvasNodeUnknownData(card) };
+			const syncId = createSyncId();
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath: nestedPath,
+				kind: 'parent',
+				targetPath: parentPath,
+				syncId,
 				nodeId: card.id
+			});
+			if (!syncId || !issued.ok) throw new Error(issued.reason || 'Could not mint parent ownership');
+			const parentLink = {
+				canvas: parentPath,
+				nodeId: card.id,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
 			};
-			await this.app.vault.modify(
-				created,
-				JSON.stringify(nested, null, '\t')
-			);
+			setCanvasNodeUnknownData(card, { [CARD_SYNC_KEY]: issued.record.syncId });
+			nested.mindmapParent = parentLink;
+			await this.app.vault.process(created, (raw) => JSON.stringify(nested, null, '\t'));
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			registrySaved = true;
+			await this.persistPluginData();
+			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
-			this.cloneEdgesAroundReplacedNodes(
-				canvas,
-				branch,
-				replacements,
-				false,
-				rootNode.id
-			);
-			for (const topic of branch.slice().reverse())
-				this.canvasApi.removeNode(canvas, topic);
+			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
+			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
-			this.markMarkdownOrderDirty(canvas);
-			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
-				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
-			}
-			this.updateNodeTypeAttributes(canvas);
-			this.updateGroupBounds(canvas);
+			this.applyStructuralMutation(canvas, [rootNode], { save: false });
 			canvas.requestSave();
 			this.refreshOutline(canvas);
-			new import_obsidian5.Notice(
-				`Moved ${branch.length} topic${branch.length === 1 ? '' : 's'} to ${created.path}`
-			);
-			return { file: created, card, data: nested };
+			this.verifiedParentLinks.set(nestedPath, parentLink);
+			new import_obsidian5.Notice(`Moved ${branch.length} topic${branch.length === 1 ? '' : 's'} to ${created.path}`);
+			return { file: created, card, data: nested, link: parentLink };
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: nested mind-map conversion failed', error);
+			if (registrySaved) {
+				this.markdownOwnership.removeCanvas(nestedPath);
+				try { await this.persistPluginData(); } catch (_) {}
+			}
 			if (card) {
 				try {
+					if (oldCardData) setCanvasNodeUnknownData(card, oldCardData);
 					this.canvasApi.removeNode(canvas, card);
 				} catch (_) {}
 			}
 			if (created) {
-				try {
-					await this.app.vault.delete(created);
-				} catch (_) {}
+				try { await this.app.vault.delete(created); } catch (_) {}
 			}
 			new import_obsidian5.Notice('Could not create the nested mind map');
 			return null;
 		}
 	}
 
+	async waitForCanvasNode(path, nodeId, timeoutMs = 1000) {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const open = this.getOpenCanvasByPath(path);
+			const node = open?.nodes?.get(nodeId);
+			if (open && node) return { canvas: open, node };
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		return null;
+	}
 	async openParentMindMap(canvas, parent) {
-		const parentPath = parent?.canvas;
-		const parentNodeId = parent?.nodeId;
-		if (!parentPath || !parentNodeId) {
+		if (!parent) {
 			new import_obsidian5.Notice('This mind map has no parent link');
 			return;
 		}
-		const file = this.app.vault.getAbstractFileByPath(parentPath);
-		if (!(file instanceof import_obsidian5.TFile)) {
-			new import_obsidian5.Notice('The parent mind map no longer exists');
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parent);
+		if (!resolved.ok) {
+			new import_obsidian5.Notice(`Could not open the parent mind map: ${resolved.reason}`);
 			return;
 		}
+		const file = resolved.link.file;
+		const parentPath = resolved.link.canvas;
+		const parentNodeId = resolved.link.nodeId;
 		try {
 			const leaf = this.app.workspace.getLeaf(false);
 			await leaf.openFile(file);
-			await new Promise((resolve) => setTimeout(resolve, 200));
-			const parentCanvas = this.getOpenCanvasByPath(parentPath);
-			const target = parentCanvas?.nodes.get(parentNodeId);
-			if (!target) {
+			const ready = await this.waitForCanvasNode(parentPath, parentNodeId);
+			if (!ready) {
 				new import_obsidian5.Notice('The parent topic could not be found');
 				return;
 			}
-			this.canvasApi.selectForNavigation(
-				parentCanvas,
-				target,
-				this.settings.navigationZoomPadding
-			);
+			this.canvasApi.selectForNavigation(ready.canvas, ready.node, this.settings.navigationZoomPadding);
 		} catch (error) {
 			console.error('ToMindMap: parent navigation failed', error);
 			new import_obsidian5.Notice('Could not open the parent mind map');
@@ -7745,65 +6006,106 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 
 	async convertMarkdownFileToMindMap(file) {
+		let created = null;
+		let registrySaved = false;
+		let sourcePatched = false;
+		let originalMarkdown = '';
+		let patchedMarkdownContent = '';
 		try {
-			const markdown = await this.app.vault.cachedRead(file);
-			const imported = markdownMindMapToCanvas(
-				markdown,
+			originalMarkdown = await this.app.vault.cachedRead(file);
+			const decoded = this.layoutMarkdownDocument(
+				originalMarkdown,
 				this.markdownLayoutOptions()
 			);
-			if (!imported) {
-				new import_obsidian5.Notice('No Markdown hierarchy was found');
+			if (!decoded.ok) {
+				new import_obsidian5.Notice(`Could not read the Markdown hierarchy: ${decoded.reason}`);
 				return;
 			}
-			const folder =
-				file.parent && file.parent.path ? `${file.parent.path}/` : '';
-			let canvasPath = `${folder}${file.basename}.canvas`;
-			let counter = 2;
-			while (this.app.vault.getAbstractFileByPath(canvasPath)) {
-				canvasPath = `${folder}${file.basename} ${counter}.canvas`;
-				counter++;
-			}
-			convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
+			const imported = decoded.value;
+			const folder = file.parent?.path || '';
+			const canvasPath = allocateFilePath(
+				folder,
+				file.basename,
+				'canvas',
+				(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+			);
+			const syncId = createSyncId();
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath,
+				kind: 'markdown',
+				targetPath: file.path,
+				syncId,
+				nodeId: null
+			});
+			if (!syncId || !issued.ok) throw new Error(issued.reason || 'Could not mint Markdown ownership');
+			const patchedMarkdown = patchSyncIdOwnership(originalMarkdown, issued.record.syncId);
+			if (!patchedMarkdown.ok) throw new Error(patchedMarkdown.reason);
+			imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
+			const link = {
+				path: file.path,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			};
 			const canvasData = {
 				nodes: imported.nodes,
 				edges: imported.edges,
 				mindmap: true,
 				mindmapPendingResize: imported.nodes.map((node) => node.id),
 				mindmapMarkdownFrontmatter: imported.frontmatter || '',
-				mindmapMarkdownSync: { path: file.path }
+				mindmapMarkdownSync: link
 			};
-			const created = await this.app.vault.create(
-				canvasPath,
-				JSON.stringify(canvasData, null, '	')
+			created = await this.app.vault.create(canvasPath, JSON.stringify(canvasData, null, '\t'));
+			const preserved = MarkdownMindMapCodec.markdownWithTopicMetadata(
+				MarkdownMindMapCodec.withoutLegacyPluginComments(patchedMarkdown.markdown),
+				{
+					topicIds: imported.topicIds || [],
+					topicKeys: imported.topicKeys || [],
+					topicLabels: imported.topicLabels || []
+				}
 			);
-			this.indexMarkdownLink(created.path, file.path);
-			const preserved = markdownWithTopicMetadata(
-				withoutLegacyPluginComments(markdown),
-				imported.topicIds || [],
-				imported.topicKeys || [],
-				imported.topicLabels || []
-			);
-			if (preserved !== markdown)
-				await this.writeMarkdownFile(file, preserved, markdown);
+			patchedMarkdownContent = preserved;
+			const written = await this.writeMarkdownFile(file, preserved, originalMarkdown);
+			if (!written.ok) throw new Error(written.reason || LINK_REASON.FAILED);
+			sourcePatched = true;
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			registrySaved = true;
+			await this.persistPluginData();
+			if (!this.indexMarkdownLink(created.path, file.path))
+				throw new Error(LINK_REASON.FAILED);
+			this.verifiedMarkdownLinks.set(created.path, link);
 			await this.app.workspace.getLeaf(false).openFile(created);
 			new import_obsidian5.Notice(
 				`Created "${created.path}" and linked it to "${file.path}"`
 			);
 		} catch (error) {
+			if (registrySaved) {
+				this.markdownOwnership.removeCanvas(created?.path || '');
+				try { await this.persistPluginData(); } catch (_) {}
+			}
+			if (sourcePatched && originalMarkdown && patchedMarkdownContent) {
+				try { await this.writeMarkdownFile(file, originalMarkdown, patchedMarkdownContent); } catch (_) {}
+			}
+			if (created) {
+				try {
+					this.unindexCanvas(created.path);
+					this.verifiedMarkdownLinks.delete(created.path);
+					await this.app.vault.delete(created);
+				} catch (_) {}
+			}
 			console.error('ToMindMap: Markdown conversion failed', error);
-			new import_obsidian5.Notice(
-				'Could not convert that Markdown file to a mind map'
-			);
+			new import_obsidian5.Notice('Could not convert that Markdown file to a mind map');
 		}
 	}
 	async copyMindMapMarkdown(canvas) {
-		const markdown = portableMindMapMarkdown(canvas);
-		if (!markdown.trim()) {
+		const encoded = this.encodeMarkdownDocument(canvas, { includeFrontmatter: false });
+		if (!encoded.ok || !encoded.value.markdown.trim()) {
 			new import_obsidian5.Notice('No mind map topics to copy');
 			return;
 		}
 		try {
-			await navigator.clipboard.writeText(markdown);
+			await writeClipboardText(encoded.value.markdown);
 			new import_obsidian5.Notice('Mind map copied as Markdown');
 		} catch (error) {
 			console.error('ToMindMap: clipboard export failed', error);
@@ -7828,9 +6130,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	handleMindMapClipboardCopy(event, cut) {
 		const canvas = this.clipboardCanvas(event);
 		if (!canvas || !event.clipboardData) return;
-		const roots = selectedMindMapTrees(canvas);
+		const roots = MarkdownMindMapCodec.extractSelectedTopicForest(canvas);
 		if (roots.length === 0) return;
-		const markdown = portableMindMapMarkdown(canvas, roots);
+		const encoded = this.encodeMarkdownDocument(canvas, {
+			includeFrontmatter: false,
+			rootTrees: roots
+		});
+		if (!encoded.ok) return;
+		const markdown = encoded.value.markdown;
 		event.preventDefault();
 		event.stopImmediatePropagation();
 		event.clipboardData.setData('text/plain', markdown);
@@ -7867,23 +6174,55 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			'';
 		if (!canvas || !clipboardText.trim()) return;
 		const markdown = normalizeClipboardMarkdown(clipboardText);
-		const imported = markdownMindMapToCanvas(
+		const decoded = this.layoutMarkdownDocument(
 			markdown,
 			this.markdownLayoutOptions()
 		);
-		if (!imported) return;
+		if (!decoded.ok) return;
 		event.preventDefault();
 		event.stopImmediatePropagation();
 		const parent = this.canvasApi.getSelectedNode(canvas);
-		void this.importMarkdownIntoCanvas(
-			canvas,
-			markdown,
-			'clipboard',
-			parent
+		this.runAsync(
+			() => this.importMarkdownIntoCanvas(canvas, markdown, 'clipboard', parent),
+			'paste Markdown'
 		);
 	}
-	async saveMindMapMarkdown(canvas) {
-		await this.attachMarkdownSync(canvas);
+	async readBoundedMarkdownFile(file) {
+		const maxBytes = MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes;
+		if (Number(file?.size || 0) > maxBytes) {
+			return { ok: false, reason: 'file-byte-budget' };
+		}
+		if (typeof file?.stream === 'function') {
+			const reader = file.stream().getReader();
+			const chunks = [];
+			let bytes = 0;
+			try {
+				while (true) {
+					const part = await reader.read();
+					if (part.done) break;
+					bytes += part.value?.byteLength || part.value?.length || 0;
+					if (bytes > maxBytes) {
+						await reader.cancel?.();
+						return { ok: false, reason: 'file-byte-budget' };
+					}
+					chunks.push(part.value);
+				}
+			} finally {
+				reader.releaseLock?.();
+			}
+			const decoder = new TextDecoder();
+			const output = new Uint8Array(bytes);
+			let offset = 0;
+			for (const chunk of chunks) {
+				output.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			return { ok: true, value: decoder.decode(output) };
+		}
+		const text = await file.text();
+		if (new TextEncoder().encode(text).byteLength > maxBytes)
+			return { ok: false, reason: 'file-byte-budget' };
+		return { ok: true, value: text };
 	}
 	importMarkdownFile(canvas) {
 		const input = document.createElement('input');
@@ -7894,20 +6233,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			input.removeEventListener('change', handler);
 			const file = (_a = input.files) == null ? void 0 : _a[0];
 			if (!file) return;
-			void file
-				.text()
-				.then((markdown) =>
-					this.importMarkdownIntoCanvas(canvas, markdown, file.name)
-				)
-				.catch((error) => {
-					console.error(
-						'ToMindMap: Markdown file import failed',
-						error
-					);
-					new import_obsidian5.Notice(
-						'Could not read that Markdown file'
-					);
-				});
+			this.runAsync(async () => {
+				const read = await this.readBoundedMarkdownFile(file);
+				if (!read.ok) {
+					new import_obsidian5.Notice(`Could not import Markdown: ${read.reason}`);
+					return;
+				}
+				await this.importMarkdownIntoCanvas(canvas, read.value, file.name);
+			}, 'import Markdown file');
 		};
 		input.addEventListener('change', handler);
 		input.click();
@@ -7918,17 +6251,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		sourceName = 'pasted Markdown',
 		parentNode = null
 	) {
-		const imported = markdownMindMapToCanvas(markdown, {
+		if (new TextEncoder().encode(String(markdown || '')).byteLength >
+			MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes) {
+			new import_obsidian5.Notice('Could not import Markdown: file-byte-budget');
+			return { ok: false, reason: 'file-byte-budget' };
+		}
+		const decoded = this.layoutMarkdownDocument(markdown, {
 			nodeWidth: this.settings.defaultNodeWidth,
 			nodeHeight: this.settings.defaultNodeHeight,
 			maxNodeHeight: this.settings.maxNodeHeight,
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap
 		});
-		if (!imported) {
-			new import_obsidian5.Notice('No Markdown hierarchy was found');
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Could not import Markdown: ${decoded.reason}`);
 			return;
 		}
+		const imported = decoded.value;
 		const idMap = new Map();
 		const reservedIds = new Set(canvas.nodes.keys());
 		for (const node of imported.nodes) {
@@ -7948,18 +6287,29 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const existing = Array.from(canvas.nodes.values()).filter(
 			(node) => !groupIds.has(node.id)
 		);
-		const localMinX = Math.min(...imported.nodes.map((node) => node.x));
-		const localMinY = Math.min(...imported.nodes.map((node) => node.y));
+		let localMinX = Infinity;
+		let localMinY = Infinity;
+		for (const node of imported.nodes) {
+			localMinX = Math.min(localMinX, Number(node.x) || 0);
+			localMinY = Math.min(localMinY, Number(node.y) || 0);
+		}
+		if (!Number.isFinite(localMinX) || !Number.isFinite(localMinY))
+			return { ok: false, reason: 'invalid-geometry' };
+		let existingMinX = Infinity;
+		let existingMaxY = -Infinity;
+		for (const node of existing) {
+			existingMinX = Math.min(existingMinX, Number(node.x) || 0);
+			existingMaxY = Math.max(existingMaxY, (Number(node.y) || 0) + (Number(node.height) || 0));
+		}
 		const targetX = parentNode
 			? parentNode.x + parentNode.width + this.settings.horizontalGap
 			: existing.length > 0
-				? Math.min(...existing.map((node) => node.x))
+				? existingMinX
 				: 0;
 		const targetY = parentNode
 			? parentNode.y
 			: existing.length > 0
-				? Math.max(...existing.map((node) => node.y + node.height)) +
-					Math.max(160, this.settings.verticalGap * 8)
+				? existingMaxY + Math.max(160, this.settings.verticalGap * 8)
 				: 0;
 		const dx = targetX - localMinX;
 		const dy = targetY - localMinY;
@@ -7969,8 +6319,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const canvasPath =
 			canvas.view && canvas.view.file ? canvas.view.file.path : '';
-		convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
-		const currentData = canvas.getData();
+		imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+			imported.nodes,
+			canvasPath
+		);
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		try {
+			const currentData = canvas.getData();
 		if (currentData.mindmap !== true) {
 			currentData.mindmap = true;
 		}
@@ -7982,6 +6337,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const importedNodes = imported.nodes
 			.map((data) => canvas.nodes.get(data.id))
 			.filter(Boolean);
+		if (importedNodes.length !== imported.nodes.length)
+			throw new Error('Canvas did not materialize every imported topic');
+		const importedEdges = imported.edges
+			.map((data) => canvas.edges.get(data.id))
+			.filter(Boolean);
+		if (importedEdges.length !== imported.edges.length)
+			throw new Error('Canvas did not materialize every imported edge');
 		const focusPastedRoot = () => {
 			if (sourceName !== 'clipboard') return;
 			const root =
@@ -7998,18 +6360,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (parentNode) {
 			for (const rootId of imported.rootIds) {
 				const root = canvas.nodes.get(rootId);
-				if (root)
-					this.canvasApi.createEdge(
-						canvas,
-						parentNode,
-						root,
-						'right',
-						'left',
-						parentNode.color || void 0
-					);
+				if (!root) throw new Error('An imported root disappeared before connection');
+				const edge = this.canvasApi.createEdge(
+					canvas,
+					parentNode,
+					root,
+					'right',
+					'left',
+					parentNode.color || void 0
+				);
+				if (!edge) throw new Error('Canvas did not create an imported-root edge');
 			}
-			this.markMarkdownOrderDirty(canvas);
 		}
+		this.markMarkdownOrderDirty(canvas);
 		if (this.isAutoAdjustCanvas(canvas)) {
 			this.resizeNodesWhenRendered(
 				canvas,
@@ -8046,15 +6409,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.settings.navigationZoomPadding
 				);
 		}
-		new import_obsidian5.Notice(
-			`Imported ${imported.nodes.length} topic${imported.nodes.length === 1 ? '' : 's'} from ${sourceName}${missingMediaCount > 0 ? ` · ${missingMediaCount} missing media highlighted` : ''}`
-		);
+			new import_obsidian5.Notice(
+				`Imported ${imported.nodes.length} topic${imported.nodes.length === 1 ? '' : 's'} from ${sourceName}${missingMediaCount > 0 ? ` · ${missingMediaCount} missing media highlighted` : ''}`
+			);
+			return { ok: true, imported: imported.nodes.length };
+		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				this.canvasApi.invalidateEdgeIndex();
+				if (this.isMindmapCanvas(canvas)) MindmapActions.syncCollapsedVisibility(canvas);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			new import_obsidian5.Notice('Could not import the Markdown hierarchy');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
+		}
 	}
 	updateNodeTypeAttributes(canvas) {
 		if (!canvas || !canvas.nodes) return;
-		const edgeIndex = canvas.edges
-			? this.canvasApi.getEdgeIndex(canvas)
-			: { incoming: new Map(), outgoing: new Map() };
+		const graph = this.canvasApi.getGraphQuery?.(canvas) || null;
 		for (const node of canvas.nodes.values()) {
 			if (!node || !node.nodeEl) continue;
 			const nodeFilePath = canvasNodeFilePath(node);
@@ -8103,7 +6476,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			const isRootTopic =
 				type === 'text' &&
-				!edgeIndex.incoming.has(node.id);
+				(graph?.incomingEdgesOf(node)?.length || 0) === 0;
 			for (const element of new Set([
 				node.nodeEl,
 				shell,
@@ -8230,7 +6603,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.layoutEngine.layout(canvas);
 			this.updateGroupBounds(canvas);
 			canvas.requestSave();
-			void this.flushCanvasToMarkdown(canvas);
+			this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 		}
 		return attached;
 	}
@@ -8239,7 +6612,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!wrapper) return () => {};
 		let hoveredNode = null;
 		const supports = (event) =>
-			MediaDrop.hasSupportedDrop(event.dataTransfer);
+			hasSupportedDrop(event.dataTransfer);
 
 		const clearHover = () => {
 			if (hoveredNode && hoveredNode.nodeEl) {
@@ -8280,22 +6653,34 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 		};
 		const onDrop = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			if (!supports(event)) return;
-			event.preventDefault();
-			event.stopImmediatePropagation();
-			const target = hoveredNode || findNodeFromEvent(canvas, event);
-			clearHover();
-			const groupIds = getGroupIds(canvas);
-			const topic = target && !groupIds.has(target.id) ? target : null;
-			const position = canvas.posFromEvt(event);
-			const files = Array.from(event.dataTransfer?.files || []);
-			if (files.length > 0) {
-				void this.addDroppedFiles(canvas, files, position, topic);
-				return;
-			}
-			const url = MediaDrop.droppedUrl(event.dataTransfer);
-			if (url) this.addDroppedUrl(canvas, url, position, topic);
+			void (async () => {
+				if (!this.isMindmapCanvas(canvas)) {
+					clearHover();
+					return;
+				}
+				if (!supports(event)) {
+					clearHover();
+					return;
+				}
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				const target = findNodeFromEvent(canvas, event);
+				clearHover();
+				const groupIds = getGroupIds(canvas);
+				const topic = target && !groupIds.has(target.id) ? target : null;
+				const position = canvas.posFromEvt(event);
+				const files = Array.from(event.dataTransfer?.files || []);
+				if (files.length > 0) {
+					await this.addDroppedFiles(canvas, files, position, topic);
+					return;
+				}
+				const url = droppedUrl(event.dataTransfer);
+				if (url) await this.addDroppedUrl(canvas, url, position, topic);
+			})().catch((error) => {
+				clearHover();
+				console.error('ToMindMap: media drop failed', error);
+				new import_obsidian5.Notice('Could not add the dropped media');
+			});
 		};
 
 		wrapper.addEventListener('dragenter', onDragEnter, true);
@@ -8320,10 +6705,68 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			!window.matchMedia('(pointer: fine)').matches
 		);
 	}
+	/**
+	 * Reconfigure only the live input adapters affected by settings or mode.
+	 * Keyboard, mutation, media, and drag listeners stay attached for the
+	 * Canvas session, so changing a preference never requires a leaf switch.
+	 */
+	syncCanvasBindings(canvas = this.interceptedCanvas) {
+		if (this.cleanupTouchHandler) {
+			this.cleanupTouchHandler();
+			this.cleanupTouchHandler = null;
+		}
+		if (this.cleanupNavHandler) {
+			this.cleanupNavHandler();
+			this.cleanupNavHandler = null;
+		}
+		this.touchController = null;
+		if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+		if (this.isTouchUiEnabled()) {
+			this.touchController = new TouchControlsController({
+				canvas,
+				actions: this.createMindMapActionSurface(canvas),
+				Menu: import_obsidian5.Menu,
+				setIcon: import_obsidian5.setIcon,
+				isEnabled: () =>
+					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
+				isTopicNode: (node) =>
+					nodeIsConvertibleTopic(canvas, node) ||
+					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
+				onDoubleTap: (node) => {
+					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
+					const file = this.app.vault.getAbstractFileByPath(
+						canvasNodeFilePath(node)
+					);
+					if (!(file instanceof import_obsidian5.TFile)) return false;
+					void this.app.workspace.getLeaf(false).openFile(file);
+					return true;
+				},
+				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
+				buildMenuItems: (menu, node) => {
+					this.app.workspace.trigger('canvas:node-menu', menu, node);
+				}
+			});
+			this.cleanupTouchHandler = this.touchController.attach();
+		}
+		if (this.settings.mouseNavigation) {
+			const onPointerDown = (event) => {
+				if (event.button !== 3 && event.button !== 4) return;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				if (event.button === 3) this.navigateBack(canvas);
+				else this.navigateForward(canvas);
+			};
+			canvas.wrapperEl?.addEventListener('pointerdown', onPointerDown, true);
+			this.cleanupNavHandler = () =>
+				canvas.wrapperEl?.removeEventListener('pointerdown', onPointerDown, true);
+		}
+		return true;
+	}
 	registerNodeDragReparentHandler(canvas) {
 		const wrapper = canvas.wrapperEl;
-		if (!wrapper) return () => {};
+		if (!wrapper) return { finish() { return false; }, dispose() {} };
 		const ownerDocument = wrapper.ownerDocument || document;
+		const ownerWindow = ownerDocument.defaultView;
 		let draggedNode = null;
 		let dragStartPos = null;
 		let isSingleCardDrag = false;
@@ -8338,6 +6781,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let draggedMoveTo = null;
 		let dragPointerStart = null;
 		let latestPointerPosition = null;
+		let terminalReason = null;
+		let terminalResult = null;
+		let activePointerId = null;
 		const stableMediaPositions = new Map(
 			Array.from(canvas.nodes.values()).map((node) => [
 				node.id,
@@ -8612,7 +7058,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.settings.navigationZoomPadding
 					);
 					rememberMediaPosition(resized);
-					void this.flushCanvasToMarkdown(canvas);
+					this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				};
 				const view = wrapper.ownerDocument?.defaultView;
 				if (typeof view?.requestAnimationFrame === 'function')
@@ -8665,7 +7111,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (result.changed) this.markMarkdownOrderDirty(canvas);
 				canvas.requestSave();
 				rememberMediaPosition(selected);
-				void this.flushCanvasToMarkdown(canvas);
+				this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				return;
 			}
 			setMediaDragging(draggedNode, false);
@@ -8717,7 +7163,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (result.changed) this.markMarkdownOrderDirty(canvas);
 				canvas.requestSave();
 				rememberMediaPosition(nodeToMove);
-				void this.flushCanvasToMarkdown(canvas);
+				this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
@@ -8771,7 +7217,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
 				this.branchColors.applyColors(canvas);
 			canvas.requestSave();
-			void this.flushCanvasToMarkdown(canvas);
+			this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 			if (hierarchyChanged)
 				new import_obsidian5.Notice(
 					dropZone === 'child'
@@ -8780,8 +7226,64 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				);
 		};
 
+		const detachOwnedListeners = () => {
+			ownerDocument.removeEventListener('pointermove', onPointerMove, true);
+			ownerDocument.removeEventListener('pointerup', onPointerUp, true);
+			ownerDocument.removeEventListener('mousemove', onPointerMove, true);
+			ownerDocument.removeEventListener('mouseup', onPointerUp, true);
+		};
+		const clearOwnedGesture = () => {
+			cancelPreviewFrame();
+			if (pointerUpFrame !== null) {
+				if (typeof ownerWindow?.cancelAnimationFrame === 'function')
+					ownerWindow.cancelAnimationFrame(pointerUpFrame);
+				else clearTimeout(pointerUpFrame);
+				pointerUpFrame = null;
+			}
+			setMediaDragging(draggedNode, false);
+			setMindmapDragging(false);
+			dragAttachment.finish(
+				terminalReason === 'commit' ? 'commit' : 'cancel',
+				draggedNode
+			);
+			restoreDraggedMove();
+			detachOwnedListeners();
+			activePointerId = null;
+			draggedNode = null;
+			dragStartPos = null;
+			isSingleCardDrag = false;
+			liveBranchDirection = null;
+			livePreviewTargetId = null;
+			previewResolved = false;
+			resizingNode = null;
+			dragPointerStart = null;
+			latestPointerPosition = null;
+		};
+		const finishGesture = (reason, event = null) => {
+			if (terminalReason) return terminalResult;
+			if (
+				activePointerId !== null &&
+				event?.pointerId !== undefined &&
+				event.pointerId !== activePointerId
+			) return terminalResult;
+			terminalReason = reason;
+			if (reason === 'commit') {
+				try {
+					finishPointerUp(event);
+				} finally {
+					clearOwnedGesture();
+				}
+			} else {
+				clearOwnedGesture();
+			}
+			terminalResult = { ok: true, reason };
+			return terminalResult;
+		};
+		const onPointerCancel = (event) => finishGesture('cancel', event);
+		const onWindowBlur = () => finishGesture('blur');
+
 		const onPointerUp = (event) => {
-			if (pointerUpFrame !== null) return;
+			if (terminalReason || pointerUpFrame !== null) return;
 			if (draggedNode) latestPointerPosition = canvas.posFromEvt(event);
 			if (
 				draggedNode &&
@@ -8793,7 +7295,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const view = wrapper.ownerDocument?.defaultView;
 			const finish = () => {
 				pointerUpFrame = null;
-				finishPointerUp(event);
+				finishGesture('commit', event);
 			};
 			pointerUpFrame =
 				typeof view?.requestAnimationFrame === 'function'
@@ -8802,11 +7304,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 
 		const onPointerDown = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			dragAttachment.cancel();
-			const node = findNodeFromEvent(canvas, event);
-			const groupIds = getGroupIds(canvas);
-			if (node && !groupIds.has(node.id)) {
+			if (terminalReason) {
+				dragAttachment.cancel();
+				terminalReason = null;
+				terminalResult = null;
+			}
+			const node = isPrimaryCardGesture(event, {
+				isEnabled: () => this.isMindmapCanvas(canvas),
+				findNode: (pointerEvent) => findNodeFromEvent(canvas, pointerEvent),
+				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
+			});
+			if (node) {
+				activePointerId = event.pointerId ?? null;
 				draggedNode = node;
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
@@ -8849,6 +7358,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 				}
 			} else {
+				if (draggedNode) finishGesture('cancel', event);
+				activePointerId = null;
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
@@ -8904,53 +7415,24 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		wrapper.addEventListener('pointerdown', onPointerDown, true);
 		wrapper.addEventListener('pointermove', onPointerMove, true);
 		wrapper.addEventListener('pointerup', onPointerUp, true);
-		return () => {
-			wrapper.removeEventListener(
-				'mousedown',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener(
-				'pointerdown',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener(
-				'touchstart',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener('pointerdown', onPointerDown, true);
-			wrapper.removeEventListener('pointermove', onPointerMove, true);
-			wrapper.removeEventListener('pointerup', onPointerUp, true);
-			ownerDocument.removeEventListener(
-				'pointermove',
-				onPointerMove,
-				true
-			);
-			ownerDocument.removeEventListener('pointerup', onPointerUp, true);
-			ownerDocument.removeEventListener('mousemove', onPointerMove, true);
-			ownerDocument.removeEventListener('mouseup', onPointerUp, true);
-			cancelPreviewFrame();
-			if (pointerUpFrame !== null) {
-				const view = wrapper.ownerDocument?.defaultView;
-				if (typeof view?.cancelAnimationFrame === 'function')
-					view.cancelAnimationFrame(pointerUpFrame);
-				else clearTimeout(pointerUpFrame);
-				pointerUpFrame = null;
+		ownerDocument.addEventListener('pointercancel', onPointerCancel, true);
+		ownerDocument.addEventListener('lostpointercapture', onPointerCancel, true);
+		ownerWindow?.addEventListener?.('blur', onWindowBlur);
+		return {
+			finish: finishGesture,
+			dispose(reason = 'teardown') {
+				finishGesture(reason === 'commit' ? 'commit' : reason);
+				wrapper.removeEventListener('mousedown', blockNonFileResizing, true);
+				wrapper.removeEventListener('pointerdown', blockNonFileResizing, true);
+				wrapper.removeEventListener('touchstart', blockNonFileResizing, true);
+				wrapper.removeEventListener('pointerdown', onPointerDown, true);
+				wrapper.removeEventListener('pointermove', onPointerMove, true);
+				wrapper.removeEventListener('pointerup', onPointerUp, true);
+				ownerDocument.removeEventListener('pointercancel', onPointerCancel, true);
+				ownerDocument.removeEventListener('lostpointercapture', onPointerCancel, true);
+				ownerWindow?.removeEventListener?.('blur', onWindowBlur);
+				detachOwnedListeners();
 			}
-			setMediaDragging(draggedNode, false);
-			setMindmapDragging(false);
-			dragAttachment.cancel();
-			restoreDraggedMove();
-			draggedNode = null;
-			dragStartPos = null;
-			isSingleCardDrag = false;
-			liveBranchDirection = null;
-			livePreviewTargetId = null;
-			resizingNode = null;
-			dragPointerStart = null;
-			latestPointerPosition = null;
 		};
 	}
 	canvasViewportCenter(canvas) {
@@ -9005,49 +7487,61 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	async syncParentLinkedCardTitle(canvas, title, childFile = null) {
 		const parentLink = canvas?.getData?.()?.[TOMINMAP_PARENT];
-		const parentPath = parentLink?.canvas;
-		const parentNodeId = parentLink?.nodeId;
-		if (!parentPath || !parentNodeId || !title) return false;
-		const parentFile = this.app.vault.getAbstractFileByPath(parentPath);
+		if (!parentLink || !title) return false;
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parentLink);
+		if (!resolved.ok) return false;
+		const parentPath = resolved.link.canvas;
+		const parentNodeId = resolved.link.nodeId;
+		const parentFile = resolved.link.file;
 		if (!(parentFile instanceof import_obsidian5.TFile)) return false;
-		const patchData = (data) =>
-			MindmapActions.updateLinkedParentCardData(
-				data,
-				parentNodeId,
-				title,
-				childFile?.path
-			);
+		const patchData = (data) => {
+			const card = (data.nodes || []).find((node) => node.id === parentNodeId);
+			if (!card) return null;
+			card.unknownData = {
+				...(card.unknownData || {}),
+				[TOMINMAP_TITLE_ONLY]: true,
+				[TOMINMAP_CARD_KIND]: 'nested-map',
+				[TOMINMAP_CARD_TITLE]: title,
+				[CARD_SYNC_KEY]: resolved.link.syncId
+			};
+			if (childFile?.path) card.file = childFile.path;
+			return data;
+		};
 		const parentCanvas = this.getOpenCanvasByPath(parentPath);
 		const card = parentCanvas?.nodes?.get(parentNodeId);
 		if (card) {
 			if (childFile?.path) {
-				if (typeof card.setFilePath === 'function')
-					card.setFilePath(childFile.path, card.subpath || '');
-				else if (typeof card.setFile === 'function')
-					card.setFile(childFile, '');
-				else {
-					card.file = childFile;
-					card.filePath = childFile.path;
-				}
+				if (typeof card.setFilePath === 'function') card.setFilePath(childFile.path, card.subpath || '');
+				else if (typeof card.setFile === 'function') card.setFile(childFile, '');
+				else { card.file = childFile; card.filePath = childFile.path; }
 			}
 			setCanvasNodeUnknownData(card, {
 				[TOMINMAP_TITLE_ONLY]: true,
 				[TOMINMAP_CARD_KIND]: 'nested-map',
-				[TOMINMAP_CARD_TITLE]: title
+				[TOMINMAP_CARD_TITLE]: title,
+				[CARD_SYNC_KEY]: resolved.link.syncId
 			});
 			this.updateNodeTypeAttributes(parentCanvas);
 			this.updateGroupBounds(parentCanvas);
-			parentCanvas.requestSave?.();
+			this.syncApplyingCanvas.add(parentCanvas);
+			try {
+				parentCanvas.requestSave?.();
+				await flushCanvasView(parentCanvas, this.app.vault);
+			} finally {
+				this.syncApplyingCanvas.delete(parentCanvas);
+			}
 			return true;
 		}
 		if (typeof this.app.vault.process !== 'function') return false;
+		let patchedCard = false;
 		try {
 			await this.app.vault.process(parentFile, (raw) => {
 				const data = JSON.parse(raw);
 				const patched = patchData(data);
+				patchedCard = Boolean(patched);
 				return patched ? JSON.stringify(patched, null, '\t') : raw;
 			});
-			return true;
+			return patchedCard;
 		} catch (error) {
 			console.error('ToMindMap: could not update the parent linked card', error);
 			return false;
@@ -9080,10 +7574,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		if (competingMaps.length > 0) return false;
 		if (title === file.basename) return false;
-		const folder = file.parent?.path ? `${file.parent.path}/` : '';
-		const target = `${folder}${title}.canvas`;
+		const target = allocateFilePath(
+			file.parent?.path || '',
+			title,
+			'canvas',
+			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+		);
 		if (target === file.path) return false;
-		if (this.app.vault.getAbstractFileByPath(target)) return false;
 		try {
 			await this.app.fileManager.renameFile(file, target);
 			await this.syncParentLinkedCardTitle(
@@ -9120,16 +7617,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						y: topic.y
 					}
 				: this.canvasViewportCenter(canvas);
-			void this.addDroppedFiles(canvas, files, position, topic);
+			this.runAsync(() => this.addDroppedFiles(canvas, files, position, topic), 'add dropped files');
 		};
 		input.addEventListener('change', handler);
 		input.click();
 	}
 	async addDroppedFiles(canvas, files, position, topic = null) {
+		if (!this.isMindmapCanvas(canvas)) return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
+		const MAX_FILES = 100;
+		const MAX_BYTES = 256 * 1024 * 1024;
+		const selected = Array.from(files || []).slice(0, MAX_FILES);
+		let totalBytes = 0;
+		for (const file of selected) totalBytes += Number(file?.size || 0);
+		if (totalBytes > MAX_BYTES) {
+			new import_obsidian5.Notice('The dropped media is too large to import safely');
+			return { ok: false, reason: 'file-byte-budget' };
+		}
 		const sourcePath = canvas.view?.file?.path || '';
 		const createdFiles = [];
 		let failures = 0;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const markdownPath = this.verifiedMarkdownLinks.get(canvas.view?.file?.path)?.path || '';
 		const queuedMarkdownApply = markdownPath
 			? this.markdownModifyTimers.get(markdownPath)
 			: void 0;
@@ -9139,123 +7647,81 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		this.localCanvasMutations.add(canvas);
 		try {
-			for (const file of files) {
+			for (const file of selected) {
 				try {
-					const attachmentPath =
-						await this.app.fileManager.getAvailablePathForAttachment(
-							file.name || 'Attachment',
-							sourcePath
-						);
+					const attachmentPath = await this.app.fileManager.getAvailablePathForAttachment(
+						file.name || 'Attachment',
+						sourcePath
+					);
 					const created = await this.app.vault.createBinary(
 						attachmentPath,
 						await file.arrayBuffer()
 					);
-					createdFiles.push({
-						file: created,
-						mimeType: file.type || ''
-					});
+					createdFiles.push({ file: created, mimeType: file.type || '' });
 				} catch (error) {
 					failures++;
-					console.error(
-						`ToMindMap: could not add dropped file "${file.name || 'Attachment'}"`,
-						error
-					);
+					console.error(`ToMindMap: could not add dropped file "${file.name || 'Attachment'}"`, error);
 				}
 			}
 			if (createdFiles.length === 0) {
 				new import_obsidian5.Notice('Could not add the dropped files');
-				return;
+				return { ok: false, reason: LINK_REASON.FAILED, failures };
 			}
 			const nodes = [];
 			let cursorY = topic ? topic.y : Number(position?.y) || 0;
-			const startX = topic
-				? topic.x + topic.width + this.settings.horizontalGap
-				: Number(position?.x) || 0;
-
+			const startX = topic ? topic.x + topic.width + this.settings.horizontalGap : Number(position?.x) || 0;
 			for (const { file, mimeType } of createdFiles) {
 				let id = genId();
 				while (canvas.nodes.has(id)) id = genId();
-				const nodeSpec = MediaDrop.createFileNodeSpec(
-					file.path,
-					mimeType,
-					{ x: startX, y: cursorY },
-					this.settings,
-					id
-				);
+				const nodeSpec = createFileNodeSpec(file.path, mimeType, { x: startX, y: cursorY }, this.settings, id);
+				if (!nodeSpec) throw new Error('Could not create a media card');
 				nodes.push(nodeSpec);
 				cursorY += nodeSpec.height + this.settings.verticalGap;
 			}
-
 			canvas.importData({ nodes, edges: [] });
+			if (nodes.some((spec) => !canvas.nodes.has(spec.id))) throw new Error('Canvas did not materialize imported media');
 			this.canvasApi.invalidateEdgeIndex();
-
 			if (topic) {
 				for (const spec of nodes) {
 					const childNode = canvas.nodes.get(spec.id);
 					if (childNode) this.connectTopics(canvas, topic, childNode);
 				}
 			} else {
-				this.attachNearbyOrphanMedia(
-					canvas,
-					nodes.map((node) => node.id)
-				);
+				this.attachNearbyOrphanMedia(canvas, nodes.map((node) => node.id));
 				const first = canvas.nodes.get(nodes[0].id);
-				if (first)
-					this.canvasApi.selectForNavigation(
-						canvas,
-						first,
-						this.settings.navigationZoomPadding
-					);
+				if (first) this.canvasApi.selectForNavigation(canvas, first, this.settings.navigationZoomPadding);
 			}
-			// This queues the newer Canvas state for Markdown before the mutation
-			// guard is released.
 			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
 			const added = createdFiles.length;
-			void this.flushCanvasToMarkdown(canvas);
-			new import_obsidian5.Notice(
-				`Added ${added} file${added === 1 ? '' : 's'} to the mind map${failures > 0 ? ` · ${failures} could not be read` : ''}`
-			);
+			new import_obsidian5.Notice(`Added ${added} file${added === 1 ? '' : 's'} to the mind map${failures > 0 ? ` · ${failures} could not be read` : ''}`);
+			return { ok: true, imported: added, failures };
+		} catch (error) {
+			try { canvas.setData(beforeData); } catch (_) {}
+			for (const { file } of createdFiles) {
+				try { await this.app.vault.delete(file); } catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not add the dropped files');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		} finally {
 			this.localCanvasMutations.delete(canvas);
 		}
 	}
 	resolveDroppedVaultFile(value, sourcePath = '') {
-		const extracted = MediaDrop.extractFilePathFromUrl(value);
-		if (!extracted) return null;
+		const resource = decodeMediaResource(value, sourcePath);
+		if (!resource.ok || resource.type !== 'vault-file') return null;
 		const candidates = [];
 		const addCandidate = (candidate) => {
-			let normalized = String(candidate || '').trim();
-			if (!normalized) return;
-			try {
-				normalized = decodeURIComponent(normalized);
-			} catch (_) {}
-			normalized = normalized.replace(/\\/g, '/').replace(/^\.\/+/, '');
-			if (!candidates.includes(normalized)) candidates.push(normalized);
-			const withoutLeadingSlash = normalized.replace(/^\/+/, '');
-			if (
-				withoutLeadingSlash &&
-				!candidates.includes(withoutLeadingSlash)
-			)
-				candidates.push(withoutLeadingSlash);
+			const normalized = String(candidate || '')
+				.trim()
+				.replace(/\\/g, '/')
+				.replace(/^\/+/, '');
+			if (normalized && !candidates.includes(normalized))
+				candidates.push(normalized);
 		};
-		addCandidate(extracted);
-		if (String(value || '').startsWith('file:')) {
-			const basePath = this.app.vault.adapter?.getBasePath?.();
-			if (basePath) {
-				const normalizedBase = String(basePath)
-					.replace(/\\/g, '/')
-					.replace(/\/+$/, '');
-				const absolute = candidates[0] || '';
-				if (
-					absolute === normalizedBase ||
-					absolute.startsWith(`${normalizedBase}/`)
-				)
-					addCandidate(
-						absolute
-							.slice(normalizedBase.length)
-							.replace(/^\/+/, '')
-					);
-			}
+		addCandidate(resource.path);
+		if (!resource.protocol && resource.sourceDirectory) {
+			addCandidate(`${resource.sourceDirectory}/${resource.path}`);
 		}
 		for (const candidate of candidates) {
 			const direct = this.app.vault.getAbstractFileByPath(candidate);
@@ -9268,66 +7734,64 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const files = this.app.vault.getFiles?.() || [];
 		for (const candidate of candidates) {
-			const suffix = `/${candidate.replace(/^\/+/, '')}`;
-			const matches = files.filter((file) =>
-				`/${file.path}`.endsWith(suffix)
-			);
+			const suffix = `/${candidate}`;
+			const matches = files.filter((file) => `/${file.path}`.endsWith(suffix));
 			if (matches.length === 1) return matches[0];
 		}
 		return null;
 	}
-	addDroppedUrl(canvas, url, position, topic = null) {
-		let id = genId();
-		while (canvas.nodes.has(id)) id = genId();
-
-		const startX = topic
-			? topic.x + topic.width + this.settings.horizontalGap
-			: Number(position?.x) || 0;
-		const startY = topic ? topic.y : Number(position?.y) || 0;
-
+	async addDroppedUrl(canvas, url, position, topic = null) {
+		if (!this.isMindmapCanvas(canvas)) return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
+		const resource = decodeMediaResource(url, canvas.view?.file?.path || '');
+		if (!resource.ok) {
+			new import_obsidian5.Notice(`Could not read the dropped resource: ${resource.reason}`);
+			return { ok: false, reason: LINK_REASON.FAILED };
+		}
 		const sourcePath = canvas.view?.file?.path || '';
 		const vaultFile = this.resolveDroppedVaultFile(url, sourcePath);
-		const isPlainFilePath =
-			MediaDrop.extractFilePathFromUrl(url) &&
-			!/^[a-z][a-z0-9+.-]*:/i.test(String(url || '').trim());
-		if (isPlainFilePath && !vaultFile) {
-			new import_obsidian5.Notice(
-				`Could not resolve the dropped vault file: ${url}`
-			);
-			return;
+		if (resource.type === 'vault-file' && !vaultFile) {
+			new import_obsidian5.Notice(`Could not resolve the dropped vault file: ${url}`);
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
 		}
+		let id = genId();
+		while (canvas.nodes.has(id)) id = genId();
+		const startX = topic ? topic.x + topic.width + this.settings.horizontalGap : Number(position?.x) || 0;
+		const startY = topic ? topic.y : Number(position?.y) || 0;
 		const nodeSpec = vaultFile
-			? MediaDrop.createFileNodeSpec(
+			? createFileNodeSpec(
 					vaultFile.path,
-					vaultFile.extension
-						? `application/${vaultFile.extension}`
-						: '',
+					vaultFile.extension ? `application/${vaultFile.extension}` : '',
 					{ x: startX, y: startY },
 					this.settings,
 					id
 				)
-			: MediaDrop.createLinkNodeSpec(
-					url,
-					{ x: startX, y: startY },
-					this.settings,
-					id
-				);
-
-		canvas.importData({ nodes: [nodeSpec], edges: [] });
-		this.canvasApi.invalidateEdgeIndex();
-
-		const node = canvas.nodes.get(id);
-		if (topic && node) {
-			this.connectTopics(canvas, topic, node);
-		} else if (node) {
-			this.canvasApi.selectForNavigation(
-				canvas,
-				node,
-				this.settings.navigationZoomPadding
-			);
+			: createLinkNodeSpec(url, { x: startX, y: startY }, this.settings, id);
+		if (!nodeSpec) {
+			new import_obsidian5.Notice('Could not create a card for that resource');
+			return { ok: false, reason: LINK_REASON.FAILED };
 		}
-		canvas.requestSave();
-		new import_obsidian5.Notice('Added link to the mind map');
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		try {
+			canvas.importData({ nodes: [nodeSpec], edges: [] });
+			const node = canvas.nodes.get(id);
+			if (!node) throw new Error('Canvas did not materialize the resource card');
+			this.canvasApi.invalidateEdgeIndex();
+			if (topic) {
+				this.connectTopics(canvas, topic, node);
+				if (this.canvasApi.getParentNode(canvas, node)?.id !== topic.id)
+					throw new Error('The resource could not be connected to the selected topic');
+			} else {
+				this.canvasApi.selectForNavigation(canvas, node, this.settings.navigationZoomPadding);
+			}
+			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
+			new import_obsidian5.Notice('Added link to the mind map');
+			return { ok: true, node };
+		} catch (error) {
+			try { canvas.setData(beforeData); } catch (_) {}
+			new import_obsidian5.Notice('Could not add the dropped resource');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
+		}
 	}
 	connectTopics(canvas, parent, child) {
 		if (!parent || !child || parent === child) return;
@@ -9368,27 +7832,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 	}
 	mediaTargetExists(target, sourcePath) {
-		const cleanTarget = String(target || '')
-			.split('#')[0]
-			.split('?')[0]
-			.trim();
-		if (!cleanTarget) return true;
-		const resolved = this.app.metadataCache.getFirstLinkpathDest(
-			cleanTarget,
-			sourcePath
-		);
-		if (resolved) return true;
-		const sourceFolder = sourcePath.includes('/')
-			? sourcePath.slice(0, sourcePath.lastIndexOf('/'))
-			: '';
-		const relative = sourceFolder
-			? `${sourceFolder}/${cleanTarget}`
-			: cleanTarget;
-		const normalized =
-			typeof import_obsidian5.normalizePath === 'function'
-				? (0, import_obsidian5.normalizePath)(relative)
-				: relative.replace(/\\/g, '/').replace(/\/+/g, '/');
-		return !!this.app.vault.getAbstractFileByPath(normalized);
+		const resource = decodeMediaResource(target, sourcePath);
+		if (!resource.ok) return false;
+		if (resource.type !== 'vault-file') return true;
+		const candidates = [resource.path, resource.path.replace(/^\/+/, '')];
+		if (!resource.protocol && resource.sourceDirectory)
+			candidates.push(`${resource.sourceDirectory}/${resource.path}`);
+		for (const candidate of candidates) {
+			const resolved = this.app.metadataCache.getFirstLinkpathDest(
+				candidate,
+				sourcePath
+			);
+			if (resolved) return true;
+			const normalized =
+				typeof import_obsidian5.normalizePath === 'function'
+					? (0, import_obsidian5.normalizePath)(candidate)
+					: candidate.replace(/\\/g, '/').replace(/\/+/g, '/');
+			if (this.app.vault.getAbstractFileByPath(normalized)) return true;
+		}
+		return false;
 	}
 	async validateMediaLinks(canvas, nodes, showNotice) {
 		const sourcePath =
@@ -9402,7 +7864,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const markers = { ...previous };
 		let missingCount = 0;
 		for (const node of nodes) {
-			const targets = extractLocalMediaTargets(node.text || '');
+			const targets = MarkdownMindMapCodec.extractLocalMediaTargets(node.text || '')
+				.map((target) => decodeMediaResource(target, sourcePath))
+				.filter((resource) => resource.ok && resource.type === 'vault-file')
+				.map((resource) => resource.path);
 			const missing = targets.filter(
 				(target) => !this.mediaTargetExists(target, sourcePath)
 			);
@@ -9447,15 +7912,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: {};
 		for (const node of canvas.nodes.values()) {
 			if (!node.nodeEl) continue;
+			const previousMissing = node.nodeEl.getAttribute?.('data-tomindmap-missing-media');
 			node.nodeEl.removeClass('tomindmap-missing-media');
 			node.nodeEl.removeAttribute('data-tomindmap-missing-media');
+			if (previousMissing?.startsWith('Missing media: '))
+				node.nodeEl.removeAttribute('aria-label');
 			const missing = markers[node.id];
 			if (!Array.isArray(missing) || missing.length === 0) continue;
+			const description = `Missing: ${missing.join(', ')}`;
 			node.nodeEl.addClass('tomindmap-missing-media');
-			node.nodeEl.setAttribute(
-				'data-tomindmap-missing-media',
-				`Missing: ${missing.join(', ')}`
-			);
+			node.nodeEl.setAttribute('data-tomindmap-missing-media', description);
+			node.nodeEl.setAttribute('aria-label', `Missing media: ${missing.join(', ')}`);
 		}
 	}
 	async prepareCanvasForExport(canvas, includeNestedMaps = false) {
@@ -9464,12 +7931,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const cache = new Map();
 		const active = new Set([canvasPathFor(canvas)].filter(Boolean));
 		let sequence = 0;
+		const MAX_NESTED_DEPTH = 32;
+		const MAX_EXPORT_NODES = 20000;
+		const MAX_EXPORT_BYTES = 5 * 1024 * 1024;
+		const budget = { nodes: 0, bytes: 0 };
 		const filePathOf = (node) =>
 			String(node?.file || '')
 				.split('#')[0]
 				.split('?')[0];
 		const isNestedCard = (node) =>
-			node?.type === 'file' && /\.canvas$/i.test(filePathOf(node));
+			node?.type === 'file' &&
+			/\.canvas$/i.test(filePathOf(node)) &&
+			canvasNodeUnknownData(node)[TOMINMAP_CARD_KIND] === 'nested-map';
 		const nodeText = (node) => {
 			if (node?.type === 'group') return node.label || 'Group';
 			if (node?.type === 'file') {
@@ -9477,14 +7950,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const path = filePathOf(node);
 				return path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'File';
 			}
-			return getRootTitle(canvasNodeMarkdownText(node));
+			return MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node));
 		};
-		const rectOf = (node) => ({
-			x: Number(node.x) || 0,
-			y: Number(node.y) || 0,
-			width: Number(node.width) || 260,
-			height: Number(node.height) || 60
-		});
+		const rectOf = (node) => {
+			const x = Number(node?.x);
+			const y = Number(node?.y);
+			const width = Number(node?.width);
+			const height = Number(node?.height);
+			if (
+				![x, y, width, height].every(Number.isFinite) ||
+				width <= 0 || height <= 0 || width > 100000 || height > 100000
+			) throw new Error('Nested export geometry is invalid');
+			return { x, y, width, height };
+		};
 		const intersects = (left, right, gap = 42) =>
 			!(
 				left.x + left.width + gap <= right.x ||
@@ -9494,10 +7972,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		const groupBounds = (nodes) => {
 			const rects = nodes.map(rectOf);
-			const minX = Math.min(...rects.map((item) => item.x));
-			const minY = Math.min(...rects.map((item) => item.y));
-			const maxX = Math.max(...rects.map((item) => item.x + item.width));
-			const maxY = Math.max(...rects.map((item) => item.y + item.height));
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const item of rects) {
+				minX = Math.min(minX, item.x);
+				minY = Math.min(minY, item.y);
+				maxX = Math.max(maxX, item.x + item.width);
+				maxY = Math.max(maxY, item.y + item.height);
+			}
 			return {
 				x: minX,
 				y: minY,
@@ -9562,9 +8046,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						return candidate;
 				}
 			}
-			const occupiedBottom = occupied.length
-				? Math.max(...occupied.map((item) => item.y + item.height))
-				: rectOf(anchor).y;
+			let occupiedBottom = rectOf(anchor).y;
+			for (const item of occupied)
+				occupiedBottom = Math.max(occupiedBottom, item.y + item.height);
 			return translate(
 				base,
 				0,
@@ -9572,25 +8056,54 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		};
 		const loadCanvas = async (path) => {
-			if (!path || active.has(path)) return null;
+			if (!path || active.has(path) || !isCanonicalVaultPath(path) || !/\.canvas$/i.test(path))
+				return null;
 			if (cache.has(path)) return cache.get(path);
 			const file = this.app.vault.getAbstractFileByPath(path);
 			if (!(file instanceof import_obsidian5.TFile)) {
 				cache.set(path, null);
 				return null;
 			}
+			if (Number.isFinite(file.size) && file.size > MAX_EXPORT_BYTES) {
+				cache.set(path, null);
+				return null;
+			}
 			try {
-				const data = JSON.parse(await this.app.vault.cachedRead(file));
+				const raw = await this.app.vault.cachedRead(file);
+				const bytes = new TextEncoder().encode(raw).byteLength;
+				if (bytes > MAX_EXPORT_BYTES) {
+					cache.set(path, null);
+					return null;
+				}
+				budget.bytes += bytes;
+				if (budget.bytes > MAX_EXPORT_BYTES) throw new Error('Nested export byte budget exceeded');
+				const data = JSON.parse(raw);
+				if (!Array.isArray(data?.nodes) || !Array.isArray(data?.edges))
+					throw new Error('Nested Canvas schema is invalid');
 				cache.set(path, data);
 				return data;
 			} catch (error) {
+				if (/Nested export (?:byte|node|depth) budget exceeded/.test(String(error?.message || "")))
+					throw error;
 				console.warn(`ToMindMap: could not read nested map ${path}`, error);
 				cache.set(path, null);
 				return null;
 			}
 		};
-		const expandLevel = async (data, prefix, occupied, ancestry) => {
+		const expandLevel = async (
+			data,
+			prefix,
+			occupied,
+			ancestry,
+			ownerPath = canvasPathFor(canvas),
+			depth = 0
+		) => {
+			if (depth > MAX_NESTED_DEPTH)
+				throw new Error('Nested export depth budget exceeded');
 			const sourceNodes = Array.isArray(data?.nodes) ? data.nodes : [];
+			budget.nodes += sourceNodes.length;
+			if (budget.nodes > MAX_EXPORT_NODES)
+				throw new Error('Nested export node budget exceeded');
 			const nodes = sourceNodes.map((node) => ({
 				...node,
 				id: `${prefix}${node.id}`
@@ -9614,7 +8127,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!nestedCards.has(node.id)) continue;
 				const path = filePathOf(node);
 				const nested = await loadCanvas(path);
-				if (!nested || ancestry.has(path)) {
+				const parentLink = nested?.mindmapParent;
+				const ownedParent =
+					Boolean(parentLink) &&
+					parentLink.canvas === ownerPath &&
+					this.markdownOwnership
+						.recordsForCanvas(path)
+						.some(
+							(record) =>
+								record.kind === 'parent' &&
+								record.targetPath === ownerPath &&
+								record.nodeId === parentLink.nodeId &&
+								record.proof === parentLink.proof
+						);
+				if (!nested || !ownedParent || ancestry.has(path)) {
 					output.push(node);
 					occupiedHere.push(rectOf(node));
 					continue;
@@ -9624,7 +8150,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					nested,
 					childPrefix,
 					occupiedHere,
-					new Set([...ancestry, path])
+					new Set([...ancestry, path]),
+					path,
+					depth + 1
 				);
 				if (child.nodes.length === 0) {
 					output.push(node);
@@ -9651,18 +8179,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				for (const placedNode of placed) occupiedHere.push(rectOf(placedNode));
 				replacements.set(node.id, child.rootIds);
 			}
-			const mapEndpoint = (id) => replacements.get(id)?.[0] || id;
-			for (const edge of sourceEdges) {
-				const fromNode = mapEndpoint(`${prefix}${edge.fromNode}`);
-				const toNode = mapEndpoint(`${prefix}${edge.toNode}`);
+			const mapEndpoint = (id) => replacements.get(id) || [id];
+			for (const [edgeIndex, edge] of sourceEdges.entries()) {
+				const fromValues = mapEndpoint(`${prefix}${edge.fromNode}`);
+				const toValues = mapEndpoint(`${prefix}${edge.toNode}`);
 				if (!byId.has(`${prefix}${edge.fromNode}`) || !byId.has(`${prefix}${edge.toNode}`))
 					continue;
-				outputEdges.push({
-					...edge,
-					id: `${prefix}edge-${edge.id || `${sourceEdges.indexOf(edge)}`}`,
-					fromNode,
-					toNode
-				});
+				for (const fromNode of fromValues) {
+					for (const toNode of toValues) {
+						outputEdges.push({
+							...edge,
+							id: `${prefix}edge-${edge.id || edgeIndex}`,
+							fromNode,
+							toNode
+						});
+					}
+				}
 			}
 			const incoming = new Set(outputEdges.map((edge) => edge.toNode));
 			const rootIds = output
@@ -9677,10 +8209,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			};
 		};
 		const expanded = await expandLevel(sourceData, '', [], active);
-		const exportData = {
-			...sourceData,
+		const exportPlan = createExportPlan({
+			title: canvas.view?.file?.basename || 'Mind map',
 			nodes: expanded.nodes,
 			edges: expanded.edges
+		}, {
+			replacements: expanded.replacements,
+			strictEdges: false
+		});
+		const exportData = {
+			...sourceData,
+			nodes: exportPlan.topics,
+			edges: exportPlan.edges
 		};
 		const wrapperRect =
 			canvas.wrapperEl?.getBoundingClientRect?.() || {
@@ -9736,6 +8276,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			expanded.nodes.map((node) => [
 				node.id,
 				{
+					...node,
 					id: node.id,
 					x: Number(node.x) || 0,
 					y: Number(node.y) || 0,
@@ -9743,8 +8284,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					height: Number(node.height) || 60,
 					color: node.color || '',
 					text: nodeText(node),
+					unknownData: { ...(node.unknownData || {}) },
 					nodeEl: exportNodeElement(node),
 					contentEl: null
+				}
+			])
+		);
+		const syntheticEdges = new Map(
+			exportData.edges.map((edge) => [
+				edge.id,
+				{
+					...edge,
+					from: { node: syntheticNodes.get(edge.fromNode), side: edge.fromSide },
+					to: { node: syntheticNodes.get(edge.toNode), side: edge.toSide }
 				}
 			])
 		);
@@ -9753,7 +8305,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			view: canvas.view,
 			selection: exportSelection,
 			nodes: syntheticNodes,
-			edges: new Map(),
+			edges: syntheticEdges,
+			exportPlan,
 			getData: () => exportData
 		};
 	}
@@ -9776,32 +8329,38 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return;
 		}
-		const exportCanvas = await this.prepareCanvasForExport(
-			canvas,
-			request.includeNestedMaps
-		);
-		const base =
-			canvas.view && canvas.view.file
-				? canvas.view.file.basename
-				: 'Mind map';
-		const scopeName =
-			scope === 'whole'
-				? 'Whole map'
-				: scope === 'viewport'
-					? 'Viewport'
-					: 'Selection';
+		let exportCanvas;
+		let base;
+		let scopeName;
+		const rasterSession = createRasterExportSession();
 		try {
+			exportCanvas = await this.prepareCanvasForExport(
+				canvas,
+				request.includeNestedMaps
+			);
+			base =
+				canvas.view && canvas.view.file
+					? canvas.view.file.basename
+					: 'Mind map';
+			scopeName =
+				scope === 'whole'
+					? 'Whole map'
+					: scope === 'viewport'
+						? 'Viewport'
+						: 'Selection';
 			if (request.format === 'markdown') {
-				const markdown = portableMindMapMarkdown(exportCanvas);
-				const filename = await saveToDownloads(
-					base,
-					'Mind map',
-					'md',
-					markdown
-				);
-				new import_obsidian5.Notice(
-					`Saved Markdown to Downloads: ${filename}`
-				);
+				const encoded = this.encodeMarkdownDocument(exportCanvas, {
+					includeFrontmatter: false
+				});
+				if (!encoded.ok) throw new Error(encoded.reason);
+				const markdown = encoded.value.markdown;
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: 'Mind map',
+					extension: 'md',
+					content: markdown
+				});
+				new import_obsidian5.Notice(`Saved Markdown: ${filename}`);
 				return;
 			}
 			const html = canvasPrintDocument(exportCanvas, scope);
@@ -9814,15 +8373,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (request.format === 'svg') {
 				const svg = pdfSvgFromDocument(embedded, false);
 				if (!svg) throw new Error('Could not build SVG');
-				const filename = await saveToDownloads(
-					base,
-					scopeName,
-					'svg',
-					svg.svg
-				);
-				new import_obsidian5.Notice(
-					`Saved SVG to Downloads: ${filename}`
-				);
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: scopeName,
+					extension: 'svg',
+					content: svg.svg
+				});
+				new import_obsidian5.Notice(`Saved SVG: ${filename}`);
 				return;
 			}
 			if (request.format === 'png') {
@@ -9832,7 +8389,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!svg) throw new Error('Could not build image');
 				let bytes;
 				try {
-					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png');
+					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png', {
+						session: rasterSession
+					});
 				} catch (error) {
 					console.warn(
 						'ToMindMap: rich image rendering failed; using portable text SVG',
@@ -9840,17 +8399,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 					svg = pdfSvgFromDocument(embedded, true);
 					if (!svg) throw error;
-					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png');
+					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png', {
+						session: rasterSession
+					});
 				}
-				const filename = await saveToDownloads(
-					base,
-					scopeName,
-					'png',
-					bytes
-				);
-				new import_obsidian5.Notice(
-					`Saved PNG to Downloads: ${filename}`
-				);
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: scopeName,
+					extension: 'png',
+					content: bytes
+				});
+				new import_obsidian5.Notice(`Saved PNG: ${filename}`);
 			}
 		} catch (error) {
 			console.error('ToMindMap: export failed', error);
@@ -9860,20 +8419,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 	async exportMindMapPdf(canvas, scope, includeNestedMaps = false) {
-		const exportCanvas = await this.prepareCanvasForExport(
-			canvas,
-			includeNestedMaps
-		);
-		const html = canvasPrintDocument(exportCanvas, scope);
-		if (!html) {
-			new import_obsidian5.Notice(
-				scope === 'selection'
-					? 'Select at least one card to export'
-					: 'Nothing is available in that export area'
-			);
-			return;
-		}
 		try {
+			const exportCanvas = await this.prepareCanvasForExport(
+				canvas,
+				includeNestedMaps
+			);
+			const html = canvasPrintDocument(exportCanvas, scope);
+			if (!html) {
+				new import_obsidian5.Notice(
+					scope === 'selection'
+						? 'Select at least one card to export'
+						: 'Nothing is available in that export area'
+				);
+				return;
+			}
 			const embedded = await embedDocumentAssets(
 				html,
 				this.exportAssetResolvers()
@@ -9897,8 +8456,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					: scope === 'viewport'
 						? 'Viewport'
 						: 'Selection';
-			const filename = await saveToDownloads(base, scopeName, 'pdf', pdf);
-			new import_obsidian5.Notice(`Saved PDF to Downloads: ${filename}`);
+			const filename = await this.deliverExport({
+				baseName: base,
+				suffix: scopeName,
+				extension: 'pdf',
+				content: pdf
+			});
+			new import_obsidian5.Notice(`Saved PDF: ${filename}`);
 		} catch (error) {
 			console.error('ToMindMap: PDF export failed', error);
 			const detail = error instanceof Error ? `: ${error.message}` : '';
@@ -9906,40 +8470,72 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 	/**
-	 * Resolvers that let the export pipeline inline every image and attachment
-	 * referenced by the cards, so PDFs, SVGs, and PNGs match the live canvas.
+	 * Vault assets are the default. HTTPS assets are reachable only after the
+	 * user explicitly approves their exact origin, and local file URLs are
+	 * never given an implicit filesystem reader.
 	 */
 	exportAssetResolvers() {
 		const vault = this.app.vault;
-		return {
-			readVaultFile: async (path) => {
-				const file = vault.getAbstractFileByPath(path);
-				if (!(file instanceof import_obsidian5.TFile)) return null;
-				try {
-					const buffer = await vault.adapter.readBinary(file.path);
-					return buffer;
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not read "${path}" for export`,
-						error
-					);
-					return null;
-				}
-			},
-			fetchUrl: async (url) => {
-				try {
-					const response = await fetch(url);
-					if (!response.ok) return null;
-					return new Uint8Array(await response.arrayBuffer());
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not fetch "${url}" for export`,
-						error
-					);
-					return null;
-				}
+		const readVaultFile = async (path) => {
+			const file = vault.getAbstractFileByPath(path);
+			if (!(file instanceof import_obsidian5.TFile)) return null;
+			try {
+				if (typeof vault.readBinary === 'function')
+					return await vault.readBinary(file);
+				if (typeof vault.adapter?.readBinary === 'function')
+					return await vault.adapter.readBinary(file.path);
+				return null;
+			} catch (error) {
+				console.warn(`ToMindMap: could not read "${path}" for export`, error);
+				return null;
 			}
 		};
+		return {
+			assetResolver: createExportAssetResolver({ readVaultFile })
+		};
+	}
+	/**
+	 * Obsidian's platform flag, not loader syntax, selects export delivery.
+	 * Desktop writes with exclusive filesystem creation; mobile uses the
+	 * browser download adapter when those capabilities are present.
+	 */
+	exportDeliveryCapabilities() {
+		const platform = import_obsidian5.Platform || {};
+		const ownerWindow = typeof window === 'undefined' ? null : window;
+		const ownerDocument = ownerWindow?.document || globalThis.document || null;
+		let filesystem = null;
+		if (platform.isDesktopApp === true && typeof require === 'function') {
+			try {
+				const fs = require('fs');
+				const path = require('path');
+				const os = require('os');
+				fsystem = {
+					fs,
+					path,
+					directory: path.join(os.homedir(), 'Downloads')
+				};
+			} catch (_) {
+				filesystem = null;
+			}
+		}
+		const canDownloadFiles = Boolean(
+			ownerWindow &&
+			typeof ownerWindow.Blob === 'function' &&
+			ownerWindow.URL?.createObjectURL &&
+			ownerWindow.URL?.revokeObjectURL &&
+			ownerDocument?.createElement &&
+			ownerDocument?.body?.appendChild
+		);
+		return {
+			canWriteDownloads: Boolean(filesystem),
+			canDownloadFiles,
+			filesystem,
+			browser: { window: ownerWindow, document: ownerDocument },
+			maxOutputBytes: 64 * 1024 * 1024
+		};
+	}
+	deliverExport(request) {
+		return createExportDelivery(this.exportDeliveryCapabilities()).deliver(request);
 	}
 	/**
 	 * Import a FreeMind .mm file and create a .canvas file.
@@ -9955,64 +8551,221 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const file = (_a = input.files) == null ? void 0 : _a[0];
 			if (!file) return;
 			void (async () => {
-				const xml = await file.text();
-				const canvasData = freemindToCanvas(xml, {
-					nodeWidth: this.settings.defaultNodeWidth,
-					nodeHeight: this.settings.defaultNodeHeight,
-					maxNodeHeight: this.settings.maxNodeHeight,
-					horizontalGap: this.settings.horizontalGap,
-					verticalGap: this.settings.verticalGap
-				});
-				if (!canvasData) {
-					new import_obsidian5.Notice(
-						'Failed to parse .mm file. Make sure it is a valid mind map file.'
+				let created = null;
+				let canvasPath = '';
+				try {
+					const xml = await file.text();
+					const decoded = decodeFreeMind(xml, {
+						budgets: DEFAULT_FREEMIND_BUDGETS,
+						nodeWidth: this.settings.defaultNodeWidth,
+						nodeHeight: this.settings.defaultNodeHeight,
+						maxNodeHeight: this.settings.maxNodeHeight,
+						horizontalGap: this.settings.horizontalGap,
+						verticalGap: this.settings.verticalGap
+					});
+					if (!decoded.ok) {
+						const detail = decoded.reason === FREEMIND_REASON.EXTERNAL_ENTITY
+							? 'external entities are not allowed'
+							: decoded.reason;
+						new import_obsidian5.Notice(`Could not import the FreeMind file: ${detail}`);
+						return;
+					}
+					const { roots, nodeCount, maxDepth, ...canvasData } = decoded.value;
+					canvasData.mindmap = true;
+					canvasData.mindmapPendingResize = canvasData.nodes.map((node) => node.id);
+					const baseName = file.name.replace(/\.mm$/i, '') || 'Mind map';
+					canvasPath = allocateFilePath(
+						folderPath || '',
+						baseName,
+						'canvas',
+						(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
 					);
-					return;
-				}
-				const baseName = file.name.replace(/\.mm$/i, '');
-				const folder = folderPath ? folderPath + '/' : '';
-				let canvasPath = `${folder}${baseName}.canvas`;
-				let counter = 1;
-				while (this.app.vault.getAbstractFileByPath(canvasPath)) {
-					canvasPath = `${folder}${baseName} ${counter}.canvas`;
-					counter++;
-				}
-				await this.app.vault.create(
-					canvasPath,
-					JSON.stringify(canvasData, null, '	')
-				);
-				const created =
-					this.app.vault.getAbstractFileByPath(canvasPath);
-				if (created instanceof import_obsidian5.TFile) {
+					created = await this.app.vault.create(
+						canvasPath,
+						JSON.stringify(canvasData, null, '\t')
+					);
 					await this.app.workspace.getLeaf(false).openFile(created);
+					new import_obsidian5.Notice(
+						`Imported "${file.name}" as "${created.path}"`
+					);
+				} catch (error) {
+					if (created) {
+						try { await this.app.vault.delete(created); } catch (_) {}
+					}
+					console.error('ToMindMap: FreeMind import failed', error);
+					new import_obsidian5.Notice('Could not import the FreeMind file');
 				}
-				new import_obsidian5.Notice(
-					`Imported "${file.name}" as "${canvasPath}"`
-				);
 			})();
 		};
 		input.addEventListener('change', handler);
 		input.click();
 	}
 	isMindmapCanvas(canvas) {
-		const data = canvas.getData();
-		if (typeof data.mindmap === 'boolean') return data.mindmap;
-		return this.settings.defaultMindmapMode;
+		try {
+			if (!canvas || typeof canvas.getData !== 'function') return false;
+			const data = canvas.getData();
+			if (!data || typeof data !== 'object') return false;
+			if (typeof data.mindmap === 'boolean') return data.mindmap;
+			return this.settings.defaultMindmapMode;
+		} catch (_) {
+			return false;
+		}
 	}
 	isAutoAdjustCanvas(canvas) {
 		return this.isMindmapCanvas(canvas);
 	}
+	runMindMapAction(name, canvas, action, ...args) {
+		if (!canvas || !this.isMindmapCanvas(canvas) || typeof action !== 'function')
+			return { ok: false, reason: 'ineligible' };
+		try {
+			return { ok: true, value: action(...args) };
+		} catch (error) {
+			console.error(`ToMindMap: ${name} failed`, error);
+			new import_obsidian5.Notice(`Could not ${name}`);
+			return { ok: false, reason: 'failed', error };
+		}
+	}
+	createMindMapActionSurface(canvas) {
+		const surface = {};
+		for (const name of [
+			'startEditing',
+			'addChild',
+			'addSibling',
+			'addParent',
+			'reorderTopic',
+			'deleteBranch',
+			'deleteSingleTopic'
+		]) {
+			surface[name] = (...args) =>
+				this.runMindMapAction(
+					name,
+					canvas,
+					this.keyboardHandler[name]?.bind(this.keyboardHandler),
+					...args
+				).value;
+		}
+		return surface;
+	}
+	captureCanvasDecorations(canvas) {
+		if (!canvas || this.canvasDecorationState.has(canvas)) return;
+		const classes = [
+			'tomindmap-collapsed-hidden',
+			'tomindmap-collapsed-node',
+			'tomindmap-navigation-selected',
+			'mindmap-group-animating',
+			'tomindmap-media-dragging',
+			'tomindmap-plain-card',
+			'tomindmap-resizable-content',
+			ROOT_TOPIC_CLASS,
+			'tomindmap-title-only-card',
+			'tomindmap-file-card',
+			'tomindmap-missing-media'
+		];
+		const attributes = [
+			'data-node-type',
+			'data-tomindmap-card-title',
+			'data-tomindmap-card-kind',
+			'data-tomindmap-missing-media',
+			'aria-label'
+		];
+		const elements = new Map();
+		const remember = (element) => {
+			if (!element || elements.has(element)) return;
+			elements.set(element, {
+				classes: Object.fromEntries(
+					classes.map((name) => [name, Boolean(element.hasClass?.(name))])
+				),
+				attributes: Object.fromEntries(
+					attributes.map((name) => [name, element.getAttribute?.(name) ?? null])
+				)
+			});
+		};
+		for (const node of canvas.nodes?.values?.() || []) {
+			const nodeElement = node.nodeEl;
+			const shell = nodeElement?.matches?.('.canvas-node')
+				? nodeElement
+				: nodeElement?.closest?.('.canvas-node') || nodeElement?.querySelector?.('.canvas-node') || nodeElement;
+			remember(nodeElement);
+			remember(node.containerEl);
+			remember(shell);
+			let controlsOwner = shell;
+			let ancestor = shell?.parentElement || null;
+			const selected = canvas.selection?.has?.(node) || canvas.selection?.has?.(node.id);
+			for (
+				let depth = 0;
+				selected && ancestor && ancestor !== canvas.wrapperEl && depth < 4;
+				depth++
+			) {
+				const ownsResizeControl = Array.from(ancestor.children || []).some((child) =>
+					child.matches?.(
+						".canvas-node-resizer, .canvas-node-resizers, .canvas-node-resize-handle, [class*='resizer']"
+					)
+				);
+				if (ownsResizeControl) {
+					controlsOwner = ancestor;
+					break;
+				}
+				ancestor = ancestor.parentElement;
+			}
+			remember(controlsOwner);
+			for (const resizer of controlsOwner?.querySelectorAll?.(
+				".canvas-node-resizer, .canvas-node-resizers, .canvas-node-resize-handle, [class*='resizer']"
+			) || []) remember(resizer);
+		}
+		const edgeStyles = [];
+		for (const edge of canvas.edges?.values?.() || []) {
+			for (const element of [
+				edge.lineGroupEl,
+				edge.lineEndGroupEl,
+				edge.el,
+				edge.edgeEl
+			]) {
+				if (!element?.style) continue;
+				edgeStyles.push([element, element.style.display ?? '']);
+			}
+		}
+		this.canvasDecorationState.set(canvas, { elements, edgeStyles });
+	}
+	disposeCanvasDecorations(canvas) {
+		const state = this.canvasDecorationState.get(canvas);
+		if (!state) return false;
+		for (const [element, snapshot] of state.elements) {
+			for (const [name, enabled] of Object.entries(snapshot.classes))
+				element.toggleClass?.(name, enabled);
+			for (const [name, value] of Object.entries(snapshot.attributes)) {
+				if (value === null) element.removeAttribute?.(name);
+				else element.setAttribute?.(name, value);
+			}
+		}
+		for (const [element, display] of state.edgeStyles)
+			element.style.display = display;
+		this.canvasDecorationState.delete(canvas);
+		return true;
+	}
+	finishCanvasGesture(reason = 'cancel') {
+		for (const owner of this.canvasGestureOwners) owner.finish(reason);
+	}
+	disposeCanvasGestures(reason = 'teardown') {
+		this.finishCanvasGesture(reason);
+		for (const owner of this.canvasGestureOwners) owner.dispose(reason);
+		this.canvasGestureOwners.clear();
+		this.cleanupNodeDragReparentHandler = null;
+		this.cleanupGroupDragHandler = null;
+	}
 	toggleMindmapMode(canvas) {
 		const data = canvas.getData();
 		const newValue = !this.isMindmapCanvas(canvas);
+		this.finishCanvasGesture(newValue ? 'mode-enable' : 'mode-disable');
 		data.mindmap = newValue;
 		delete data.mindmapAutoAdjust;
 		canvas.setData(data);
-		canvas.requestSave();
-		if (newValue && this.settings.autoColor) {
-			this.branchColors.applyColors(canvas);
-		}
 		if (newValue) {
+			this.captureCanvasDecorations(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
+			this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
+			this.updateNodeTypeAttributes(canvas);
+			this.layoutEngine.layout(canvas, { preserveRootSides: true });
+			if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			const groupIds = getGroupIds(canvas);
 			this.resizeNodesWhenRendered(
 				canvas,
@@ -10020,85 +8773,52 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					(node) => !groupIds.has(node.id)
 				)
 			);
-		}
-		if (newValue) {
 			this.refreshOutline(canvas);
 		} else {
-			this.liveSizing.stopWatchingCanvas();
-			for (const node of canvas.nodes.values()) {
-				var _a;
-				(_a = node.nodeEl) == null
-					? void 0
-					: _a.removeClass('tomindmap-navigation-selected');
+			this.liveSizing.cancelQueue(canvas);
+			this.liveSizing.stopWatchingCanvas(canvas);
+			this.syncCanvasBindings(canvas);
+			this.disposeCanvasDecorations(canvas);
+			for (const leaf of this.app.workspace.getLeavesOfType(OUTLINE_VIEW_TYPE)) {
+				if (leaf.view instanceof OutlineView)
+					leaf.view.showUnavailable('Mind-map mode is off for this canvas', canvas);
 			}
-			this.hideOutline();
 		}
+		canvas.requestSave();
+		this.syncCanvasBindings(canvas);
 		this.updateToggleButton(canvas);
 	}
 	injectToggleButton(canvas) {
-		if (this.cleanupToggleHandler) {
-			this.cleanupToggleHandler();
-			this.cleanupToggleHandler = null;
-		}
-		if (this.toggleBtnEl) {
-			this.toggleBtnEl.remove();
-			this.toggleBtnEl = null;
-		}
-		if (this.mediaBtnEl) {
-			this.mediaBtnEl.remove();
-			this.mediaBtnEl = null;
-		}
-		if (canvas.wrapperEl)
-			canvas.wrapperEl.toggleClass(
-				'tomindmap-mindmap-mode',
-				this.isMindmapCanvas(canvas)
-			);
-		const controls =
-			canvas.view.containerEl.querySelector('.canvas-controls');
+		this.cleanupToggleHandler?.();
+		this.cleanupToggleHandler = null;
+		this.toggleBtnEl?.remove();
+		this.toggleBtnEl = null;
+		canvas.wrapperEl?.toggleClass(
+			'tomindmap-mindmap-mode',
+			this.isMindmapCanvas(canvas)
+		);
+		const container = canvas.view.containerEl;
+		const controls = container.querySelector('.canvas-controls');
 		if (!controls) return;
 		const ownerDocument = controls.ownerDocument || document;
-		const btn = ownerDocument.createElement('div');
-		btn.addClass('tomindmap-toggle-btn', 'clickable-icon');
-		btn.setAttribute('aria-label', 'Toggle mindmap mode');
-		const container = canvas.view.containerEl;
-		let suppressClick = false;
-		const toggleFromEvent = (e) => {
-			const target = e.target;
-			if (!target?.closest?.('.tomindmap-toggle-btn')) return;
-			e.preventDefault();
-			e.stopImmediatePropagation();
+		const button = ownerDocument.createElement('button');
+		button.type = 'button';
+		button.addClass('tomindmap-toggle-btn', 'clickable-icon');
+		button.setAttribute('aria-label', 'Toggle mindmap mode');
+		button.setAttribute('aria-pressed', String(this.isMindmapCanvas(canvas)));
+		const onToggleClick = (event) => {
+			if (event.defaultPrevented) return;
+			if (event.button !== undefined && event.button !== 0) return;
+			if (!event.target?.closest?.('.tomindmap-toggle-btn')) return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
 			this.toggleMindmapMode(canvas);
 		};
-		const onTogglePointerDown = (event) => {
-			if (!event.target?.closest?.('.tomindmap-toggle-btn')) return;
-			suppressClick = true;
-			toggleFromEvent(event);
-		};
-		const onToggleClick = (event) => {
-			const isToggleClick = !!event.target?.closest?.(
-				'.tomindmap-toggle-btn'
-			);
-			if (suppressClick && isToggleClick) {
-				suppressClick = false;
-				event.preventDefault();
-				event.stopImmediatePropagation();
-				return;
-			}
-			if (!isToggleClick) return;
-			toggleFromEvent(event);
-		};
-		container.addEventListener('pointerdown', onTogglePointerDown, true);
 		container.addEventListener('click', onToggleClick, true);
-		this.cleanupToggleHandler = () => {
-			container.removeEventListener(
-				'pointerdown',
-				onTogglePointerDown,
-				true
-			);
+		this.cleanupToggleHandler = () =>
 			container.removeEventListener('click', onToggleClick, true);
-		};
-		controls.prepend(btn);
-		this.toggleBtnEl = btn;
+		controls.prepend(button);
+		this.toggleBtnEl = button;
 		this.updateToggleButton(canvas);
 	}
 	updateToggleButton(canvas) {
@@ -10115,12 +8835,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			isActive ? 'network' : 'layout-dashboard'
 		);
 		this.toggleBtnEl.toggleClass('is-active', isActive);
+		this.toggleBtnEl.setAttribute('aria-pressed', String(isActive));
 		this.toggleBtnEl.setAttribute(
 			'aria-label',
 			isActive
 				? 'Mindmap mode: Enter sibling · Tab child · Type to edit'
 				: 'Mindmap mode (inactive)'
 		);
+	}
+	selectAndEditTracked(canvas, node, padding) {
+		if (!canvas || !node) return;
+		this.canvasApi.selectAndZoom?.(canvas, node, padding);
+		this.trackedTimeout(() => {
+			if (
+				this.unloaded ||
+				this.interceptedCanvas !== canvas ||
+				!canvas.nodes?.has?.(node.id) ||
+				canvas.nodes.get(node.id) !== node
+			)
+				return;
+			node.nodeEl?.removeClass?.('tomindmap-navigation-selected');
+			node.startEditing?.();
+		}, 50);
 	}
 	/** Schedule a setTimeout that is automatically cancelled on unload/canvas switch. */
 	trackedTimeout(callback, ms) {
@@ -10129,6 +8865,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			callback();
 		}, ms);
 		this.pendingTimers.add(id);
+		return id;
 	}
 	/** Schedule a requestAnimationFrame that is automatically cancelled on cleanup. */
 	trackedRaf(callback) {
@@ -10137,14 +8874,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			callback();
 		});
 		this.pendingRafs.add(id);
+		return id;
 	}
 	/** Cancel all pending tracked timers, RAFs, and observers. */
-	cancelPendingAsync() {
+	cancelPendingAsync(canvas = this.interceptedCanvas) {
 		if (this.liveSizing) {
-			this.liveSizing.cancelQueue();
-			this.liveSizing.stopWatchingCanvas();
+			this.liveSizing.cancelQueue(canvas);
+			this.liveSizing.stopWatchingCanvas(canvas);
 		}
-		if (this.renderResizeQueueCleanup) this.renderResizeQueueCleanup();
 		for (const id of this.pendingTimers) clearTimeout(id);
 		this.pendingTimers.clear();
 		for (const id of this.pendingRafs) cancelAnimationFrame(id);
@@ -10193,20 +8930,51 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.interceptedCanvas = null;
 		this.origCanvasMethods = {};
 	}
+	runAsync(task, label = 'async action') {
+		Promise.resolve()
+			.then(() => task())
+			.catch((error) => {
+				console.error(`ToMindMap: ${label} failed`, error);
+				new import_obsidian5.Notice(`${label} failed`);
+			});
+	}
+	pluginData() {
+		return {
+			schema: 'tomindmap.plugin-data',
+			version: 1,
+			settings: this.settings,
+			ownership: this.markdownOwnership.toJSON()
+		};
+	}
+	persistPluginData(extra = {}) {
+		if (this.unloaded) return Promise.resolve(false);
+		const payload = { ...this.pluginData(), ...extra };
+		const write = this.persistenceQueue
+			.catch(() => {})
+			.then(() => {
+				if (this.unloaded) return false;
+				return this.saveData(payload);
+			});
+		this.persistenceQueue = write.catch(() => {});
+		return write;
+	}
 	async loadSettings() {
 		const stored = (await this.loadData()) || {};
-		const migrated = { ...stored };
-		if (migrated.maxNodeWidth === 420)
-			migrated.maxNodeWidth = DEFAULT_SETTINGS.maxNodeWidth;
-		if (migrated.maxNodeHeight === 300)
-			migrated.maxNodeHeight = DEFAULT_SETTINGS.maxNodeHeight;
-		this.settings = normalizeSettings(migrated);
-		if (JSON.stringify(this.settings) !== JSON.stringify(stored))
-			await this.saveData(this.settings);
+		const settings = stored.settings && typeof stored.settings === 'object'
+			? stored.settings
+			: stored;
+		this.settings = normalizeSettings(settings);
+		const loadedOwnership = loadMarkdownSyncOwnership(
+			stored.ownership || stored.markdownSyncOwnership || stored.tomindmapMarkdownSyncOwnership
+		);
+		if (loadedOwnership?.isValid()) this.markdownOwnership = loadedOwnership;
+		if (stored.schema !== 'tomindmap.plugin-data' || !loadedOwnership?.isValid() ||
+			JSON.stringify(this.settings) !== JSON.stringify(settings))
+			await this.persistPluginData();
 	}
 	async saveSettings() {
 		this.settings = normalizeSettings(this.settings);
-		await this.saveData(this.settings);
+		await this.persistPluginData();
 		this.layoutEngine = new LayoutEngine({
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
@@ -10229,5 +8997,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.keyboardHandler.zoomPadding =
 				this.settings.navigationZoomPadding;
 		}
+		this.syncCanvasBindings(this.interceptedCanvas);
 	}
 };

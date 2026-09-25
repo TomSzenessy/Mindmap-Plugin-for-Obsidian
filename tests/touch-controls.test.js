@@ -141,6 +141,69 @@ test('cancel drops the gesture without callbacks', async () => {
 	assert.deepEqual(events, []);
 });
 
+test('a canceled first tap does not combine with the second tap', () => {
+	const { tracker, events } = harness();
+	tracker.pointerDown(1, 'n1', 0, 0);
+	assert.equal(tracker.cancel(1), 'cancelled');
+	tracker.pointerDown(1, 'n1', 0, 0);
+	assert.equal(tracker.pointerUp(1, 1000), 'tap');
+	assert.deepEqual(events, [['tap', 'n1']]);
+});
+
+test('routes pointercancel through the tracker instead of committing a tap', () => {
+	const listeners = new Map();
+	const makeElement = (name = 'toolbar') => ({
+		elementName: name,
+		style: {},
+		children: [],
+		className: '',
+		setAttribute: () => {},
+		appendChild(child) {
+			this.children.push(child);
+		},
+		addEventListener(type, listener) {
+			listeners.set(`${this.elementName}:${type}`, listener);
+		},
+		removeEventListener() {},
+		remove() {}
+	});
+	const wrapper = makeElement('wrapper');
+	wrapper.ownerDocument = { createElement: () => makeElement() };
+	const node = { id: 'n1', isEditing: false };
+	const controller = new TouchControlsController({
+		canvas: { wrapperEl: wrapper, nodes: new Map([[node.id, node]]), selection: new Set() },
+		actions: { startEditing: () => assert.fail('cancel must not edit') },
+		isEnabled: () => true,
+		getNodeAtEvent: () => node,
+		isTopicNode: () => true
+	});
+	const detach = controller.attach();
+	const event = (type, pointerId) => ({
+		type,
+		pointerId,
+		pointerType: 'touch',
+		target: { closest: () => null },
+		clientX: 0,
+		clientY: 0
+	});
+
+	listeners.get('wrapper:pointerdown')(event('pointerdown', 1));
+	listeners.get('wrapper:pointercancel')(event('pointercancel', 1));
+	listeners.get('wrapper:pointerdown')(event('pointerdown', 1));
+	listeners.get('wrapper:pointerup')(event('pointerup', 1));
+	detach();
+});
+
+test('ignores a secondary pointer and finishes the primary pointer', () => {
+	const { tracker, events } = harness();
+	assert.equal(tracker.pointerDown(1, 'n1', 0, 0), true);
+	assert.equal(tracker.pointerDown(2, 'n2', 40, 40), false);
+	assert.equal(tracker.pointerMove(2, 100, 100), false);
+	assert.equal(tracker.pointerUp(2, 1000), null);
+	assert.equal(tracker.pointerUp(1, 1100), 'tap');
+	assert.deepEqual(events, [['tap', 'n1']]);
+});
+
 test('dispatchTouchAction routes every menu action onto the shared actions', () => {
 	const calls = [];
 	const actions = {

@@ -201,6 +201,62 @@ test("ignores group, file, and link cards when pruning", () => {
   assert.equal(nodes.has("root"), true);
 });
 
+test("collapses a blank branch deeper than the old fixed sweep limit", () => {
+  const depth = 60;
+  const spec = { root: { text: "Root" } };
+  for (let level = 1; level <= depth; level++) {
+    spec[`blank-${level}`] = {
+      text: "",
+      parent: level === 1 ? "root" : `blank-${level - 1}`
+    };
+  }
+  const { canvas, canvasApi, nodes } = specCanvas(spec);
+
+  const removed = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.equal(removed.length, depth);
+  assert.deepEqual(
+    removed.map((entry) => entry.node.id),
+    Array.from({ length: depth }, (_unused, index) => `blank-${depth - index}`)
+  );
+  assert.deepEqual(Array.from(nodes.keys()), ["root"]);
+});
+
+test("prunes from one canonical graph snapshot without repeated graph lookups", () => {
+  const depth = 1000;
+  const nodes = new Map();
+  const forest = [];
+  let parent = null;
+  for (let index = 0; index <= depth; index++) {
+    const node = {
+      id: index === 0 ? "root" : `blank-${index}`,
+      text: index === 0 ? "Root" : ""
+    };
+    nodes.set(node.id, node);
+    const treeNode = { canvasNode: node, children: [], parent };
+    if (parent) parent.children.push(treeNode);
+    else forest.push(treeNode);
+    parent = treeNode;
+  }
+  let graphQueries = 0;
+  const canvas = { nodes, requestSave() {} };
+  const canvasApi = {
+    getGraphQuery: () => {
+      graphQueries += 1;
+      return { forest };
+    },
+    getParentNode: () => assert.fail("parent graph must not be rebuilt per removal"),
+    getChildNodes: () => assert.fail("child graph must not be rebuilt per removal"),
+    removeNode: (_canvas, node) => nodes.delete(node.id)
+  };
+
+  const result = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.equal(result.length, depth);
+  assert.equal(graphQueries, 1);
+  assert.deepEqual([...nodes.keys()], ["root"]);
+});
+
 test("treats a canvas without topics as blank but ignores groups", () => {
   const empty = { nodes: new Map() };
   assert.equal(isBlankMindmapCanvas(empty), true);
@@ -286,15 +342,66 @@ test("writes an authoritative Canvas snapshot when leaving the view", async () =
     view: { file }
   };
   const vault = {
+    async cachedRead() {
+      return stored;
+    },
     async process(target, update) {
       assert.equal(target, file);
       stored = update(stored);
     }
   };
 
-  await flushCanvasView(canvas, vault);
-
+  assert.equal(await flushCanvasView(canvas, vault), true);
   assert.deepEqual(JSON.parse(stored), canvas.getData());
+});
+
+test("never resurrects a stale Canvas snapshot over a newer saved graph", async () => {
+  const stale = '{"nodes":[]}';
+  const newer = '{"nodes":[{"id":"other"}]}';
+  let stored = stale;
+  const canvas = {
+    getData: () => ({ nodes: [{ id: "a", x: 10 }], edges: [] }),
+    requestSave() {},
+    view: {
+      file: { path: "Map.canvas" },
+      // Another window or sync client persists a newer graph while the native
+      // save is still in flight.
+      save: async () => {
+        stored = newer;
+      }
+    }
+  };
+  const vault = {
+    async cachedRead() {
+      return stored;
+    },
+    async process(_target, update) {
+      stored = update(stored);
+    }
+  };
+
+  assert.equal(await flushCanvasView(canvas, vault), false);
+  assert.equal(stored, newer);
+});
+
+test("skips the Canvas fallback when the file cannot be read back", async () => {
+  let writes = 0;
+  const canvas = {
+    getData: () => ({ nodes: [], edges: [] }),
+    requestSave() {},
+    view: { file: { path: "Map.canvas" } }
+  };
+  const vault = {
+    async cachedRead() {
+      throw new Error("missing file");
+    },
+    async process() {
+      writes++;
+    }
+  };
+
+  assert.equal(await flushCanvasView(canvas, vault), false);
+  assert.equal(writes, 0);
 });
 
 test("reflows the complete canvas after any topic move", () => {
@@ -323,4 +430,47 @@ test("does not alter ordinary canvases", () => {
   });
   assert.equal(changed, false);
   assert.equal(called, false);
+});
+
+test("sweeping blank leaves stays linear instead of rescanning the Canvas", () => {
+  const leaves = 200;
+  const spec = { root: { text: "Root" } };
+  for (let index = 0; index < leaves; index++)
+    spec[`blank-${index}`] = { text: "", parent: "root" };
+  const { canvas, canvasApi, nodes } = specCanvas(spec);
+
+  // Count how many cards the sweep actually looks at. A leaf queue visits
+  // each removed card a constant number of times instead of rebuilding the
+  // whole topic list after every removal.
+  let yields = 0;
+  const real = canvas.nodes;
+  canvas.nodes = {
+    has: (id) => real.has(id),
+    get: (id) => real.get(id),
+    delete: (id) => real.delete(id),
+    size: real.size,
+    values() {
+      const inner = real.values();
+      return {
+        [Symbol.iterator]() {
+          return {
+            next() {
+              const step = inner.next();
+              if (!step.done) yields++;
+              return step;
+            }
+          };
+        }
+      };
+    }
+  };
+
+  const removed = pruneEmptyLeafTopics(canvas, canvasApi);
+
+  assert.equal(removed.length, leaves);
+  assert.equal(real.size, 1);
+  assert.ok(
+    yields <= leaves * 4,
+    `expected a linear sweep of ${leaves + 1} cards, saw ${yields} visits`
+  );
 });

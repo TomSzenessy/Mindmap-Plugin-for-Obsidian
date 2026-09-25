@@ -1,3 +1,373 @@
+// <tomindmap:module markdown-order>
+var MarkdownOrder = (() => {
+  "use strict";
+  const module = { exports: {} };
+  const exports = module.exports;
+
+  function topicNode(value) {
+    return value?.canvasNode || value;
+  }
+
+  function topicText(value) {
+    const node = topicNode(value);
+    const text = node?.text ?? node?.unknownData?.text;
+    if (typeof text === "string" && text.trim())
+      return text;
+    const file = node?.unknownData?.file ?? node?.file?.path ?? node?.file;
+    if (typeof file === "string")
+      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(file)
+        ? `![](<${file}>)`
+        : file;
+    const url = node?.unknownData?.url ?? node?.url;
+    if (typeof url === "string")
+      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(url)
+        ? `![](<${url}>)`
+        : url;
+    return "";
+  }
+
+  function isStandaloneBlock(value) {
+    const text = String(topicText(value) || "").trim();
+    const lines = text.split("\n");
+    return /^(```|~~~|\$\$)/.test(text)
+      || /^(?:-{3,}|_{3,}|\*(?:\s*\*){2,})$/.test(text)
+      || /^>\s?/.test(text)
+      || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(text)
+      || /^!\[\[[^\]]+\]\]\s*$/.test(text)
+      || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(text)
+      || lines.length >= 2
+        && /^\s*\|.*\|\s*$/.test(lines[0])
+        && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
+  }
+
+  function compareTopToBottom(left, right) {
+    const a = topicNode(left);
+    const b = topicNode(right);
+    // A raw block must precede heading siblings at the same parent, otherwise
+    // Markdown would attach it to the last emitted heading and change the graph.
+    return Number(isStandaloneBlock(right)) - Number(isStandaloneBlock(left))
+      || (Number(a?.y) || 0) - (Number(b?.y) || 0)
+      || (Number(a?.x) || 0) - (Number(b?.x) || 0)
+      || String(a?.id || "").localeCompare(String(b?.id || ""));
+  }
+
+  /**
+   * Sort siblings with the block flag resolved once per topic.
+   *
+   * `compareTopToBottom` re-reads and re-classifies each topic's text, so calling
+   * it from `sort` costs that work O(n log n) times. A central topic with tens of
+   * thousands of siblings is a normal mind map, not an edge case, so the flag is
+   * decorated onto each value up front and the ordering rule is unchanged.
+   */
+  function sortSiblings(values, compare) {
+    return values
+      .map((value) => {
+        const node = topicNode(value);
+        return {
+          value,
+          block: isStandaloneBlock(node),
+          y: Number(node?.y) || 0,
+          x: Number(node?.x) || 0,
+          id: String(node?.id || "")
+        };
+      })
+      .sort((left, right) => compare(left, right))
+      .map((entry) => entry.value);
+  }
+
+  /**
+   * Return siblings in the chronology readers expect from a radial mind map.
+   * Only a central topic splits its children into sides: right top-to-bottom,
+   * followed by left top-to-bottom. Inside either branch, reading order is
+   * simply top-to-bottom.
+   */
+  function orderChildren(parent, children, splitRootSides = false) {
+    const byPosition = (left, right) =>
+      right.block - left.block || left.y - right.y || left.x - right.x || left.id.localeCompare(right.id);
+    if (!splitRootSides)
+      return sortSiblings(children, byPosition);
+    const parentNode = topicNode(parent);
+    const parentCenter = (Number(parentNode?.x) || 0) + (Number(parentNode?.width) || 0) / 2;
+    const sideRank = (entry) => entry.x + (Number(topicNode(entry.value)?.width) || 0) / 2 >= parentCenter ? 0 : 1;
+    return sortSiblings(children, (left, right) => sideRank(left) - sideRank(right) || byPosition(left, right));
+  }
+
+  /**
+   * One parent/child view of a live Canvas: `{nodes, parents, children, roots}`.
+   *
+   * A topic has exactly one parent. The first edge that reaches it wins, a
+   * surplus parent, a directed cycle, a self loop, and a dangling endpoint are
+   * all ignored, and a union-find over the accepted edges keeps the decision
+   * from depending on iteration order. Reading the edge list directly with a
+   * last-write-wins parent map would instead let a surplus edge move a topic
+   * under a different parent and reorder the map underneath the user.
+   *
+   * `options.graph` accepts that same shape from a caller that already owns the
+   * canonical forest, which keeps one graph authoritative across this module and
+   * its callers instead of rebuilding the same rules twice.
+   */
+  function canvasTopicGraph(canvas, getGroupIds, options = {}) {
+    const supplied = options?.graph;
+    if (supplied && supplied.nodes instanceof Map && supplied.parents instanceof Map)
+      return supplied;
+    const groupIds = typeof getGroupIds === "function" ? getGroupIds(canvas) : new Set();
+    const nodes = new Map();
+    for (const node of canvas?.nodes?.values?.() || []) {
+      if (!node?.id || groupIds.has(node.id)) continue;
+      nodes.set(node.id, node);
+    }
+    const children = new Map();
+    for (const id of nodes.keys()) children.set(id, []);
+    const parents = new Map();
+    const component = new Map(Array.from(nodes.keys(), (id) => [id, id]));
+    const find = (id) => {
+      let root = id;
+      while (component.get(root) !== root) root = component.get(root);
+      while (component.get(id) !== id) {
+        const next = component.get(id);
+        component.set(id, root);
+        id = next;
+      }
+      return root;
+    };
+    for (const edge of canvas?.getData?.()?.edges || []) {
+      const from = edge?.fromNode;
+      const to = edge?.toNode;
+      if (!nodes.has(from) || !nodes.has(to) || from === to || parents.has(to)) continue;
+      const left = find(from);
+      const right = find(to);
+      if (left === right) continue;
+      component.set(right, left);
+      parents.set(to, from);
+      children.get(from).push(to);
+    }
+    return {
+      groupIds,
+      nodes,
+      parents,
+      children,
+      roots: Array.from(nodes.keys()).filter((id) => !parents.has(id))
+    };
+  }
+
+  /** The live topics in the chronological reading order of the canonical graph. */
+  function canvasTopicPreorder(canvas, getGroupIds, options = {}) {
+    const graph = canvasTopicGraph(canvas, getGroupIds, options);
+    const position = (id) => graph.nodes.get(id);
+    const roots = [...graph.roots].sort(
+      (left, right) =>
+        (Number(position(left)?.y) || 0) - (Number(position(right)?.y) || 0)
+        || (Number(position(left)?.x) || 0) - (Number(position(right)?.x) || 0)
+        || String(left).localeCompare(String(right))
+    );
+    const rootIds = new Set(roots);
+    // Membership is tracked in a Set beside the list: scanning the growing list
+    // would make a wide map quadratic. The walk itself is an explicit stack, so
+    // depth costs memory rather than call frames.
+    const result = [];
+    const visited = new Set();
+    const stack = [...roots].reverse();
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (visited.has(id))
+        continue;
+      visited.add(id);
+      result.push(id);
+      const children = orderChildren(
+        position(id),
+        (graph.children.get(id) || []).map(position).filter(Boolean),
+        rootIds.has(id)
+      ).map((child) => child.id);
+      for (let index = children.length - 1; index >= 0; index--)
+        stack.push(children[index]);
+    }
+    for (const id of graph.nodes.keys())
+      if (!visited.has(id))
+        result.push(id);
+    return result;
+  }
+
+  function orderMatches(canvas, imported, getGroupIds, options = {}) {
+    if (!imported)
+      return false;
+    const liveOrder = canvasTopicPreorder(canvas, getGroupIds, options);
+    const liveIds = new Set(liveOrder);
+    const sources = Array.isArray(imported.topicSources) ? imported.topicSources.filter((record) => liveIds.has(record.id)) : [];
+    if (sources.length !== liveOrder.length)
+      return false;
+    const desiredIndex = new Map(liveOrder.map((id, index) => [id, index]));
+    const children = new Map();
+    for (const record of sources) {
+      const key = record.parentId || "";
+      if (!children.has(key))
+        children.set(key, []);
+      children.get(key).push(record);
+    }
+    for (const records of children.values()) {
+      const desired = [...records].sort((left, right) => desiredIndex.get(left.id) - desiredIndex.get(right.id));
+      if (records.every((record, index) => desired[index]?.id === record.id))
+        continue;
+      if (canMoveSourceSiblings(records))
+        return false;
+    }
+    return true;
+  }
+
+  function canMoveSourceSiblings(records) {
+    if (records.length < 2)
+      return false;
+    if (records.every((record) => record.kind === "heading")) {
+      const level = records[0].level;
+      return records.every((record) => record.level === level);
+    }
+    if (records.every((record) => record.kind === "list")) {
+      const indent = records[0].indent || "";
+      return records.every((record) => (record.indent || "") === indent);
+    }
+    return false;
+  }
+
+  /** Every source record under `rootId`, collected with an explicit stack. */
+  function collectDescendants(rootId, sourceChildren) {
+    const found = new Set();
+    const stack = [rootId];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (found.has(id))
+        continue;
+      found.add(id);
+      for (const child of sourceChildren.get(id) || [])
+        stack.push(child);
+    }
+    return found;
+  }
+
+  function reorderPreservingSource(markdown, canvas, dependencies) {
+    const {
+      getGroupIds,
+      parseDocument,
+      lineRecords,
+      withMetadata,
+      withoutLegacyComments,
+      identityKey,
+      identityLabel,
+      nodeText = (node) => node?.text || "Untitled",
+      graph
+    } = dependencies;
+    let result = String(markdown || "");
+    const topicGraph = canvasTopicGraph(canvas, getGroupIds, graph ? { graph } : {});
+    const desiredOrder = canvasTopicPreorder(canvas, getGroupIds, { graph: topicGraph });
+    const desiredIndex = new Map(desiredOrder.map((id, index) => [id, index]));
+    const desiredChildren = new Map();
+    const addDesired = (parentId, id) => {
+      const key = parentId || "";
+      if (!desiredChildren.has(key))
+        desiredChildren.set(key, []);
+      desiredChildren.get(key).push(id);
+    };
+    for (const id of desiredOrder) addDesired(topicGraph.parents.get(id), id);
+
+    for (let pass = 0; pass < Math.max(1, desiredOrder.length); pass++) {
+      const parsed = parseDocument(result);
+      const sourceById = new Map(parsed.topicSources.map((record) => [record.id, record]));
+      const sourceChildren = new Map();
+      for (const record of parsed.topicSources) {
+        const key = record.parentId || "";
+        if (!sourceChildren.has(key))
+          sourceChildren.set(key, []);
+        sourceChildren.get(key).push(record.id);
+      }
+      const mismatches = [];
+      for (const [parentKey, wanted] of desiredChildren) {
+        const current = sourceChildren.get(parentKey) || [];
+        if (current.length !== wanted.length)
+          continue;
+        const currentSet = new Set(current);
+        if (wanted.some((id) => !currentSet.has(id)) || wanted.every((id, index) => current[index] === id))
+          continue;
+        const siblingRecords = current.map((id) => sourceById.get(id)).filter(Boolean);
+        if (siblingRecords.length !== current.length || !canMoveSourceSiblings(siblingRecords))
+          continue;
+        let depth = 0;
+        let parent = parentKey || null;
+        const seen = new Set();
+        while (parent && !seen.has(parent)) {
+          seen.add(parent);
+          depth++;
+          parent = sourceById.get(parent)?.parentId || null;
+        }
+        mismatches.push({ parentKey, wanted, current, depth });
+      }
+      if (mismatches.length === 0)
+        break;
+      mismatches.sort((a, b) => b.depth - a.depth
+        || (desiredIndex.get(a.parentKey) || 0) - (desiredIndex.get(b.parentKey) || 0));
+      const mismatch = mismatches[0];
+      const records = lineRecords(result);
+      const ranges = new Map();
+      let valid = true;
+      for (const id of mismatch.current) {
+        const topics = collectDescendants(id, sourceChildren);
+        // Measured in a loop: `Math.min(...topics)` throws once a subtree has
+        // more than roughly 125,000 records, which one wide branch can reach.
+        let startLine = Infinity;
+        let endLine = -Infinity;
+        for (const candidate of topics) {
+          const record = sourceById.get(candidate);
+          if (!record) continue;
+          if (record.startLine < startLine) startLine = record.startLine;
+          if (record.endLine > endLine) endLine = record.endLine;
+        }
+        const first = records[startLine];
+        const last = records[endLine - 1];
+        if (!first || !last) {
+          valid = false;
+          break;
+        }
+        ranges.set(id, { start: first.start, end: last.end });
+      }
+      const ordered = mismatch.current.map((id) => ranges.get(id));
+      if (!valid || ordered.some((range) => !range))
+        break;
+      if (ordered.some((range, index) => index > 0 && ordered[index - 1].end > range.start))
+        break;
+      const gaps = ordered.slice(0, -1)
+        .map((range, index) => result.slice(range.end, ordered[index + 1].start));
+      const pieces = new Map(mismatch.current.map((id) => {
+        const range = ranges.get(id);
+        return [id, result.slice(range.start, range.end)];
+      }));
+      const replacement = mismatch.wanted
+        .map((id, index) => `${index > 0 ? gaps[index - 1] || "" : ""}${pieces.get(id) || ""}`)
+        .join("");
+      const updated = result.slice(0, ordered[0].start)
+        + replacement
+        + result.slice(ordered[ordered.length - 1].end);
+      if (updated === result)
+        break;
+      result = updated;
+    }
+
+    return withMetadata(
+      withoutLegacyComments(result),
+      desiredOrder,
+      desiredOrder.map((id) => identityKey(nodeText(topicGraph.nodes.get(id)))),
+      desiredOrder.map((id) => identityLabel(nodeText(topicGraph.nodes.get(id))))
+    );
+  }
+
+  module.exports = {
+    canvasTopicGraph,
+    compareTopToBottom,
+    orderChildren,
+    canvasTopicPreorder,
+    orderMatches,
+    reorderPreservingSource
+  };
+  return module.exports;
+})();
+// </tomindmap:module markdown-order>
+
 /*
 ToMindMap distributable bundle.
 Focused runtime source modules live in lib/ and are embedded here by
@@ -35,30 +405,69 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require('obsidian');
 // <tomindmap:module canvas-session>
-var { removeEmptyNodeOnEditExit, pruneEmptyLeafTopics, isBlankMindmapCanvas, isRootTopicNode, deriveCanvasTitle, flushCanvasView, reflowCanvasAfterMove } = (() => {
+var {
+  finalizeNewTextNode,
+  removeEmptyNodeOnEditExit,
+  pruneEmptyLeafTopics,
+  isBlankMindmapCanvas,
+  isRootTopicNode,
+  deriveCanvasTitle,
+  flushCanvasView,
+  reflowCanvasAfterMove
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   /**
    * Finish native Canvas persistence before plugin handlers are detached.
    *
    * Canvas.requestSave() is debounced by Obsidian. Calling the view's save
-   * method when it is available prevents a leaf change from discarding a
-   * pending native save. The fallback remains compatible with Canvas versions
-   * that expose only requestSave().
+   * method when it is available lets Obsidian serialize the graph itself, and
+   * the vault fallback is then a last resort rather than a second writer.
+   *
+   * The fallback only owns the file while the bytes on disk are still the ones
+   * this session started from. A newer graph written by a second window or a
+   * sync client during the save attempt therefore survives, instead of the
+   * pending snapshot resurrecting a discarded hierarchy.
+   *
+   * @returns {Promise<boolean>} true when the vault fallback persisted the
+   * pending graph, false when the native save or another writer already owns it.
    */
   async function flushCanvasView(canvas, vault = null) {
     if (!canvas)
-      return;
+      return false;
     const file = canvas.view?.file;
     const snapshot = typeof canvas.getData === "function"
       ? JSON.stringify(canvas.getData(), null, "\t")
       : null;
+    const read = typeof vault?.cachedRead === "function"
+      ? vault.cachedRead
+      : typeof vault?.read === "function"
+        ? vault.read
+        : null;
+    let owned = null;
+    if (file && snapshot !== null && read) {
+      try {
+        owned = await read.call(vault, file);
+      } catch (_) {
+        owned = null;
+      }
+    }
     canvas.requestSave?.();
     const view = canvas.view;
     if (typeof view?.save === "function")
       await view.save();
-    if (snapshot !== null && file && typeof vault?.process === "function")
-      await vault.process(file, (current) => current === snapshot ? current : snapshot);
+    if (snapshot === null || !file || owned === null ||
+      typeof vault?.process !== "function")
+      return false;
+    let written = false;
+    await vault.process(file, (current) => {
+      if (current !== owned) return current;
+      written = current !== snapshot;
+      return written ? snapshot : current;
+    });
+    return written;
   }
 
   /**
@@ -131,39 +540,78 @@ var { removeEmptyNodeOnEditExit, pruneEmptyLeafTopics, isBlankMindmapCanvas, isR
     );
   }
 
+  /** A blank leaf topic is swept away; every other topic is kept. */
+  function isBlankLeafTopic(canvas, node, canvasApi, childCount = null) {
+    if (!isPlainTextTopic(node)) return false;
+    if (String(node.text ?? "").trim()) return false;
+    // A card that is still being created is owned by the edit-exit path, so a
+    // concurrent sweep must not delete it before editing can begin.
+    if (node.__tomindmapPendingCreation) return false;
+    return childCount === null
+      ? (canvasApi?.getChildNodes?.(canvas, node) || []).length === 0
+      : childCount === 0;
+  }
+
   /**
    * Remove blank topic cards that no longer carry a branch. Deleting a child can
-   * leave its parent as an empty leaf, so the sweep repeats until nothing else
-   * changes. Cards still being edited are never touched, and a lone blank card is
-   * kept so the automatic central topic survives until it is titled.
+   * leave its parent as an empty leaf, so each removal queues that parent
+   * instead of re-scanning the whole Canvas; the queue drains to a fixed point
+   * at any depth. Cards still being edited are never touched, and a lone blank
+   * card is kept so the automatic central topic survives until it is titled.
    */
   function pruneEmptyLeafTopics(canvas, canvasApi) {
     const removed = [];
     if (!canvas || typeof canvas.nodes?.values !== "function")
       return removed;
-    for (let guard = 0; guard < 50; guard++) {
-      const topics = Array.from(canvas.nodes.values()).filter(isPlainTextTopic);
-      if (topics.length <= 1)
-        break;
-      let changed = false;
-      for (const node of topics) {
-        if (node.isEditing)
-          continue;
-        // A card that is still being created is owned by the edit-exit path, so
-        // a concurrent sweep must not delete it before editing can begin.
-        if (node.__tomindmapPendingCreation)
-          continue;
-        if (String(node.text ?? "").trim())
-          continue;
-        if ((canvasApi?.getChildNodes?.(canvas, node) || []).length > 0)
-          continue;
-        const parent = canvasApi?.getParentNode?.(canvas, node) || null;
-        canvasApi?.removeNode?.(canvas, node);
-        removed.push({ node, parent });
-        changed = true;
+    const parentById = new Map();
+    const childCounts = new Map();
+    const query = canvasApi?.getGraphQuery?.(canvas) || null;
+    if (query?.forest) {
+      const pending = [...query.forest].reverse();
+      while (pending.length > 0) {
+        const treeNode = pending.pop();
+        if (!treeNode?.canvasNode) continue;
+        const id = treeNode.canvasNode.id;
+        childCounts.set(id, treeNode.children.length);
+        if (treeNode.parent?.canvasNode)
+          parentById.set(id, treeNode.parent.canvasNode);
+        for (let index = treeNode.children.length - 1; index >= 0; index--)
+          pending.push(treeNode.children[index]);
       }
-      if (!changed)
-        break;
+    } else {
+      for (const node of canvas.nodes.values()) {
+        if (!isPlainTextTopic(node)) continue;
+        const children = canvasApi?.getChildNodes?.(canvas, node) || [];
+        childCounts.set(node.id, children.length);
+        const parent = canvasApi?.getParentNode?.(canvas, node) || null;
+        if (parent) parentById.set(node.id, parent);
+      }
+    }
+
+    const queue = [];
+    let cursor = 0;
+    let topicsLeft = 0;
+    for (const node of canvas.nodes.values()) {
+      if (!isPlainTextTopic(node)) continue;
+      topicsLeft++;
+      const childCount = childCounts.get(node.id) ?? 0;
+      if (isBlankLeafTopic(canvas, node, canvasApi, childCount))
+        queue.push(node);
+    }
+    while (cursor < queue.length && topicsLeft > 1) {
+      const node = queue[cursor++];
+      if (!canvas.nodes.has(node.id) || node.isEditing) continue;
+      const childCount = childCounts.get(node.id) ?? 0;
+      if (!isBlankLeafTopic(canvas, node, canvasApi, childCount)) continue;
+      const parent = parentById.get(node.id) || null;
+      canvasApi?.removeNode?.(canvas, node);
+      removed.push({ node, parent });
+      topicsLeft--;
+      if (parent && isPlainTextTopic(parent)) {
+        const remaining = Math.max(0, (childCounts.get(parent.id) ?? 0) - 1);
+        childCounts.set(parent.id, remaining);
+        if (remaining === 0) queue.push(parent);
+      }
     }
     if (removed.length > 0)
       canvas.requestSave?.();
@@ -235,10 +683,28 @@ var { removeEmptyNodeOnEditExit, pruneEmptyLeafTopics, isBlankMindmapCanvas, isR
 })();
 // </tomindmap:module canvas-session>
 // <tomindmap:module live-sizing>
-var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isResizableCanvasNode, isTextTopicCard } = (() => {
+var {
+  CARD_LAYOUT_VERSION,
+  SIZING_STATUS,
+  LiveSizingController,
+  hasAsyncRenderableContent,
+  isResizableCanvasNode,
+  isTextTopicCard
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   const CARD_LAYOUT_VERSION = 38;
+  const MAX_MEASUREMENT_LINES = 256;
+  const MAX_MEASUREMENT_WORDS = 4096;
+  const MAX_LAYOUT_CANDIDATES = 2048;
+  const MAX_MEASUREMENT_ELEMENTS = 4096;
+  const SIZING_STATUS = Object.freeze({
+    MEASURED: "measured",
+    UNAVAILABLE: "unavailable",
+    CANCELLED: "cancelled"
+  });
 
   function isTextTopicCard(node, groupIds = new Set()) {
     if (!node) return false;
@@ -247,6 +713,27 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
     const type = node.unknownData?.type || node.type;
     if (type === "file" || type === "link" || type === "group") return false;
     return typeof node.text === "string";
+  }
+
+  function collectBoundedElements(root, elements, limit = MAX_MEASUREMENT_ELEMENTS) {
+    if (!root) return false;
+    const pending = [root];
+    while (pending.length > 0 && elements.size < limit) {
+      const current = pending.pop();
+      if (!current || elements.has(current)) continue;
+      elements.add(current);
+      const children = current.children;
+      if (children && typeof children.length === "number") {
+        for (let index = children.length - 1; index >= 0; index--)
+          pending.push(children[index]);
+      } else if (typeof current.querySelectorAll === "function") {
+        for (const child of current.querySelectorAll("*")) {
+          if (elements.size >= limit) break;
+          pending.push(child);
+        }
+      }
+    }
+    return elements.size >= limit && pending.length > 0;
   }
 
   function editorContent(node) {
@@ -265,6 +752,19 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
     if (!isTextTopicCard(node, groupIds))
       return true;
     return hasAsyncRenderableContent(node.text);
+  }
+
+  function exactSizingMeasurements(measurements, requested) {
+    const valid = new Map();
+    if (!(measurements instanceof Map))
+      return valid;
+    for (const node of requested) {
+      const target = measurements.get(node.id);
+      if (!target?.unavailable && Number.isFinite(target?.width) && target.width > 0
+        && Number.isFinite(target?.height) && target.height > 0)
+        valid.set(node.id, { width: target.width, height: target.height });
+    }
+    return valid;
   }
 
   function embeddedContentFloor(text, settings) {
@@ -300,8 +800,194 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
     constructor(plugin, getGroupIds) {
       this.plugin = plugin;
       this.getGroupIds = getGroupIds;
-      this.queueCleanup = null;
-      this.watchCleanup = null;
+      this.sessions = new WeakMap();
+      this.sessionList = new Set();
+      this.previewWaits = new WeakMap();
+      this.nodeCanvases = new WeakMap();
+    }
+
+    createSession(canvas) {
+      let session = this.sessions.get(canvas);
+      if (session && !session.stopped)
+        return session;
+      if (session)
+        this.sessionList.delete(session);
+      session = {
+        canvas,
+        queueCleanup: null,
+        watchCleanup: null,
+        stopped: false,
+        generation: 0,
+        scheduled: new Set(),
+        timerIds: new Map(),
+        frames: new Map(),
+        previewCancels: new Set(),
+        status: SIZING_STATUS.MEASURED,
+        lastError: null
+      };
+      this.sessions.set(canvas, session);
+      this.sessionList.add(session);
+      return session;
+    }
+
+    replaceSession(canvas) {
+      const previous = this.sessions.get(canvas);
+      if (previous) {
+        previous.queueCleanup?.();
+        previous.watchCleanup?.();
+        for (const cancel of previous.previewCancels)
+          cancel();
+        previous.stopped = true;
+        previous.generation++;
+        this.cancelSessionFrames(previous);
+        this.cancelSessionTimeouts(previous);
+        previous.previewCancels.clear();
+        this.sessionList.delete(previous);
+      }
+      return this.createSession(canvas);
+    }
+
+    cancelSessionTimeouts(session) {
+      for (const timerId of session.timerIds.values()) {
+        try {
+          clearTimeout(timerId);
+        } catch (_) {}
+        this.plugin.pendingTimers?.delete(timerId);
+      }
+      session.timerIds.clear();
+      session.scheduled.clear();
+    }
+
+    cancelSessionTimeout(session, key) {
+      const timerId = session.timerIds.get(key);
+      if (timerId !== undefined) {
+        try {
+          clearTimeout(timerId);
+        } catch (_) {}
+        this.plugin.pendingTimers?.delete(timerId);
+      }
+      session.timerIds.delete(key);
+      session.scheduled.delete(key);
+    }
+
+    runSessionCallback(session, callback) {
+      try {
+        callback();
+      } catch (error) {
+        session.status = SIZING_STATUS.UNAVAILABLE;
+        session.lastError = error;
+        console.error("ToMindMap: live sizing callback failed", error);
+      }
+    }
+
+    scheduleSessionTimeout(session, key, callback, delay) {
+      if (!session || session.stopped || session.scheduled.has(key))
+        return false;
+      session.scheduled.add(key);
+      const generation = session.generation;
+      const run = () => {
+        session.scheduled.delete(key);
+        session.timerIds.delete(key);
+        if (session.stopped
+          || session.generation !== generation
+          || this.sessions.get(session.canvas) !== session) {
+          this.maybeReleaseSession(session);
+          return;
+        }
+        this.runSessionCallback(session, callback);
+        this.maybeReleaseSession(session);
+      };
+      const pendingTimers = this.plugin.pendingTimers;
+      const beforeTimers = pendingTimers instanceof Set ? new Set(pendingTimers) : null;
+      const timerId = typeof this.plugin.trackedTimeout === "function"
+        ? this.plugin.trackedTimeout(run, delay)
+        : setTimeout(run, delay);
+      let trackedTimerId = timerId;
+      if (trackedTimerId === undefined && beforeTimers && pendingTimers) {
+        for (const id of pendingTimers) {
+          if (!beforeTimers.has(id)) {
+            trackedTimerId = id;
+            break;
+          }
+        }
+      }
+      if (trackedTimerId !== undefined && session.scheduled.has(key))
+        session.timerIds.set(key, trackedTimerId);
+      return true;
+    }
+
+    scheduleSessionFrame(session, callback, key = "default") {
+      if (!session || session.stopped || session.frames.has(key))
+        return false;
+      const frame = { id: null };
+      session.frames.set(key, frame);
+      const run = () => {
+        if (session.frames.get(key) !== frame)
+          return;
+        session.frames.delete(key);
+        if (session.stopped || this.sessions.get(session.canvas) !== session)
+          return;
+        this.runSessionCallback(session, callback);
+        this.maybeReleaseSession(session);
+      };
+      if (typeof requestAnimationFrame === "function") {
+        frame.id = requestAnimationFrame(() => {
+          this.plugin.pendingRafs?.delete(frame.id);
+          run();
+        });
+        this.plugin.pendingRafs?.add(frame.id);
+      } else if (typeof this.plugin.trackedRaf === "function") {
+        this.plugin.trackedRaf(run);
+      } else {
+        frame.id = setTimeout(run, 0);
+        this.plugin.pendingTimers?.add(frame.id);
+      }
+      return true;
+    }
+
+    cancelSessionFrames(session) {
+      for (const frame of session.frames.values()) {
+        if (frame.id !== null) {
+          if (typeof cancelAnimationFrame === "function") {
+            try {
+              cancelAnimationFrame(frame.id);
+            } catch (_) {}
+          }
+          this.plugin.pendingRafs?.delete(frame.id);
+          try {
+            clearTimeout(frame.id);
+          } catch (_) {}
+          this.plugin.pendingTimers?.delete(frame.id);
+        }
+      }
+      session.frames.clear();
+    }
+
+    maybeReleaseSession(session) {
+      if (!session
+        || session.stopped
+        || session.queueCleanup
+        || session.watchCleanup
+        || session.scheduled.size > 0
+        || session.timerIds.size > 0
+        || session.frames.size > 0
+        || session.previewCancels.size > 0)
+        return;
+      if (this.sessions.get(session.canvas) === session)
+        this.sessions.delete(session.canvas);
+      this.sessionList.delete(session);
+    }
+
+    rememberNodeCanvas(canvas, nodes) {
+      for (const node of nodes || []) {
+        if (node && canvas)
+          this.nodeCanvases.set(node, canvas);
+      }
+    }
+
+    forgetNodeCanvas(node, canvas = null) {
+      if (node && (!canvas || this.nodeCanvases.get(node) === canvas))
+        this.nodeCanvases.delete(node);
     }
 
     getPreviewSizer(node) {
@@ -481,44 +1167,151 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       return Math.max(0, nodeWidth - viewportWidth);
     }
 
-    waitForPreview(node, callback) {
-      if (this.getPreviewSizer(node) && !node.isEditing) {
-        callback();
-        return;
+    waitForPreview(node, callback, canvas = this.nodeCanvases.get(node) || this.plugin?.interceptedCanvas || null) {
+      if (!node || typeof callback !== "function")
+        return () => {};
+      const session = canvas ? this.createSession(canvas) : null;
+      this.rememberNodeCanvas(canvas, [node]);
+      const existing = this.previewWaits.get(node);
+      if (existing) {
+        existing.callbacks.add(callback);
+        return existing.cancel;
       }
       const contentEl = node.contentEl;
-      if (!contentEl || typeof MutationObserver === "undefined") {
-        this.plugin.trackedTimeout(() => {
-          if (!node.isEditing)
-            callback();
-        }, 100);
-        return;
-      }
-      let finished = false;
-      const finish = () => {
-        if (finished || node.isEditing || !this.getPreviewSizer(node))
-          return;
-        finished = true;
-        observer.disconnect();
-        this.plugin.pendingObservers.delete(observer);
-        callback();
+      const wait = {
+        node,
+        canvas,
+        contentEl,
+        callbacks: new Set([callback]),
+        observer: null,
+        stopped: false,
+        cancel: null,
+        timeoutKey: `preview-timeout:${node.id}`
       };
-      const observer = new MutationObserver(() => this.plugin.trackedRaf(finish));
-      this.plugin.pendingObservers.add(observer);
-      observer.observe(contentEl, { childList: true, subtree: true });
-      for (const delay of [100, 250, 600, 1200])
-        this.plugin.trackedTimeout(finish, delay);
+      const finish = (ready) => {
+        if (wait.stopped)
+          return;
+        wait.stopped = true;
+        if (session)
+          this.cancelSessionTimeout(session, wait.timeoutKey);
+        if (wait.observer) {
+          wait.observer.disconnect();
+          this.plugin.pendingObservers?.delete(wait.observer);
+        }
+        if (this.previewWaits.get(node) === wait)
+          this.previewWaits.delete(node);
+        if (session) {
+          session.previewCancels.delete(wait.cancel);
+          if (session.stopped)
+            this.forgetNodeCanvas(node, canvas);
+        }
+        if (!ready) {
+          this.forgetNodeCanvas(node, canvas);
+          this.maybeReleaseSession(session);
+          return;
+        }
+        try {
+          for (const pending of wait.callbacks)
+            pending();
+        } finally {
+          this.maybeReleaseSession(session);
+        }
+      };
+      wait.cancel = () => finish(false);
+      this.previewWaits.set(node, wait);
+      if (session)
+        session.previewCancels.add(wait.cancel);
+      const check = () => {
+        if (wait.stopped)
+          return;
+        if (session?.stopped) {
+          finish(false);
+          return;
+        }
+        if (canvas && canvas.nodes?.get?.(node.id) !== node) {
+          finish(false);
+          return;
+        }
+        if (node.contentEl !== contentEl) {
+          finish(false);
+          return;
+        }
+        if (node.isEditing)
+          return;
+        if (this.getPreviewSizer(node))
+          finish(true);
+      };
+      const scheduleWaitTimeout = (key, delay, callback) => {
+        if (session) {
+          this.scheduleSessionTimeout(session, key, callback, delay);
+        } else if (typeof this.plugin.trackedTimeout === "function") {
+          this.plugin.trackedTimeout(callback, delay);
+        } else {
+          setTimeout(callback, delay);
+        }
+      };
+      if (!contentEl || typeof MutationObserver === "undefined") {
+        scheduleWaitTimeout(wait.timeoutKey, 100, () => {
+          if (session?.stopped
+            || node.contentEl !== contentEl
+            || (canvas && canvas.nodes?.get?.(node.id) !== node))
+            finish(false);
+          else
+            finish(!node.isEditing);
+        });
+        return wait.cancel;
+      }
+      wait.observer = new MutationObserver(() => {
+        if (session)
+          this.scheduleSessionFrame(session, check, `preview:${node.id}`);
+        else if (typeof this.plugin.trackedRaf === "function")
+          this.plugin.trackedRaf(check);
+        else
+          check();
+      });
+      this.plugin.pendingObservers?.add(wait.observer);
+      wait.observer.observe(contentEl, { childList: true, subtree: true });
+      scheduleWaitTimeout(wait.timeoutKey, 1200, () => {
+        if (session?.stopped
+          || node.contentEl !== contentEl
+          || (canvas && canvas.nodes?.get?.(node.id) !== node))
+          finish(false);
+        else
+          finish(!node.isEditing);
+      });
+      return wait.cancel;
     }
 
     measurePlainTextWidth(text, node = null) {
-      const lines = String(text || "").split("\n").map((line) => line
-        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/^[\s>*#\-\d.)]+/, "")
-        .replace(/[*_`~[\]|]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim());
+      const settings = this.plugin.settings;
+      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
+      const preferredMax = Math.min(settings.maxNodeWidth, Math.max(settings.defaultNodeWidth, 360));
+      const rawLines = String(text || "").split("\n");
+      const lines = [];
+      let wordBudget = MAX_MEASUREMENT_WORDS;
+      let truncated = rawLines.length > MAX_MEASUREMENT_LINES;
+      for (const rawLine of rawLines.slice(0, MAX_MEASUREMENT_LINES)) {
+        const line = rawLine
+          .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/^[\s>*#\-\d.)]+/, "")
+          .replace(/[*_`~[\]|]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const words = [];
+        for (const match of line.matchAll(/\S+/g)) {
+          if (wordBudget-- <= 0) {
+            truncated = true;
+            break;
+          }
+          words.push(match[0]);
+        }
+        lines.push({ line, words });
+        if (truncated) break;
+      }
+      if (truncated) return preferredMax;
+
       let measure = (value) => value.length * 9.5;
       let horizontalChrome = 52;
       try {
@@ -536,31 +1329,29 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
           horizontalChrome = Math.max(24, paddingLeft + paddingRight) + chrome;
         }
       } catch (_) {}
-      const settings = this.plugin.settings;
-      const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
-      const preferredMax = Math.min(settings.maxNodeWidth, Math.max(settings.defaultNodeWidth, 360));
+
       const spaceWidth = measure(" ");
-      const wordLines = lines.map((line) => line.split(/\s+/).filter(Boolean));
-      const naturalWidth = Math.max(
-        minWidth,
-        ...lines.map((line) => Math.ceil(measure(line) + horizontalChrome))
-      );
-      if (naturalWidth <= Math.min(preferredMax, 240))
-        return naturalWidth;
+      let naturalWidth = minWidth;
+      for (const { line } of lines)
+        naturalWidth = Math.max(naturalWidth, Math.ceil(measure(line) + horizontalChrome));
+      if (naturalWidth <= Math.min(preferredMax, 240)) return naturalWidth;
+
       const candidates = new Set([minWidth]);
-      for (const words of wordLines) {
-        for (let start = 0; start < words.length; start++) {
+      for (const { words } of lines) {
+        for (let start = 0; start < words.length && candidates.size < MAX_LAYOUT_CANDIDATES; start++) {
           let width = 0;
-          for (let end = start; end < words.length; end++) {
+          const endLimit = Math.min(words.length, start + 64);
+          for (let end = start; end < endLimit; end++) {
             width += (end > start ? spaceWidth : 0) + measure(words[end]);
             candidates.add(Math.min(preferredMax, Math.ceil(width + horizontalChrome)));
+            if (candidates.size >= MAX_LAYOUT_CANDIDATES) break;
           }
         }
       }
       const lineCountAt = (width) => {
         const available = Math.max(1, width - horizontalChrome);
         let count = 0;
-        for (const words of wordLines) {
+        for (const { words } of lines) {
           if (words.length === 0) {
             count++;
             continue;
@@ -586,11 +1377,15 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
         const height = 16 + lineCount * 22;
         return { width, lineCount, area: width * height };
       }).filter((choice) => choice.lineCount >= minimumLines + 1 && choice.lineCount <= maximumLines);
-      if (choices.length === 0)
-        return Math.min(preferredMax, naturalWidth);
-      const minimumArea = Math.min(...choices.map((choice) => choice.area));
-      const nearMinimum = choices.filter((choice) => choice.area <= minimumArea * 1.12);
-      return Math.max(...nearMinimum.map((choice) => choice.width));
+      if (choices.length === 0) return Math.min(preferredMax, naturalWidth);
+      let minimumArea = Number.POSITIVE_INFINITY;
+      for (const choice of choices) minimumArea = Math.min(minimumArea, choice.area);
+      let bestWidth = 0;
+      for (const choice of choices) {
+        if (choice.area <= minimumArea * 1.12)
+          bestWidth = Math.max(bestWidth, choice.width);
+      }
+      return bestWidth;
     }
 
     estimate(text, node = null) {
@@ -600,7 +1395,21 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const maxWidth = Math.max(minWidth, settings.maxNodeWidth);
       const softMaxWidth = Math.min(maxWidth, Math.max(720, settings.defaultNodeWidth * 2.4));
       const minHeight = settings.defaultNodeHeight;
-      const lines = String(text || "").split("\n").map((line) => line
+      const rawText = String(text || "");
+      const rawLines = rawText.split("\n");
+      let measuredWords = 0;
+      for (const line of rawLines.slice(0, MAX_MEASUREMENT_LINES + 1)) {
+        for (const _match of line.matchAll(/\S+/g)) {
+          measuredWords += 1;
+          if (
+            measuredWords > MAX_MEASUREMENT_WORDS
+            || rawLines.length > MAX_MEASUREMENT_LINES
+          ) {
+            return { width: maxWidth, height: settings.maxNodeHeight };
+          }
+        }
+      }
+      const lines = rawLines.map((line) => line
         .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
         .replace(/<[^>]+>/g, " ")
@@ -611,8 +1420,11 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const charWidth = 9.5;
       const horizontalChrome = 52;
       const lineHeight = 22;
-      const words = lines.flatMap((line) => line.split(/\s+/).filter(Boolean));
-      const longestWord = Math.max(0, ...words.map((word) => word.length * charWidth));
+      let longestWord = 0;
+      for (const line of lines) {
+        for (const word of line.split(/\s+/).filter(Boolean))
+          longestWord = Math.max(longestWord, word.length * charWidth);
+      }
       const preferredWidth = Math.min(softMaxWidth, Math.max(settings.defaultNodeWidth, 360));
       const renderedLineWidth = this.measurePlainTextWidth(text, node);
       const firstWidth = Math.min(
@@ -664,8 +1476,11 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       };
     }
 
-    measure(node) {
-      if (!isTextTopicCard(node, typeof this.getGroupIds === "function" && this.plugin?.interceptedCanvas ? this.getGroupIds(this.plugin.interceptedCanvas) : null))
+    measure(node, canvas = this.nodeCanvases.get(node) || this.plugin?.interceptedCanvas || null) {
+      const groupIds = typeof this.getGroupIds === "function"
+        ? this.getGroupIds(canvas)
+        : new Set();
+      if (!isTextTopicCard(node, groupIds))
         return { width: node.width, height: node.height };
       const settings = this.plugin.settings;
       const minWidth = Math.max(80, Math.min(settings.minNodeWidth, settings.maxNodeWidth));
@@ -677,9 +1492,10 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       if (!sizer || node.isEditing) {
         let intrinsicWidth = 0;
         let overflowHeight = 0;
-        const elements = typeof node.contentEl?.querySelectorAll === "function"
-          ? Array.from(node.contentEl.querySelectorAll("*"))
-          : [];
+        const elements = new Set();
+        const truncated = collectBoundedElements(node.contentEl, elements);
+        if (truncated)
+          return { width: node.width, height: node.height, unavailable: true };
         for (const element of elements) {
           const clientWidth = Number(element.clientWidth || 0);
           const scrollWidth = Number(element.scrollWidth || 0);
@@ -700,14 +1516,10 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const chromeWidth = this.getPreviewChromeWidth(node) || 0;
       let intrinsicWidth = 0;
       const measurementElements = new Set([sizer]);
+      let truncated = false;
       const addTree = (root) => {
-        if (!root)
-          return;
-        measurementElements.add(root);
-        if (typeof root.querySelectorAll === "function") {
-          for (const element of root.querySelectorAll("*"))
-            measurementElements.add(element);
-        }
+        if (!root) return;
+        truncated = collectBoundedElements(root, measurementElements) || truncated;
       };
       addTree(sizer);
       try {
@@ -716,6 +1528,8 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       } catch (_) {
         // Ignore cross-origin embedded media frames.
       }
+      if (truncated)
+        return { width: node.width, height: node.height, unavailable: true };
       for (const element of measurementElements) {
         const clientWidth = Number(element.clientWidth || 0);
         const scrollWidth = Number(element.scrollWidth || 0);
@@ -751,7 +1565,8 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       for (const node of nodes) {
         if (!node || node.isEditing)
           continue;
-        const target = this.measure(node);
+        const target = this.measure(node, canvas);
+        if (target?.unavailable) continue;
         if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
           continue;
         node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
@@ -766,27 +1581,49 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
     }
 
     resizeNodes(canvas, nodes, layoutOptions = {}) {
+      this.rememberNodeCanvas(canvas, nodes);
+      const session = this.createSession(canvas);
       const changed = this.apply(canvas, nodes, false, layoutOptions);
-      if (changed.length === 0)
+      if (changed.length === 0) {
+        this.maybeReleaseSession(session);
         return;
+      }
       for (const delay of [120, 280, 600])
-        this.plugin.trackedTimeout(
+        this.scheduleSessionTimeout(
+          session,
+          `retry:${delay}`,
           () => this.resizeNodesRetry(canvas, nodes, layoutOptions),
           delay
         );
     }
 
     resizeNodesRetry(canvas, nodes, layoutOptions = {}) {
+      const session = this.sessions.get(canvas);
+      if (session?.stopped)
+        return;
       if (!this.plugin.isAutoAdjustCanvas(canvas) || !this.plugin.isMindmapCanvas(canvas))
         return;
       this.apply(canvas, nodes, true, layoutOptions);
     }
 
+    /**
+     * Run one exact sizing batch in the Canvas' own session.
+     * @returns {Promise<{status: string, canvas: object, requestedIds: string[], measurements: Map}>}
+     */
     resizeNodesWhenRendered(canvas, nodes, onSettled = null, layoutOptions = {}) {
-      this.cancelQueue();
-      this.stopWatchingCanvas();
-      const groupIds = this.getGroupIds(canvas);
+      this.cancelQueue(canvas);
+      this.stopWatchingCanvas(canvas);
+      const session = this.replaceSession(canvas);
+      const groupIds = this.getGroupIds(canvas) || new Set();
+      this.rememberNodeCanvas(canvas, nodes);
       const requested = nodes.filter((node) => isTextTopicCard(node, groupIds));
+      const requestedNodeById = new Map(requested.map((node) => [node.id, node]));
+      const result = (status, measurements = new Map()) => ({
+        status,
+        canvas,
+        requestedIds: requested.map((node) => node.id),
+        measurements
+      });
       if (requested.length === 0) {
         const data = canvas.getData();
         data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
@@ -794,30 +1631,48 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
         canvas.requestSave();
         this.plugin.layoutEngine.layout(canvas, layoutOptions);
         this.plugin.updateGroupBounds(canvas);
-        onSettled?.();
-        return;
+        const measured = result(SIZING_STATUS.MEASURED);
+        onSettled?.(measured);
+        this.maybeReleaseSession(session);
+        return Promise.resolve(measured);
       }
-      let stopped = false;
 
-      const cleanup = () => {
+      let stopped = false;
+      let resolveSizing = null;
+      const sizing = new Promise((resolve) => {
+        resolveSizing = resolve;
+      });
+      const finish = (status, measurements = new Map()) => {
         if (stopped)
           return;
         stopped = true;
-        if (this.queueCleanup === cleanup)
-          this.queueCleanup = null;
+        if (session.queueCleanup === cancel)
+          session.queueCleanup = null;
+        const typed = result(status, measurements);
+        resolveSizing(typed);
+        this.maybeReleaseSession(session);
       };
-      this.queueCleanup = cleanup;
+      const cancel = () => finish(SIZING_STATUS.CANCELLED);
+      session.queueCleanup = cancel;
+      const isCurrent = () => !stopped
+        && !session.stopped
+        && this.sessions.get(canvas) === session
+        && !this.plugin.unloaded
+        && this.plugin.isMindmapCanvas(canvas);
 
       const recordCompletedSizing = (measuredIds) => {
         const data = canvas.getData();
         const stored = new Set(Array.isArray(data.mindmapPendingResize) ? data.mindmapPendingResize : []);
+        for (const node of requested)
+          stored.add(node.id);
         for (const id of measuredIds)
           stored.delete(id);
-        if (stored.size > 0)
+        if (stored.size > 0) {
           data.mindmapPendingResize = Array.from(stored);
-        else
+        } else {
           delete data.mindmapPendingResize;
-        data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
+          data.mindmapLayoutVersion = CARD_LAYOUT_VERSION;
+        }
         canvas.setData(data);
         canvas.requestSave();
       };
@@ -825,54 +1680,73 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       // Preserve the currently drawn graph until the exact pass is ready. This
       // avoids showing a heuristic layout first and then replacing it.
       // No live card is resized individually while this batch is pending.
-      void this.plugin.measureMarkdownNodesOffscreen(
-        canvas,
-        requested,
-        () => !stopped && !this.plugin.unloaded && this.plugin.isMindmapCanvas(canvas)
-      ).then((measurements) => {
+      let measurement = null;
+      try {
+        measurement = this.plugin.measureMarkdownNodesOffscreen(
+          canvas,
+          requested,
+          isCurrent
+        );
+      } catch (error) {
+        console.error("ToMindMap: initial card measurement failed", error);
+        finish(isCurrent() ? SIZING_STATUS.UNAVAILABLE : SIZING_STATUS.CANCELLED);
+        return sizing;
+      }
+      void Promise.resolve(measurement).then((rawMeasurements) => {
         if (stopped)
           return;
+        if (!isCurrent()) {
+          finish(SIZING_STATUS.CANCELLED);
+          return;
+        }
+        const measurements = exactSizingMeasurements(rawMeasurements, requested);
         if (measurements.size === 0) {
-          this.apply(canvas, requested, false, layoutOptions);
-          this.plugin.layoutEngine.layout(canvas, layoutOptions);
-          this.plugin.updateGroupBounds(canvas);
-          recordCompletedSizing(requested.map((node) => node.id));
-          onSettled?.();
-          cleanup();
+          finish(SIZING_STATUS.UNAVAILABLE);
           return;
         }
         const changed = [];
+        const appliedIds = [];
         for (const [id, target] of measurements) {
+          const expectedNode = requestedNodeById.get(id);
           const node = canvas.nodes.get(id);
-          if (!node || node.isEditing)
+          if (!expectedNode || node !== expectedNode || node.isEditing)
             continue;
+          appliedIds.push(id);
           if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
             continue;
           node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
           changed.push(node);
         }
+        recordCompletedSizing(appliedIds);
+        if (appliedIds.length === 0) {
+          finish(SIZING_STATUS.UNAVAILABLE, measurements);
+          return;
+        }
         if (changed.length > 0)
           canvas.requestSave();
         this.plugin.layoutEngine.layout(canvas, layoutOptions);
         this.plugin.updateGroupBounds(canvas);
-        recordCompletedSizing(measurements.keys());
         for (const delay of [120, 280, 600])
-          this.plugin.trackedTimeout(
+          this.scheduleSessionTimeout(
+            session,
+            `retry:${delay}`,
             () => this.resizeNodesRetry(canvas, requested, layoutOptions),
             delay
           );
+        const measured = result(SIZING_STATUS.MEASURED, measurements);
         if (onSettled)
-          this.plugin.trackedTimeout(onSettled, 650);
+          this.scheduleSessionTimeout(session, "settled", () => onSettled(measured), 650);
         // Plain Markdown is now final and remains entirely cache-driven. Observe
         // only embeds whose intrinsic size can genuinely change after rendering.
         const asynchronousNodes = requested.filter((node) => hasAsyncRenderableContent(node.text));
         if (asynchronousNodes.length > 0)
           this.watchCanvas(canvas, asynchronousNodes);
-        cleanup();
+        finish(SIZING_STATUS.MEASURED, measurements);
       }).catch((error) => {
         console.error("ToMindMap: initial card measurement failed", error);
-        cleanup();
+        finish(isCurrent() ? SIZING_STATUS.UNAVAILABLE : SIZING_STATUS.CANCELLED);
       });
+      return sizing;
     }
 
     /**
@@ -881,17 +1755,23 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
      * merely because Canvas virtualized or materialized it.
      */
     watchCanvas(canvas, nodes) {
-      this.stopWatchingCanvas();
+      this.stopWatchingCanvas(canvas);
+      const session = this.createSession(canvas);
+      this.rememberNodeCanvas(canvas, nodes);
       const wrapper = canvas?.wrapperEl;
-      if (!wrapper || typeof MutationObserver === "undefined")
+      if (!wrapper || typeof MutationObserver === "undefined") {
+        this.maybeReleaseSession(session);
         return;
+      }
       const targetIds = new Set(
         (nodes || [])
           .filter((node) => node && typeof node.text === "string")
           .map((node) => node.id)
       );
-      if (targetIds.size === 0)
+      if (targetIds.size === 0) {
+        this.maybeReleaseSession(session);
         return;
+      }
 
       let stopped = false;
       let scanQueued = false;
@@ -900,40 +1780,61 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
       const dirtyIds = new Set();
       const layoutIds = new Set();
       const liveSizers = new Map();
+      const liveNodes = new Map();
+      const nodeIframes = new Map();
       const iframeRecords = new Map();
       let outerMutationObserver = null;
       let outerResizeObserver = null;
 
       const isCurrent = () => !stopped
+        && !session.stopped
+        && this.sessions.get(canvas) === session
         && !this.plugin.unloaded
-        && this.plugin.isMindmapCanvas(canvas)
-        && this.plugin.interceptedCanvas === canvas;
+        && this.plugin.isMindmapCanvas(canvas);
 
       const forgetObserver = (observer) => {
         observer?.disconnect();
         if (observer)
-          this.plugin.pendingObservers.delete(observer);
+          this.plugin.pendingObservers?.delete(observer);
       };
 
       const cleanupIframeRecord = (iframe, record) => {
         record.mutationObserver?.disconnect();
-        record.resizeObserver?.disconnect();
         if (record.mutationObserver)
-          this.plugin.pendingObservers.delete(record.mutationObserver);
-        if (record.resizeObserver)
-          this.plugin.pendingObservers.delete(record.resizeObserver);
-        record.document?.removeEventListener("load", record.assetHandler, true);
-        iframe?.removeEventListener("load", record.frameHandler);
+          this.plugin.pendingObservers?.delete(record.mutationObserver);
+        record.document?.removeEventListener?.("load", record.assetHandler, true);
+        iframe?.removeEventListener?.("load", record.frameHandler);
         iframeRecords.delete(iframe);
+      };
+
+      const cleanupNodeRecords = (nodeId) => {
+        const node = liveNodes.get(nodeId);
+        const sizer = liveSizers.get(nodeId);
+        if (sizer && outerResizeObserver) {
+          try {
+            outerResizeObserver.unobserve(sizer);
+          } catch (_) {}
+        }
+        liveSizers.delete(nodeId);
+        liveNodes.delete(nodeId);
+        if (node)
+          this.forgetNodeCanvas(node, canvas);
+        const iframe = nodeIframes.get(nodeId);
+        if (iframe) {
+          const record = iframeRecords.get(iframe);
+          if (record)
+            cleanupIframeRecord(iframe, record);
+        }
+        nodeIframes.delete(nodeId);
       };
 
       const scheduleLayout = () => {
         if (layoutTimer !== null) {
           clearTimeout(layoutTimer);
-          this.plugin.pendingTimers.delete(layoutTimer);
+          this.plugin.pendingTimers?.delete(layoutTimer);
         }
         layoutTimer = setTimeout(() => {
-          this.plugin.pendingTimers.delete(layoutTimer);
+          this.plugin.pendingTimers?.delete(layoutTimer);
           layoutTimer = null;
           if (!isCurrent())
             return;
@@ -946,18 +1847,27 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
           this.plugin.relayoutAffectedBranches(canvas, changed);
           this.plugin.updateGroupBounds(canvas);
         }, 100);
-        this.plugin.pendingTimers.add(layoutTimer);
+        this.plugin.pendingTimers?.add(layoutTimer);
       };
 
       const scan = () => {
         scanQueued = false;
         if (!isCurrent())
           return;
-        const groupIds = this.getGroupIds(canvas);
+        const groupIds = this.getGroupIds(canvas) || new Set();
         if (discoverAll) {
           discoverAll = false;
           for (const id of targetIds)
             dirtyIds.add(id);
+          const observedIds = new Set([
+            ...liveNodes.keys(),
+            ...liveSizers.keys(),
+            ...nodeIframes.keys()
+          ]);
+          for (const id of observedIds) {
+            if (!targetIds.has(id) || !canvas.nodes.has(id))
+              cleanupNodeRecords(id);
+          }
         }
 
         const changed = [];
@@ -965,15 +1875,32 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
         dirtyIds.clear();
         for (const id of ids) {
           const node = canvas.nodes.get(id);
-          if (!node || node.isEditing || groupIds.has(id) || typeof node.text !== "string")
+          if (!node || node.isEditing || groupIds.has(id) || typeof node.text !== "string") {
+            cleanupNodeRecords(id);
             continue;
+          }
+          if (liveNodes.get(id) !== node) {
+            cleanupNodeRecords(id);
+            liveNodes.set(id, node);
+          }
           const sizer = this.getPreviewSizer(node);
           if (!sizer) {
+            const previousSizer = liveSizers.get(id);
+            if (previousSizer && outerResizeObserver) {
+              try {
+                outerResizeObserver.unobserve(previousSizer);
+              } catch (_) {}
+            }
+            liveSizers.delete(id);
             observeNodeDocument(node);
             continue;
           }
           observeNode(node, sizer);
-          const target = this.measure(node);
+          const target = this.measure(node, canvas);
+          if (target?.unavailable) {
+            dirtyIds.add(id);
+            continue;
+          }
           if (Math.abs(target.width - node.width) <= 1 && Math.abs(target.height - node.height) <= 1)
             continue;
           node.moveAndResize({ x: node.x, y: node.y, width: target.width, height: target.height });
@@ -999,18 +1926,16 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
         if (scanQueued || !isCurrent())
           return;
         scanQueued = true;
-        this.plugin.trackedRaf(scan);
+        this.scheduleSessionFrame(session, scan, "canvas-scan");
       };
 
       const createIframeRecord = (node, iframe, document) => {
         const record = {
           document,
           nodeId: node.id,
-          observedSizers: new WeakSet(),
           mutationObserver: null,
-          resizeObserver: null,
           assetHandler: () => queueScan(record.nodeId),
-          frameHandler: () => queueScan(node.id, true)
+          frameHandler: () => queueScan(record.nodeId, true)
         };
         iframe.addEventListener("load", record.frameHandler);
         document?.addEventListener("load", record.assetHandler, true);
@@ -1021,7 +1946,7 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
             subtree: true,
             characterData: true
           });
-          this.plugin.pendingObservers.add(record.mutationObserver);
+          this.plugin.pendingObservers?.add(record.mutationObserver);
         }
           // Deliberately do not observe preview size itself. A manual Canvas
           // resize changes that box too, and observing it would immediately
@@ -1036,6 +1961,13 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
 
       const observeNodeDocument = (node) => {
         const iframe = node.contentEl?.querySelector("iframe");
+        const previousIframe = nodeIframes.get(node.id);
+        if (previousIframe && previousIframe !== iframe) {
+          const previousRecord = iframeRecords.get(previousIframe);
+          if (previousRecord)
+            cleanupIframeRecord(previousIframe, previousRecord);
+          nodeIframes.delete(node.id);
+        }
         if (iframe) {
           let record = iframeRecords.get(iframe);
           if (record && iframe.contentDocument && record.document !== iframe.contentDocument) {
@@ -1044,6 +1976,7 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
           }
           record = record || createIframeRecord(node, iframe, iframe.contentDocument);
           record.nodeId = node.id;
+          nodeIframes.set(node.id, iframe);
           return { iframe, record };
         }
         return null;
@@ -1051,21 +1984,16 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
 
       const observeNode = (node, sizer) => {
         const previousSizer = liveSizers.get(node.id);
-        if (previousSizer !== sizer)
-          liveSizers.set(node.id, sizer);
-        const iframeState = observeNodeDocument(node);
-        if (iframeState) {
-          const { record } = iframeState;
-          if (record.resizeObserver && !record.observedSizers.has(sizer)) {
+        if (previousSizer !== sizer) {
+          if (previousSizer && outerResizeObserver) {
             try {
-              record.resizeObserver.observe(sizer);
-              record.observedSizers.add(sizer);
-            } catch (_) {
-              // The iframe mutation/load listeners still cover this preview.
-            }
+              outerResizeObserver.unobserve(previousSizer);
+            } catch (_) {}
           }
-          return;
+          liveSizers.set(node.id, sizer);
         }
+        if (observeNodeDocument(node))
+          return;
         if (outerResizeObserver && previousSizer !== sizer) {
           try {
             outerResizeObserver.observe(sizer);
@@ -1077,7 +2005,7 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
 
       outerMutationObserver = new MutationObserver(() => queueScan(null, true));
       outerMutationObserver.observe(wrapper, { childList: true, subtree: true });
-      this.plugin.pendingObservers.add(outerMutationObserver);
+      this.plugin.pendingObservers?.add(outerMutationObserver);
       if (typeof ResizeObserver !== "undefined") {
         outerResizeObserver = new ResizeObserver((entries) => {
           for (const entry of entries) {
@@ -1088,44 +2016,70 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
           }
           queueScan();
         });
-        this.plugin.pendingObservers.add(outerResizeObserver);
+        this.plugin.pendingObservers?.add(outerResizeObserver);
       }
 
       const cleanup = () => {
         if (stopped)
           return;
         stopped = true;
+        this.cancelSessionFrames(session);
         forgetObserver(outerMutationObserver);
         forgetObserver(outerResizeObserver);
         for (const [iframe, record] of Array.from(iframeRecords))
           cleanupIframeRecord(iframe, record);
         if (layoutTimer !== null) {
           clearTimeout(layoutTimer);
-          this.plugin.pendingTimers.delete(layoutTimer);
+          this.plugin.pendingTimers?.delete(layoutTimer);
         }
         dirtyIds.clear();
         layoutIds.clear();
+        for (const node of liveNodes.values())
+          this.forgetNodeCanvas(node, canvas);
         liveSizers.clear();
-        if (this.watchCleanup === cleanup)
-          this.watchCleanup = null;
+        liveNodes.clear();
+        nodeIframes.clear();
+        if (session.watchCleanup === cleanup)
+          session.watchCleanup = null;
+        this.maybeReleaseSession(session);
       };
-      this.watchCleanup = cleanup;
+      session.watchCleanup = cleanup;
       queueScan(null, true);
     }
 
-    stopWatchingCanvas() {
-      if (this.watchCleanup)
-        this.watchCleanup();
+    stopWatchingCanvas(canvas) {
+      const target = canvas === undefined
+        ? (this.plugin?.unloaded ? null : this.plugin?.interceptedCanvas || null)
+        : canvas;
+      const sessions = target
+        ? [this.sessions.get(target)].filter(Boolean)
+        : Array.from(this.sessionList);
+      for (const session of sessions)
+        session.watchCleanup?.();
     }
 
-    cancelQueue() {
-      if (this.queueCleanup)
-        this.queueCleanup();
+    cancelQueue(canvas) {
+      const target = canvas === undefined
+        ? (this.plugin?.unloaded ? null : this.plugin?.interceptedCanvas || null)
+        : canvas;
+      const sessions = target
+        ? [this.sessions.get(target)].filter(Boolean)
+        : Array.from(this.sessionList);
+      for (const session of sessions) {
+        session.generation++;
+        this.cancelSessionFrames(session);
+        this.cancelSessionTimeouts(session);
+        for (const cancel of session.previewCancels)
+          cancel();
+        session.queueCleanup?.();
+        this.maybeReleaseSession(session);
+      }
     }
   }
 
   module.exports = {
     CARD_LAYOUT_VERSION,
+    SIZING_STATUS,
     LiveSizingController,
     embeddedContentFloor,
     hasAsyncRenderableContent,
@@ -1135,312 +2089,2655 @@ var { CARD_LAYOUT_VERSION, LiveSizingController, hasAsyncRenderableContent, isRe
   return module.exports;
 })();
 // </tomindmap:module live-sizing>
-// <tomindmap:module markdown-order>
-var MarkdownOrder = (() => {
+// <tomindmap:module markdown-codec>
+var MarkdownMindMapCodec = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
-  function topicNode(value) {
-    return value?.canvasNode || value;
-  }
-
-  function topicText(value) {
-    const node = topicNode(value);
-    const text = node?.text ?? node?.unknownData?.text;
-    if (typeof text === "string" && text.trim())
-      return text;
-    const file = node?.unknownData?.file ?? node?.file?.path ?? node?.file;
-    if (typeof file === "string")
-      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(file)
-        ? `![](<${file}>)`
-        : file;
-    const url = node?.unknownData?.url ?? node?.url;
-    if (typeof url === "string")
-      return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:$|[?#])/i.test(url)
-        ? `![](<${url}>)`
-        : url;
-    return "";
-  }
-
-  function isStandaloneBlock(value) {
-    const text = String(topicText(value) || "").trim();
-    const lines = text.split("\n");
-    return /^(```|~~~|\$\$)/.test(text)
-      || /^(?:-{3,}|_{3,}|\*(?:\s*\*){2,})$/.test(text)
-      || /^>\s?/.test(text)
-      || /^!\[[^\]]*\]\([^)]+\)\s*$/.test(text)
-      || /^!\[\[[^\]]+\]\]\s*$/.test(text)
-      || /^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(text)
-      || lines.length >= 2
-        && /^\s*\|.*\|\s*$/.test(lines[0])
-        && /^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]);
-  }
-
-  function compareTopToBottom(left, right) {
-    const a = topicNode(left);
-    const b = topicNode(right);
-    // A raw block must precede heading siblings at the same parent, otherwise
-    // Markdown would attach it to the last emitted heading and change the graph.
-    return Number(isStandaloneBlock(right)) - Number(isStandaloneBlock(left))
-      || (Number(a?.y) || 0) - (Number(b?.y) || 0)
-      || (Number(a?.x) || 0) - (Number(b?.x) || 0)
-      || String(a?.id || "").localeCompare(String(b?.id || ""));
-  }
 
   /**
-   * Return siblings in the chronology readers expect from a radial mind map.
-   * Only a central topic splits its children into sides: right top-to-bottom,
-   * followed by left top-to-bottom. Inside either branch, reading order is
-   * simply top-to-bottom.
+   * `lib/media-drop.js` owns the only interpretation of a resource reference,
+   * `lib/markdown-order.js` the only sibling chronology, and `lib/tree-model.js`
+   * the only Canvas forest, so all three are consumed rather than restated.
+   * Each line is the plain require the runtime-module compiler strips, leaving
+   * the registry-injected binding in the bundle.
    */
-  function orderChildren(parent, children, splitRootSides = false) {
-    const values = [...children];
-    if (!splitRootSides)
-      return values.sort(compareTopToBottom);
-    const parentNode = topicNode(parent);
-    const parentCenter = (Number(parentNode?.x) || 0) + (Number(parentNode?.width) || 0) / 2;
-    const sideRank = (value) => {
-      const node = topicNode(value);
-      const center = (Number(node?.x) || 0) + (Number(node?.width) || 0) / 2;
-      return center >= parentCenter ? 0 : 1;
-    };
-    return values.sort((left, right) => sideRank(left) - sideRank(right) || compareTopToBottom(left, right));
+
+  /**
+   * Layout stays with `lib/freemind.js` and id minting with `lib/canvas-api.js`;
+   * neither can be required here because both load `obsidian`. A decoded
+   * document must name its topics before any Canvas exists, so the codec mints
+   * its own 16 hex characters, and a caller that wants positions passes the
+   * layout function it already holds.
+   */
+  function mintTopicId() {
+    const bytes = new Uint8Array(8);
+    const crypto = globalThis.crypto;
+    if (crypto && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
+    else for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
-  function canvasTopicPreorder(canvas, getGroupIds) {
-    const groupIds = getGroupIds(canvas);
-    const nodeById = new Map(
-      Array.from(canvas.nodes.values())
-        .filter((node) => !groupIds.has(node.id))
-        .map((node) => [node.id, node])
-    );
-    const childrenById = new Map(Array.from(nodeById.keys()).map((id) => [id, []]));
-    const childIds = new Set();
-    for (const edge of canvas.getData().edges || []) {
-      if (!nodeById.has(edge.fromNode) || !nodeById.has(edge.toNode))
-        continue;
-      childrenById.get(edge.fromNode).push(edge.toNode);
-      childIds.add(edge.toNode);
+  /* ------------------------------------------------------------------ */
+  /* budgets and typed reasons                                          */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * A mind map is a hierarchy a person reads, so the ceilings below are far above
+   * any hand-built map and far below anything that can stall a phone: a chain of
+   * 20,000 topics still walks iteratively, but a pathological paste is rejected
+   * with a typed reason instead of overflowing the stack.
+   *
+   * `maxReorderDepth` is lower on purpose. Moving existing source slices is the
+   * one remaining step whose walk lives in `lib/markdown-order.js` and is still
+   * recursive, so a map deeper than this is refused before that walk starts
+   * rather than being allowed to ask for more stack than the engine has.
+   */
+  const DEFAULT_MARKDOWN_BUDGETS = Object.freeze({
+    maxFileBytes: 5 * 1024 * 1024,
+    maxTopics: 20000,
+    maxDepth: 20000,
+    maxReorderDepth: 2000
+  });
+
+  /**
+   * The absolute ceiling for the recursive slice-moving walk, which no option
+   * can raise. `maxReorderDepth` may only make the guard stricter; asking for a
+   * deeper reorder is still refused, because the walk it would enable is not
+   * iterative and a 5,000 level chain would exhaust the stack.
+   */
+  const MARKDOWN_REORDER_DEPTH_CEILING = 2000;
+
+  const MARKDOWN_CODEC_REASON = Object.freeze({
+    INVALID_INPUT: "invalid-input",
+    INVALID_BUDGET: "invalid-budget",
+    FILE_BYTE_BUDGET: "file-byte-budget",
+    TOPIC_BUDGET: "topic-budget",
+    DEPTH_BUDGET: "depth-budget",
+    UNSUPPORTED_RESTRUCTURE: "unsupported-restructure",
+    MISSING_SOURCE: "missing-source",
+    LAYOUT_UNAVAILABLE: "layout-unavailable"
+  });
+
+  let utf8Encoder;
+
+  function byteLength(value) {
+    if (typeof TextEncoder === "function") {
+      if (!utf8Encoder) utf8Encoder = new TextEncoder();
+      return utf8Encoder.encode(value).length;
     }
-    const position = (id) => nodeById.get(id);
-    const roots = Array.from(nodeById.keys())
-      .filter((id) => !childIds.has(id))
-      .sort((a, b) => position(a).y - position(b).y || position(a).x - position(b).x);
-    const result = [];
-    const visited = new Set();
-    const rootIds = new Set(roots);
-    const visit = (id) => {
-      if (visited.has(id))
-        return;
-      visited.add(id);
-      result.push(id);
-      const children = orderChildren(
-        position(id),
-        (childrenById.get(id) || []).map(position).filter(Boolean),
-        rootIds.has(id)
-      ).map((child) => child.id);
-      for (const child of children)
-        visit(child);
-    };
-    for (const root of roots)
-      visit(root);
-    for (const id of nodeById.keys())
-      visit(id);
-    return result;
+    let bytes = 0;
+    for (let index = 0; index < value.length; index++) {
+      const code = value.codePointAt(index);
+      if (code <= 0x7f) bytes += 1;
+      else if (code <= 0x7ff) bytes += 2;
+      else if (code <= 0xffff) bytes += 3;
+      else {
+        bytes += 4;
+        index++;
+      }
+    }
+    return bytes;
   }
 
-  function orderMatches(canvas, imported, getGroupIds) {
-    if (!imported)
-      return false;
-    const liveOrder = canvasTopicPreorder(canvas, getGroupIds);
-    const liveIds = new Set(liveOrder);
-    const sources = Array.isArray(imported.topicSources) ? imported.topicSources.filter((record) => liveIds.has(record.id)) : [];
-    if (sources.length !== liveOrder.length)
-      return false;
-    const desiredIndex = new Map(liveOrder.map((id, index) => [id, index]));
-    const children = new Map();
-    for (const record of sources) {
-      const key = record.parentId || "";
-      if (!children.has(key))
-        children.set(key, []);
-      children.get(key).push(record);
-    }
-    for (const records of children.values()) {
-      const desired = [...records].sort((left, right) => desiredIndex.get(left.id) - desiredIndex.get(right.id));
-      if (records.every((record, index) => desired[index]?.id === record.id))
+  function failure(reason, details) {
+    return details ? { ok: false, reason, ...details } : { ok: false, reason };
+  }
+
+  function success(value) {
+    return { ok: true, value };
+  }
+
+  function numberBudget(value) {
+    if (value === undefined) return null;
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) return undefined;
+    return number;
+  }
+
+  function resolveBudgets(options) {
+    const source = options && typeof options === "object" ? options : {};
+    const nested =
+      source.budgets && typeof source.budgets === "object"
+        ? source.budgets
+        : source.limits && typeof source.limits === "object"
+          ? source.limits
+          : {};
+    const values = {
+      maxFileBytes: source.maxFileBytes ?? source.maxBytes ?? nested.maxFileBytes ?? nested.maxBytes,
+      maxTopics: source.maxTopics ?? source.maxNodes ?? nested.maxTopics ?? nested.maxNodes,
+      maxDepth: source.maxDepth ?? nested.maxDepth,
+      maxReorderDepth: source.maxReorderDepth ?? nested.maxReorderDepth
+    };
+    const resolved = {};
+    for (const [name, fallback] of Object.entries(DEFAULT_MARKDOWN_BUDGETS)) {
+      const candidate = values[name];
+      if (candidate === undefined) {
+        resolved[name] = fallback;
         continue;
-      if (canMoveSourceSiblings(records))
-        return false;
+      }
+      const number = numberBudget(candidate);
+      if (number === undefined) return failure(MARKDOWN_CODEC_REASON.INVALID_BUDGET, { budget: name });
+      resolved[name] = number;
+    }
+    return success(resolved);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* one syntax classifier                                              */
+  /* ------------------------------------------------------------------ */
+
+  const FENCE_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*(.*)$/;
+  const ATX_RE = /^([ \t]{0,3})(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/;
+  const LIST_RE = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)(.*)$/;
+  const BLOCKQUOTE_RE = /^([ \t]{0,3})>[ \t]?(.*)$/;
+  const KATEX_RE = /^([ \t]{0,3})\$\$[ \t]*$/;
+  const TABLE_ROW_RE = /^[ \t]*\|.*\|[ \t]*$/;
+  const TABLE_DELIMITER_RE = /^[ \t]*\|?[\s:|-]+\|[\s:|-]*\|?[ \t]*$/;
+  const THEMATIC_BREAK_RE = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+  const HTML_BLOCK_OPEN_RE =
+    /^ {0,3}<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed|script|style|details|summary|div|section|article|blockquote)\b|\/?[A-Za-z][A-Za-z0-9-]*[\s/>])/i;
+  const HTML_COMMENT_OPEN_RE = /^ {0,3}<!--/;
+  const HTML_COMMENT_CLOSE_RE = /-->[ \t]*$/;
+  const MINDMAP_KEYWORD_RE = /^[ \t]*mindmap[ \t]*$/i;
+  const MERMAID_DIRECTIVE_RE = /^[ \t]*(?:::|%%)/;
+  const MEDIA_IMAGE_RE = /^!\[[^\]]*\]\([ \s\S]*\)$/;
+  const MEDIA_WIKI_RE = /^!?\[\[[^\]]+\]\]$/;
+
+  /** A closing fence must use the opening character and be at least as long. */
+  function isFenceClose(trimmed, marker) {
+    if (trimmed.length < marker.length) return false;
+    for (const character of trimmed) {
+      if (character !== marker[0]) return false;
     }
     return true;
   }
 
-  function canMoveSourceSiblings(records) {
-    if (records.length < 2)
-      return false;
-    if (records.every((record) => record.kind === "heading")) {
-      const level = records[0].level;
-      return records.every((record) => record.level === level);
+  function lineRecords(body, offset) {
+    const records = [];
+    const pattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
+    let match;
+    while ((match = pattern.exec(body))) {
+      if (!match[0]) break;
+      const eolMatch = match[0].match(/(?:\r\n|\n|\r)$/);
+      const contentEnd = match.index + match[0].length - (eolMatch ? eolMatch[0].length : 0);
+      records.push({
+        start: match.index + offset,
+        contentEnd: contentEnd + offset,
+        end: match.index + match[0].length + offset,
+        text: body.slice(match.index, contentEnd)
+      });
     }
-    if (records.every((record) => record.kind === "list")) {
-      const indent = records[0].indent || "";
-      return records.every((record) => (record.indent || "") === indent);
+    return records;
+  }
+
+  function markGroup(lines, start, end, kind) {
+    for (let index = start; index <= end; index++) {
+      lines[index].groupStart = start;
+      lines[index].groupEnd = end;
+      if (kind) lines[index].groupKind = kind;
+    }
+  }
+
+  /**
+   * A Mermaid body line is only a topic when it names one: the `mindmap`
+   * keyword, a `::` class or icon directive, and a `%%` comment are syntax.
+   */
+  function markFenceBody(line, mermaid) {
+    line.kind = mermaid ? "mermaid-body" : "fence-body";
+    if (!mermaid) return;
+    line.indent = (line.text.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+    if (MINDMAP_KEYWORD_RE.test(line.text) || MERMAID_DIRECTIVE_RE.test(line.text))
+      line.kind = "mermaid-keyword";
+  }
+
+  /**
+   * The single place that decides what a line of Markdown is.
+   *
+   * Every other operation - decoding, encoding safety checks, checkbox
+   * mapping, cleanup, and byte-range planning - reads these descriptors instead
+   * of running its own regular expressions, so a code fence or an HTML comment
+   * can never be rewritten by one pass and treated as prose by the next.
+   *
+   * `start`/`contentEnd`/`end` are offsets into the original source, including
+   * any BOM, so a caller can splice a classified line without re-scanning.
+   */
+  function classifyMarkdownSource(markdown) {
+    const source = String(markdown ?? "");
+    const bom = source.startsWith("\uFEFF") ? "\uFEFF" : "";
+    const body = bom ? source.slice(1) : source;
+    const eol = body.includes("\r\n") ? "\r\n" : body.includes("\r") ? "\r" : "\n";
+    const records = lineRecords(body, bom.length);
+    const lines = records.map((record, index) => ({
+      index,
+      start: record.start,
+      contentEnd: record.contentEnd,
+      end: record.end,
+      text: record.text,
+      groupStart: index,
+      groupEnd: index
+    }));
+
+    let frontmatterEnd = -1;
+    let frontmatter = "";
+    const state = { fence: null, katex: false, mermaid: false, quote: false, html: false };
+    let quoteStart = -1;
+    let htmlStart = -1;
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const trimmed = line.text.trim();
+
+      if (index === 0 && /^(---|\+\+\+)[ \t]*$/.test(trimmed)) {
+        const closer = new RegExp(`^${trimmed[0] === "-" ? "---" : "\\+\\+\\+"}[ \t]*$`);
+        for (let scan = 1; scan < lines.length; scan++) {
+          if (closer.test(lines[scan].text.trim())) {
+            for (let k = 0; k <= scan; k++) lines[k].kind = "frontmatter";
+            markGroup(lines, 0, scan, "frontmatter");
+            frontmatterEnd = scan;
+            frontmatter = lines
+              .slice(0, scan + 1)
+              .map((item) => item.text)
+              .join("\n");
+            index = scan;
+            break;
+          }
+        }
+        if (frontmatterEnd >= 0) continue;
+      }
+
+      if (state.fence) {
+        if (isFenceClose(trimmed, state.fence.marker)) {
+          const start = state.fence.start;
+          const mermaid = state.fence.mermaid;
+          line.kind = "fence-close";
+          lines[start].kind = "fence-open";
+          lines[start].info = state.fence.info;
+          for (let k = start + 1; k < index; k++) markFenceBody(lines[k], mermaid);
+          markGroup(lines, start, index, mermaid ? "mermaid" : "fence");
+          state.fence = null;
+        } else {
+          markFenceBody(line, state.fence.mermaid);
+        }
+        continue;
+      }
+
+      if (state.katex) {
+        line.kind = KATEX_RE.test(line.text) ? "katex-close" : "katex-body";
+        if (line.kind === "katex-close") {
+          markGroup(lines, state.katex, index, "katex");
+          state.katex = false;
+        }
+        continue;
+      }
+
+      if (state.quote) {
+        if (BLOCKQUOTE_RE.test(line.text)) {
+          line.kind = "blockquote-body";
+          continue;
+        }
+        if (!trimmed) {
+          // A blank line only continues the quote when another quoted line follows.
+          if (BLOCKQUOTE_RE.test(lines[index + 1]?.text ?? "")) {
+            line.kind = "blockquote-body";
+            continue;
+          }
+        }
+        for (let k = quoteStart; k < index; k++) lines[k].kind = "blockquote-body";
+        lines[quoteStart].kind = "blockquote-open";
+        markGroup(lines, quoteStart, index - 1, "blockquote");
+        state.quote = false;
+        quoteStart = -1;
+      }
+
+      if (state.html) {
+        line.kind = "html-body";
+        if (/<\/[A-Za-z][A-Za-z0-9-]*\s*>/.test(line.text) || !trimmed) {
+          for (let k = htmlStart; k <= index; k++) lines[k].kind = "html-body";
+          lines[htmlStart].kind = "html-open";
+          markGroup(lines, htmlStart, index, "html");
+          state.html = false;
+          htmlStart = -1;
+        } else if (index - htmlStart > 400) {
+          for (let k = htmlStart; k < index; k++) lines[k].kind = "html-body";
+          lines[htmlStart].kind = "html-open";
+          markGroup(lines, htmlStart, index - 1, "html");
+          state.html = false;
+          htmlStart = -1;
+        }
+        continue;
+      }
+
+      if (!trimmed) {
+        line.kind = "blank";
+        continue;
+      }
+      if (THEMATIC_BREAK_RE.test(line.text)) {
+        line.kind = "thematic-break";
+        continue;
+      }
+      const fence = line.text.match(FENCE_RE);
+      if (fence && !(fence[2][0] === "`" && fence[3].includes("`"))) {
+        const info = fence[3].trim();
+        line.kind = "fence-open";
+        state.fence = {
+          start: index,
+          marker: fence[2],
+          info,
+          mermaid: /^mermaid\b/i.test(info) || MINDMAP_KEYWORD_RE.test(lines[index + 1]?.text ?? "")
+        };
+        continue;
+      }
+      if (KATEX_RE.test(line.text)) {
+        line.kind = "katex-open";
+        state.katex = index;
+        continue;
+      }
+      if (state.mermaid) {
+        // A bare Mermaid mindmap block ends where ordinary Markdown resumes.
+        if (ATX_RE.test(line.text) || fence) {
+          state.mermaid = false;
+        } else if (
+          !line.text.startsWith(" ") &&
+          !line.text.startsWith("\t") &&
+          index + 1 < lines.length &&
+          !lines[index + 1].text.trim()
+        ) {
+          state.mermaid = false;
+        }
+        if (state.mermaid) {
+          line.kind = "mermaid-body";
+          line.indent = (line.text.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+          if (MINDMAP_KEYWORD_RE.test(line.text) || MERMAID_DIRECTIVE_RE.test(line.text))
+            line.kind = "mermaid-keyword";
+          continue;
+        }
+      } else if (MINDMAP_KEYWORD_RE.test(line.text) && /^[ \t]{2,}\S/.test(lines[index + 1]?.text ?? "")) {
+        line.kind = "mermaid-keyword";
+        state.mermaid = true;
+        continue;
+      }
+      if (BLOCKQUOTE_RE.test(line.text)) {
+        line.kind = "blockquote-open";
+        state.quote = true;
+        quoteStart = index;
+        continue;
+      }
+      if (HTML_COMMENT_OPEN_RE.test(line.text)) {
+        line.kind = "comment-open";
+        let end = index;
+        while (end < lines.length && !HTML_COMMENT_CLOSE_RE.test(lines[end].text)) end++;
+        for (let k = index + 1; k <= end; k++) lines[k].kind = "comment-body";
+        markGroup(lines, index, Math.min(end, lines.length - 1), "comment");
+        index = end;
+        continue;
+      }
+      if (HTML_BLOCK_OPEN_RE.test(line.text)) {
+        line.kind = "html-open";
+        state.html = true;
+        htmlStart = index;
+        continue;
+      }
+      if (TABLE_ROW_RE.test(line.text) && TABLE_DELIMITER_RE.test(lines[index + 1]?.text ?? "")) {
+        line.kind = "table-head";
+        let end = index + 1;
+        while (end + 1 < lines.length && TABLE_ROW_RE.test(lines[end + 1].text)) end++;
+        for (let k = index + 2; k <= end; k++) lines[k].kind = "table-body";
+        markGroup(lines, index, end, "table");
+        index = end;
+        continue;
+      }
+      const heading = line.text.match(ATX_RE);
+      if (heading) {
+        const title = (heading[3] ?? "").replace(/[ \t]+#+[ \t]*$/, "");
+        line.kind = "heading";
+        line.level = heading[2].length;
+        line.title = title;
+        line.marker = heading[2];
+        line.indent = heading[1].replace(/\t/g, "    ").length;
+        continue;
+      }
+      const list = line.text.match(LIST_RE);
+      if (list) {
+        const indent = list[1].replace(/\t/g, "    ").length;
+        line.kind = "list";
+        line.indent = indent;
+        line.marker = list[2];
+        line.ordered = /\d/.test(list[2][0]);
+        line.task = /^\[[ xX]\](?:[ \t]|$)/.test(list[4]);
+        // `indent` is the nesting whitespace alone and `prefix` is the whole
+        // marker run. A caller that indents a new child of this item must use
+        // the former; the latter would write a second `- ` into the document.
+        line.indentPrefix = list[1];
+        line.prefix = `${list[1]}${list[2]}${list[3]}`;
+        line.content = list[4];
+        continue;
+      }
+      line.kind = "plain";
+      line.indent = (line.text.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+      line.content = trimmed;
+    }
+
+    if (state.fence) {
+      const start = state.fence.start;
+      for (let k = start + 1; k < lines.length; k++) markFenceBody(lines[k], state.fence.mermaid);
+      markGroup(lines, start, lines.length - 1, state.fence.mermaid ? "mermaid" : "fence");
+      state.fence = null;
+    }
+    if (state.katex) {
+      for (let k = state.katex; k < lines.length; k++) lines[k].kind = "katex-body";
+      markGroup(lines, state.katex, lines.length - 1, "katex");
+      state.katex = false;
+    }
+    if (state.quote) {
+      for (let k = quoteStart; k < lines.length; k++) lines[k].kind = "blockquote-body";
+      lines[quoteStart].kind = "blockquote-open";
+      markGroup(lines, quoteStart, lines.length - 1, "blockquote");
+      state.quote = false;
+    }
+    if (state.html) {
+      for (let k = htmlStart; k < lines.length; k++) lines[k].kind = "html-body";
+      lines[htmlStart].kind = "html-open";
+      markGroup(lines, htmlStart, lines.length - 1, "html");
+      state.html = false;
+    }
+    for (const line of lines) {
+      if (!line.kind) line.kind = "plain";
+      if (line.indent === undefined) {
+        line.indent = (line.text.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+      }
+      if (line.content === undefined) line.content = line.text.trim();
+    }
+
+    return {
+      source,
+      bom,
+      eol,
+      lines,
+      frontmatter,
+      hasFrontmatter: frontmatterEnd >= 0,
+      frontmatterEnd,
+      contentStart: frontmatterEnd >= 0 ? lines[frontmatterEnd].end : bom.length
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* literal protection                                                 */
+  /* ------------------------------------------------------------------ */
+
+  const LITERAL_OPEN = "\u0000mdc";
+  const LITERAL_CLOSE = "\u0001";
+
+  /**
+   * Hide every span a transform must not touch: fenced code and inline code,
+   * plus HTML comments unless the caller is the cleanup that removes them.
+   * A rewrite then works on the remaining prose, and restoring is exact, so a
+   * code sample or a comment survives byte for byte.
+   */
+  function protectMarkdownLiterals(text, options = {}) {
+    const keepCommentsVisible = options.comments === false;
+    const source = String(text ?? "");
+    const literals = [];
+    let literalOpen = LITERAL_OPEN;
+    let literalClose = LITERAL_CLOSE;
+    while (source.includes(literalOpen) || source.includes(literalClose)) {
+      literalOpen += "x";
+      literalClose += "x";
+    }
+    const store = (value) => {
+      literals.push(value);
+      return `${literalOpen}${literals.length - 1}${literalClose}`;
+    };
+    const classified = classifyMarkdownSource(source);
+    const inlinePattern = keepCommentsVisible
+      ? /(`+[^`\n]*`+)/g
+      : /(<!--[\s\S]*?-->)|(`+[^`\n]*`+)/g;
+    const masked = [];
+    let cursor = 0;
+    for (const line of classified.lines) {
+      const fenced =
+        line.kind === "fence-open" ||
+        line.kind === "fence-body" ||
+        line.kind === "fence-close" ||
+        line.kind === "mermaid-body" ||
+        line.kind === "frontmatter";
+      if (line.start > cursor) masked.push(source.slice(cursor, line.start));
+      if (fenced) {
+        masked.push(store(source.slice(line.start, line.end)));
+        cursor = line.end;
+        continue;
+      }
+      const body = source.slice(line.start, line.contentEnd);
+      let rebuilt = "";
+      let last = 0;
+      let match;
+      inlinePattern.lastIndex = 0;
+      while ((match = inlinePattern.exec(body))) {
+        rebuilt += body.slice(last, match.index) + store(match[0]);
+        last = match.index + match[0].length;
+      }
+      masked.push(`${rebuilt}${body.slice(last)}${source.slice(line.contentEnd, line.end)}`);
+      cursor = line.end;
+    }
+    masked.push(source.slice(cursor));
+    const maskedText = masked.join("");
+    const token = new RegExp(
+      `${literalOpen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)${literalClose.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+      "g"
+    );
+    return {
+      text: maskedText,
+      restore(value) {
+        return String(value ?? "").replace(token, (whole, index) => literals[Number(index)] ?? whole);
+      }
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* topic text                                                         */
+  /* ------------------------------------------------------------------ */
+
+  function resourceTarget(target) {
+    return String(target || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/</g, "%3C")
+      .replace(/>/g, "%3E");
+  }
+
+  function resourceLabel(target, alias) {
+    const explicit = String(alias || "").trim();
+    if (explicit) return explicit.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+    const clean = String(target || "").split(/[?#]/)[0].replace(/\\/g, "/");
+    const basename = clean.split("/").filter(Boolean).pop() || clean;
+    try {
+      return decodeURIComponent(basename) || "Attachment";
+    } catch (_error) {
+      return basename || "Attachment";
+    }
+  }
+
+  function isImageTarget(target) {
+    return MediaDrop.mediaKind(target) === "image";
+  }
+
+  function resourceLink(target, alias, preferEmbed) {
+    const normalized = resourceTarget(target);
+    if (!normalized) return "Untitled";
+    const label = resourceLabel(normalized, alias);
+    return preferEmbed && isImageTarget(normalized)
+      ? `![${label}](<${normalized}>)`
+      : `[${label}](<${normalized}>)`;
+  }
+
+  /**
+   * Classify one topic body as a resource reference or ordinary prose.
+   *
+   * The verdict comes from `MediaDrop.decodeMediaResource`, so the accepted
+   * protocols, the vault-path rules, and the extension tables have exactly one
+   * source of truth. `target` stays as written for a stable round trip while
+   * `path` and `url` carry the validated value a Canvas card must hold.
+   */
+  function parseTopicResource(text) {
+    const value = String(text ?? "").trim();
+    const plain = { kind: "text", file: null, url: null, target: "", fragment: null };
+    if (!value) return plain;
+    let target = null;
+    let embed = false;
+    let alias = "";
+    const wiki = value.match(/^(!?)\[\[([^|\]]+)(?:\|([^\]]*))?\]\]$/);
+    const markdown = value.match(/^(!?)\[([^\]]*)\]\([ \s\S]*\)$/);
+    if (wiki) {
+      target = wiki[2].trim();
+      embed = wiki[1] === "!";
+      alias = wiki[3] || "";
+    } else if (markdown) {
+      embed = markdown[1] === "!";
+      alias = markdown[2];
+      let inner = value.slice(value.indexOf("](") + 2, -1).trim();
+      if (inner.startsWith("<") && inner.endsWith(">")) inner = inner.slice(1, -1).trim();
+      const title = /\s+["'][^"']*["']$/.exec(inner);
+      if (title) inner = inner.slice(0, title.index).trim();
+      target = inner;
+    } else {
+      return plain;
+    }
+    if (!target) return plain;
+    // The reference is interpreted exactly as written, so a wiki embed and a
+    // Markdown embed of the same path are never confused with one another.
+    const resource = MediaDrop.decodeMediaResource(target);
+    if (!resource.ok) return plain;
+    if (resource.type === "link") {
+      return {
+        kind: "link",
+        file: null,
+        url: resource.value,
+        target,
+        label: alias || null,
+        fragment: resource.fragment ?? null,
+        embed
+      };
+    }
+    return {
+      kind: "file",
+      file: resource.path,
+      url: null,
+      target,
+      label: alias || null,
+      fragment: resource.fragment ?? null,
+      embed
+    };
+  }
+
+  /** A Canvas card or a decoded topic, reduced to one comparable record. */
+  function topicContentKind(source) {
+    if (!source) return "text";
+    if (source.type === "file" || typeof source.file === "string" && source.file) return "file";
+    if (source.type === "link" || typeof source.url === "string" && source.url) return "link";
+    return "text";
+  }
+
+  function topicTarget(source) {
+    const kind = topicContentKind(source);
+    if (kind === "file") return String(source.file);
+    if (kind === "link") return String(source.url);
+    return "";
+  }
+
+  function normalizedText(value) {
+    return String(value ?? "")
+      .replace(/\r\n?/g, "\n")
+      .trim();
+  }
+
+  function topicsMatch(left, right) {
+    const leftKind = topicContentKind(left);
+    if (leftKind !== topicContentKind(right)) return false;
+    if (leftKind !== "text") return topicTarget(left) === topicTarget(right);
+    const leftText = left?.text ?? left?.unknownData?.text;
+    const rightText = right?.text ?? right?.unknownData?.text;
+    return normalizedText(leftText) === normalizedText(rightText);
+  }
+
+  function stripLeadingHeading(text) {
+    const value = String(text ?? "").trim();
+    const stripped = value.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "").replace(/^[ \t]{0,3}#{1,6}[ \t]*$/, "");
+    return stripped || "Untitled";
+  }
+
+  /**
+   * The Markdown a topic card contributes to a document.
+   *
+   * A file card becomes an embed and a link card becomes a labelled link, so the
+   * resource survives a round trip; any other card becomes portable prose.
+   */
+  function serializeTopicText(node) {
+    if (!node) return "Untitled";
+    const kind = topicContentKind(node);
+    if (kind === "file") return `![](<${resourceTarget(node.file)}>)`;
+    if (kind === "link") {
+      const url = resourceTarget(node.url);
+      return resourceLink(url, MediaDrop.linkLabel(url).replace(/[[\]]/g, ""), false);
+    }
+    return stripLeadingHeading(node.text ?? node.unknownData?.text);
+  }
+
+  const CODE_FENCE_TITLE_RE = /^(?:```|~~~)\s*([A-Za-z0-9_+-]*)/;
+  const IMAGE_TITLE_RE = /^!\[([^\]]*)\]\(([^)]+)\)/;
+  const WIKI_TITLE_RE = /^!?\[\[([^|\]#]+)(?:[|#][^\]]*)?\]\]/;
+
+  /**
+   * A topic's display title: the first meaningful line, with the decorations a
+   * renderer would hide. `array[0]` and `C#` survive because the shapes removed
+   * here are whole-token Markdown links and block shapes, not any bracketed run,
+   * and a closing hash sequence only counts when a space precedes it.
+   */
+  function topicTitle(text) {
+    let firstLine = String(text ?? "").trim().split("\n")[0].trim();
+    if (!firstLine) return "Untitled";
+    const fence = firstLine.match(CODE_FENCE_TITLE_RE);
+    if (fence) return fence[1] ? `Code · ${fence[1]}` : "Code block";
+    const image = firstLine.match(IMAGE_TITLE_RE);
+    if (image) return image[1] || image[2].split("/").pop() || "Image";
+    const wiki = firstLine.match(WIKI_TITLE_RE);
+    if (wiki) return wiki[1].split("/").pop() || "Embed";
+    if (/^\|.*\|$/.test(firstLine)) {
+      const cells = firstLine
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((cell) => cell.trim())
+        .filter(Boolean);
+      return cells.join(" · ") || "Table";
+    }
+    firstLine = firstLine
+      .replace(/^#{1,6}[ \t]+/, "")
+      .replace(/[ \t]+#+[ \t]*$/, "")
+      .replace(/^[-+*][ \t]+/, "");
+    const shaped =
+      firstLine.match(/^[A-Za-z0-9_-]*\{\{(.*)\}\}$/) ||
+      firstLine.match(/^[A-Za-z0-9_-]*\(\((.*)\)\)$/) ||
+      firstLine.match(/^[A-Za-z0-9_-]*\[\[(.*)\]\]$/);
+    if (shaped) firstLine = shaped[1];
+    return firstLine.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") || "Untitled";
+  }
+
+  function identityKey(text) {
+    const value = topicTitle(text)
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index++) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function identityLabel(text) {
+    return topicTitle(text).normalize("NFKC").replace(/\s+/g, " ").trim();
+  }
+
+  function topicIdentity(text) {
+    return { key: identityKey(text), label: identityLabel(text) };
+  }
+
+  function labelSimilarity(left, right) {
+    const normalize = (value) =>
+      String(value || "")
+        .normalize("NFKC")
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, " ")
+        .trim();
+    const a = normalize(left);
+    const b = normalize(right);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const aTokens = new Set(a.split(" ").filter(Boolean));
+    const bTokens = new Set(b.split(" ").filter(Boolean));
+    let common = 0;
+    for (const token of aTokens) if (bTokens.has(token)) common++;
+    const tokenScore = common / Math.max(aTokens.size, bTokens.size, 1);
+    const bigrams = (value) => {
+      const compact = value.replace(/\s+/g, " ");
+      const result = [];
+      for (let index = 0; index < compact.length - 1; index++) result.push(compact.slice(index, index + 2));
+      return result;
+    };
+    const aBigrams = bigrams(a);
+    const bBigrams = bigrams(b);
+    const remaining = new Map();
+    for (const pair of aBigrams) remaining.set(pair, (remaining.get(pair) || 0) + 1);
+    let shared = 0;
+    for (const pair of bBigrams) {
+      const count = remaining.get(pair) || 0;
+      if (count > 0) {
+        shared++;
+        remaining.set(pair, count - 1);
+      }
+    }
+    const bigramScore = (2 * shared) / Math.max(1, aBigrams.length + bBigrams.length);
+    const containmentScore =
+      a.includes(b) || b.includes(a) ? Math.min(a.length, b.length) / Math.max(a.length, b.length) : 0;
+    return Math.max(tokenScore, bigramScore, containmentScore);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* canonical anchors                                                  */
+  /* ------------------------------------------------------------------ */
+
+  function canonicalAnchor(text) {
+    return (
+      topicTitle(text)
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/<[^>]*>/g, "")
+        .replace(/[^\p{L}\p{N}\s-]/gu, "")
+        .trim()
+        .replace(/\s+/g, "-") || "topic"
+    );
+  }
+
+  /**
+   * GitHub-style heading anchors: the first occurrence keeps the bare slug and
+   * later duplicates take `-2`, `-3`. Both the encoder and the decoder derive
+   * the map here, so a link to a repeated title always resolves to the same card.
+   */
+  function canonicalAnchorMap(topics) {
+    const counts = new Map();
+    const anchors = new Map();
+    for (const topic of topics) {
+      const base = canonicalAnchor(topic.text);
+      const count = (counts.get(base) || 0) + 1;
+      counts.set(base, count);
+      anchors.set(count === 1 ? base : `${base}-${count}`, topic.id);
+    }
+    return anchors;
+  }
+
+  /**
+   * Rewrite `](#anchor)` links into the portable card scheme.
+   *
+   * Inline code and HTML comments are masked first, so a sample that shows the
+   * link syntax is never rewritten, and a percent-encoded anchor is decoded and
+   * canonicalised the same way the encoder canonicalises a heading.
+   */
+  function convertMarkdownAnchorsToCardLinks(topics, canvasPath) {
+    const anchors = canonicalAnchorMap(topics);
+    return topics.map((topic) => {
+      const { text, restore } = protectMarkdownLiterals(String(topic?.text ?? ""));
+      const replaced = text.replace(/\]\(#([^)\s]+)\)/g, (whole, rawAnchor) => {
+        let anchor = rawAnchor;
+        try {
+          anchor = decodeURIComponent(rawAnchor);
+        } catch (_error) {
+          /* An anchor that is not valid percent-encoding is used verbatim. */
+        }
+        const targetId = anchors.get(canonicalAnchor(anchor));
+        if (!targetId) return whole;
+        return `](obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${targetId})`;
+      });
+      return { ...topic, text: restore(replaced) };
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* frontmatter metadata                                               */
+  /* ------------------------------------------------------------------ */
+
+  const LEGACY_ID_COMMENT_RE = /<!--\s*tomindmap:id=([A-Za-z0-9_-]+)\s*-->/gi;
+  const LEGACY_BLOCK_COMMENT_RE = /^[ \t]*<!--\s*\/?tomindmap:(?:node|content)(?:\s+id=[A-Za-z0-9_-]+)?\s*-->[ \t]*(?:\r\n|\n|\r|$)/gim;
+
+  function frontmatterStringArray(frontmatter, property) {
+    const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(frontmatter || "").match(new RegExp(`^\\s{2}${escaped}:\\s*(\\[[^\\n]*\\])\\s*$`, "m"));
+    if (!match) return [];
+    try {
+      const values = JSON.parse(match[1]);
+      return Array.isArray(values) ? values.filter((value) => typeof value === "string") : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function metadataBlock(ids, keys, labels) {
+    return [
+      "tomindmap:",
+      "  version: 1",
+      `  topicIds: ${JSON.stringify(ids)}`,
+      `  topicKeys: ${JSON.stringify(keys)}`,
+      `  topicLabels: ${JSON.stringify(labels)}`
+    ].join("\n");
+  }
+
+  function mergeTopicMetadataBlock(existing, ids, keys, labels, eol) {
+    const generated = [
+      "  version: 1",
+      `  topicIds: ${JSON.stringify(ids)}`,
+      `  topicKeys: ${JSON.stringify(keys)}`,
+      `  topicLabels: ${JSON.stringify(labels)}`
+    ];
+    const lines = String(existing || "").split(/\r\n|\n|\r/);
+    const kept = lines.filter(
+      (line) => !/^\s+(?:version|topicIds|topicKeys|topicLabels):/.test(line)
+    );
+    while (kept.length > 1 && kept[kept.length - 1] === "") kept.pop();
+    if (kept.length === 0) kept.push("tomindmap:");
+    return [...kept, ...generated].join(eol);
+  }
+
+  /**
+   * Replace only the `tomindmap` block of an existing frontmatter, leaving every
+   * other key, the BOM, and the document's own line endings untouched.
+   */
+  function markdownWithTopicMetadata(markdown, metadata) {
+    const source = String(markdown ?? "");
+    const bom = source.startsWith("\uFEFF") ? "\uFEFF" : "";
+    const body = bom ? source.slice(1) : source;
+    const eol = body.includes("\r\n") ? "\r\n" : body.includes("\r") ? "\r" : "\n";
+    const ids = Array.isArray(metadata?.topicIds) ? metadata.topicIds : [];
+    const keys = Array.isArray(metadata?.topicKeys) ? metadata.topicKeys : [];
+    const labels = Array.isArray(metadata?.topicLabels) ? metadata.topicLabels : [];
+    const generatedBlock = metadataBlock(ids, keys, labels).replace(/\n/g, eol);
+    const opening = body.match(/^---[ \t]*(?:\r\n|\n|\r)/);
+    if (!opening) return `${bom}---${eol}${generatedBlock}${eol}---${eol}${eol}${body}`;
+    const contentStart = opening[0].length;
+    const closer = /^---[ \t]*(?:\r\n|\n|\r|$)/gm;
+    closer.lastIndex = contentStart;
+    const closing = closer.exec(body);
+    if (!closing) return `${bom}---${eol}${generatedBlock}${eol}---${eol}${eol}${body}`;
+    const inner = body.slice(contentStart, closing.index);
+    const records = lineRecords(inner, 0);
+    const start = records.findIndex((record) => /^tomindmap:[ \t]*$/.test(record.text));
+    let updated;
+    if (start >= 0) {
+      let end = start + 1;
+      while (end < records.length && /^[ \t]+/.test(records[end].text)) end++;
+      const from = records[start].start;
+      const to = end < records.length ? records[end].start : inner.length;
+      const existingBlock = inner.slice(from, to);
+      const mergedBlock = mergeTopicMetadataBlock(existingBlock, ids, keys, labels, eol);
+      const trailing = end < records.length || /(?:\r\n|\n|\r)$/.test(existingBlock) ? eol : "";
+      updated = inner.slice(0, from) + mergedBlock + trailing + inner.slice(to);
+    } else {
+      const separator = inner.length === 0 || /(?:\r\n|\n|\r)$/.test(inner) ? "" : eol;
+      updated = `${inner}${separator}${generatedBlock}${eol}`;
+    }
+    return bom + body.slice(0, contentStart) + updated + body.slice(closing.index);
+  }
+
+  /** Drop the retired per-topic comments without touching look-alikes in code. */
+  function withoutLegacyPluginComments(markdown) {
+    const { text, restore } = protectMarkdownLiterals(markdown, { comments: false });
+    const stripped = text
+      .replace(new RegExp(LEGACY_ID_COMMENT_RE.source, "gi"), (whole) => (whole.includes("\n") ? "\n" : ""))
+      .replace(LEGACY_BLOCK_COMMENT_RE, "");
+    return restore(stripped).replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n");
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* local media targets                                                */
+  /* ------------------------------------------------------------------ */
+
+  const WIKI_REFERENCE_RE = /(!?)\[\[([^|\]#]+)(?:[|#][^|\]]*)?(?:\|[^\]]*)?\]\]/g;
+  const MARKDOWN_REFERENCE_RE = /(!?)\[([^\]]*)\]\([ \s\S]*?\)/g;
+  const HTML_MEDIA_RE = /<(?:img|audio|video|source|iframe|object|embed)\b[^>]*(?:src|data)=["']([^"']+)["'][^>]*>/gi;
+
+  /**
+   * Vault-relative targets referenced by a document, in first-seen order.
+   *
+   * Whether a reference is allowed, and whether it names a real file extension,
+   * is decided by `MediaDrop.decodeMediaResource`; this only decides where a
+   * reference may appear.
+   */
+  function extractLocalMediaTargets(markdown) {
+    const { text } = protectMarkdownLiterals(markdown);
+    const found = new Set();
+    const consider = (raw) => {
+      const value = String(raw || "").trim().replace(/^<|>$/g, "");
+      if (!value) return;
+      const resource = MediaDrop.decodeMediaResource(value);
+      if (resource.ok && resource.type === "vault-file" && !resource.protocol) found.add(resource.path);
+    };
+    let match;
+    WIKI_REFERENCE_RE.lastIndex = 0;
+    while ((match = WIKI_REFERENCE_RE.exec(text))) consider(match[2]);
+    MARKDOWN_REFERENCE_RE.lastIndex = 0;
+    while ((match = MARKDOWN_REFERENCE_RE.exec(text))) {
+      let inner = match[0].slice(match[0].indexOf("](") + 2, -1).trim();
+      if (inner.startsWith("<") && inner.endsWith(">")) inner = inner.slice(1, -1).trim();
+      const title = /\s+["'][^"']*["']$/.exec(inner);
+      if (title) inner = inner.slice(0, title.index).trim();
+      consider(inner);
+    }
+    HTML_MEDIA_RE.lastIndex = 0;
+    while ((match = HTML_MEDIA_RE.exec(text))) consider(match[1]);
+    return Array.from(found);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* decoding                                                           */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Retired canvas shapes, removed only when they wrap the whole single line.
+   * A bare `[...]` run is deliberately not one of them: `array[0]` and `C#` are
+   * ordinary text that a reader must still see, and a Mermaid node keeps its
+   * own `((...))`, `[...]`, and `{...}` shapes because that is its identity.
+   */
+  function cleanImportedTopic(text, kind) {
+    const value = String(text ?? "").trim();
+    if (kind === "mermaid") return value || "Untitled";
+    if (!value.includes("\n")) {
+      const shaped =
+        value.match(/^[A-Za-z0-9_-]*\(\((.*)\)\)$/) ||
+        value.match(/^[A-Za-z0-9_-]*\{\{(.*)\}\}$/) ||
+        value.match(/^[A-Za-z0-9_-]*\[\[(.*)\]\]$/);
+      if (shaped) return shaped[1] || "Untitled";
+    }
+    if (/^\[[ xX]\][ \t]+/.test(value)) return `- ${value}`;
+    return value.replace(/<br\s*\/?>/gi, "\n").trim() || "Untitled";
+  }
+
+  function preorder(roots) {
+    const ordered = [];
+    const stack = [...roots].reverse();
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node) continue;
+      ordered.push(node);
+      for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
+    }
+    return ordered;
+  }
+
+  function maxDepthOf(roots) {
+    const stack = roots.map((node) => ({ node, depth: 1 }));
+    let deepest = 0;
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current.node) continue;
+      if (current.depth > deepest) deepest = current.depth;
+      for (const child of current.node.children) stack.push({ node: child, depth: current.depth + 1 });
+    }
+    return deepest;
+  }
+
+  /** Subtree sizes for every node, produced by one iterative post-order pass. */
+  function subtreeSizes(roots) {
+    const sizes = new Map();
+    for (const root of roots) {
+      const order = [];
+      const stack = [root];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        order.push(node);
+        for (const child of node.children) stack.push(child);
+      }
+      for (let index = order.length - 1; index >= 0; index--) {
+        const node = order[index];
+        let total = 1;
+        for (const child of node.children) total += sizes.get(child) || 1;
+        sizes.set(node, total);
+      }
+    }
+    return sizes;
+  }
+
+  /** Split a central topic's children into a balanced right and left side. */
+  function assignSides(roots) {
+    const sizes = subtreeSizes(roots);
+    for (const root of roots) {
+      const children = root.children;
+      if (children.length === 0) continue;
+      let total = 0;
+      for (const child of children) total += sizes.get(child) || 1;
+      let prefix = 0;
+      let split = 1;
+      let best = Infinity;
+      for (let index = 0; index <= children.length; index++) {
+        const difference = Math.abs(prefix - (total - prefix));
+        if (difference < best || (difference === best && index > split)) {
+          best = difference;
+          split = index;
+        }
+        prefix += sizes.get(children[index]) || 0;
+      }
+      const pending = [];
+      for (let index = 0; index < children.length; index++) {
+        const side = index < split ? "right" : "left";
+        children[index].position = side;
+        pending.push(children[index]);
+      }
+      while (pending.length > 0) {
+        const node = pending.pop();
+        for (const child of node.children) {
+          child.position = node.position;
+          pending.push(child);
+        }
+      }
+    }
+  }
+
+  /**
+   * Match decoded topics to the ids a previous export recorded.
+   *
+   * Exact title keys claim their index first, then each remaining topic is
+   * scored against a small inverted-index candidate set rather than every
+   * stored label, and anything still unclaimed is taken in document order. The
+   * pass is linear in the number of topics and never pairs every topic with
+   * every label.
+   */
+  function assignStableIds(ordered, metadataIds, metadataKeys, metadataLabels) {
+    const buckets = new Map();
+    const limit = Math.min(metadataIds.length, metadataKeys.length);
+    for (let index = 0; index < limit; index++) {
+      const key = metadataKeys[index];
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(index);
+    }
+    const claimed = new Set();
+    const byIndex = new Map();
+    for (const node of ordered) {
+      const indexes = buckets.get(identityKey(node.text));
+      if (!indexes) continue;
+      const match = indexes.find((index) => !claimed.has(index));
+      if (match === undefined) continue;
+      byIndex.set(node, match);
+      claimed.add(match);
+    }
+
+    const unmatchedMetadata = [];
+    const unclaimed = new Set();
+    for (let index = 0; index < Math.min(metadataIds.length, metadataLabels.length); index++) {
+      if (claimed.has(index)) continue;
+      unclaimed.add(index);
+      unmatchedMetadata.push(index);
+    }
+    if (unclaimed.size > 0) {
+      const SIMILARITY_CANDIDATES = 8;
+      const terms = new Map();
+      for (const index of unclaimed) {
+        for (const term of new Set(metadataLabels[index].toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))) {
+          if (!terms.has(term)) terms.set(term, []);
+          terms.get(term).push(index);
+        }
+      }
+      for (const node of ordered) {
+        if (byIndex.has(node)) continue;
+        const label = identityLabel(node.text);
+        const candidates = new Set();
+        for (const term of label.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)) {
+          for (const index of terms.get(term) || []) {
+            if (candidates.size >= SIMILARITY_CANDIDATES) break;
+            candidates.add(index);
+          }
+          if (candidates.size >= SIMILARITY_CANDIDATES) break;
+        }
+        let bestIndex = -1;
+        let bestScore = 0;
+        for (const index of candidates) {
+          if (claimed.has(index)) continue;
+          const score = labelSimilarity(metadataLabels[index], label);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+          }
+        }
+        if (bestIndex >= 0 && bestScore >= 0.34) {
+          byIndex.set(node, bestIndex);
+          claimed.add(bestIndex);
+          unclaimed.delete(bestIndex);
+        }
+      }
+    }
+
+    const spare = [];
+    for (let index = 0; index < metadataIds.length; index++) {
+      if (!claimed.has(index)) spare.push(index);
+    }
+    const assigned = new Set();
+    for (const node of ordered) {
+      const matched = byIndex.get(node);
+      let candidate = node.legacyId || (matched === undefined ? null : metadataIds[matched]);
+      if (!candidate) candidate = spare.length > 0 ? metadataIds[spare.shift()] : null;
+      if (!candidate || assigned.has(candidate)) candidate = mintTopicId();
+      while (assigned.has(candidate)) candidate = mintTopicId();
+      node.id = candidate;
+      assigned.add(candidate);
+    }
+  }
+
+  function frontmatterTitle(frontmatter) {
+    const match = String(frontmatter || "").match(/^title:[ \t]*(.+?)[ \t]*$/m);
+    return match ? match[1].trim().replace(/^["']|["']$/g, "") : "";
+  }
+
+  /**
+   * Decode a Markdown mind map into topics, ids, and the source ranges that a
+   * later source-preserving update needs.
+   *
+   * The result is typed. A document that legitimately contains no topic is
+   * `{ok: true, value: {empty: true}}`; only invalid input, a bad budget, or a
+   * budget that was exceeded is `{ok: false, reason}`. Every walk is iterative,
+   * so a 12,000 level chain decodes exactly like a shallow one.
+   */
+  function decodeMarkdownMindMap(markdown, options = {}) {
+    if (typeof markdown !== "string") return failure(MARKDOWN_CODEC_REASON.INVALID_INPUT);
+    const budgeted = resolveBudgets(options);
+    if (!budgeted.ok) return budgeted;
+    const budgets = budgeted.value;
+    const bytes = byteLength(markdown);
+    if (bytes > budgets.maxFileBytes)
+      return failure(MARKDOWN_CODEC_REASON.FILE_BYTE_BUDGET, { bytes, maxFileBytes: budgets.maxFileBytes });
+
+    const classified = classifyMarkdownSource(markdown);
+    const roots = [];
+    const topics = [];
+    const usedIds = new Set();
+    const headingStack = [];
+    const listStack = [];
+    let listAnchor = null;
+    let lastItem = null;
+    let pendingBlank = false;
+    let sawH1 = false;
+    let budgetError = null;
+
+    const uniqueId = (preferred) => {
+      let id = preferred;
+      while (!id || usedIds.has(id)) id = mintTopicId();
+      usedIds.add(id);
+      return id;
+    };
+
+    const addTopic = (rawText, parent, explicitId, source) => {
+      let explicit = explicitId || null;
+      const blockKind = source?.kind === "block";
+      // A legacy id comment is metadata, so it is read from prose and from list
+      // items only: inside a code fence the same characters are sample text.
+      let value = blockKind
+        ? String(rawText ?? "")
+        : String(rawText ?? "").replace(LEGACY_ID_COMMENT_RE, (whole, found) => {
+            if (!explicit) explicit = found;
+            return "";
+          });
+      value = value.replace(/[ \t]+\n/g, "\n").trim();
+      const resource = blockKind ? { kind: "text", file: null, url: null } : parseTopicResource(value);
+      const text = blockKind
+        ? value.replace(/[ \t]+$/gm, "").trim() || "Untitled"
+        : cleanImportedTopic(value, source?.kind);
+      const node = {
+        id: uniqueId(explicit),
+        legacyId: explicit,
+        type: resource.kind,
+        file: resource.file ?? null,
+        url: resource.url ?? null,
+        text,
+        position: "right",
+        children: [],
+        source
+      };
+      if (parent) parent.children.push(node);
+      else roots.push(node);
+      topics.push(node);
+      if (topics.length > budgets.maxTopics) {
+        budgetError = failure(MARKDOWN_CODEC_REASON.TOPIC_BUDGET, {
+          topics: topics.length,
+          maxTopics: budgets.maxTopics
+        });
+      }
+      return node;
+    };
+
+    const addIndented = (rawText, indent, anchor, source) => {
+      while (listStack.length > 0 && listStack[listStack.length - 1].indent >= indent) listStack.pop();
+      const parent = listStack.length > 0 ? listStack[listStack.length - 1].node : anchor;
+      const node = addTopic(rawText, parent, null, source);
+      listStack.push({ indent, node });
+      return node;
+    };
+
+    const continueLast = (node, line, extraBlank, endLine) => {
+      node.text = `${node.text}${extraBlank ? "\n\n" : "\n"}${line}`;
+      // The body belongs to the topic's own source range, so a rename rewrites
+      // it and a reorder carries it along with its heading.
+      if (node.source && Number.isInteger(endLine) && endLine > node.source.endLine)
+        node.source.endLine = endLine;
+    };
+
+    const groupText = (start, end) => {
+      const parts = [];
+      for (let index = start; index <= end; index++) parts.push(classified.lines[index].text);
+      return parts;
+    };
+
+    for (let index = 0; index < classified.lines.length; index++) {
+      const line = classified.lines[index];
+      if (budgetError) break;
+      if (line.kind === "blank" || line.kind === "thematic-break") {
+        pendingBlank = true;
+        continue;
+      }
+      if (line.kind === "frontmatter") continue;
+      if (line.kind === "comment-open" || line.kind === "comment-body") {
+        index = line.groupEnd;
+        continue;
+      }
+      const sawBlank = pendingBlank;
+      pendingBlank = false;
+
+      if (line.kind === "mermaid-keyword") continue;
+
+      if (line.kind === "mermaid-body") {
+        listAnchor = null;
+        lastItem = null;
+        const node = addIndented(line.content, line.indent, null, {
+          startLine: index,
+          endLine: index + 1,
+          kind: "mermaid",
+          indent: line.text.slice(0, line.text.length - line.content.length),
+          prefix: line.text.slice(0, line.text.length - line.content.length)
+        });
+        continue;
+      }
+
+      if (line.kind === "fence-close") {
+        index = line.groupEnd;
+        continue;
+      }
+
+      if (line.kind === "fence-open") {
+        // A Mermaid mindmap is a hierarchy, not one code card: its body lines
+        // carry the indentation that becomes the topic tree.
+        if (line.groupKind !== "mermaid") {
+          const indent = classified.lines[line.groupStart].text.match(/^[ \t]*/)[0].replace(/\t/g, "    ");
+          const body = groupText(line.groupStart, line.groupEnd)
+            .map((part) => (part.startsWith(indent) ? part.slice(indent.length) : part))
+            .join("\n")
+            .trim();
+          const parent = listStack.length > 0 ? listStack[listStack.length - 1].node : listAnchor;
+          const node = addTopic(body, parent, null, {
+            startLine: line.groupStart,
+            endLine: line.groupEnd + 1,
+            kind: "block",
+            indent
+          });
+          listStack.push({ indent: line.indent + 1, node });
+          lastItem = null;
+          index = line.groupEnd;
+          continue;
+        }
+        lastItem = null;
+        index = line.groupStart;
+        continue;
+      }
+
+      if (line.kind === "katex-open" || line.kind === "blockquote-open" || line.kind === "html-open" || line.kind === "table-head") {
+        const parts = groupText(line.groupStart, line.groupEnd);
+        const indent = classified.lines[line.groupStart].text.match(/^[ \t]*/)[0].replace(/\t/g, "    ");
+        const body = parts
+          .map((part) => (part.startsWith(indent) ? part.slice(indent.length) : part))
+          .join("\n")
+          .trim();
+        const parent = listStack.length > 0 ? listStack[listStack.length - 1].node : listAnchor;
+        const node = addTopic(body, parent, null, {
+          startLine: line.groupStart,
+          endLine: line.groupEnd + 1,
+          kind: "block",
+          indent
+        });
+        listStack.push({ indent: line.indent + 1, node });
+        lastItem = null;
+        index = line.groupEnd;
+        continue;
+      }
+
+      if (line.kind === "heading") {
+        while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= line.level)
+          headingStack.pop();
+        const parent = headingStack.length > 0 ? headingStack[headingStack.length - 1].node : null;
+        if (line.level === 1) sawH1 = true;
+        const node = addTopic(line.title, parent, null, {
+          startLine: index,
+          endLine: index + 1,
+          kind: "heading",
+          level: line.level,
+          indent: "",
+          prefix: `${line.marker} `
+        });
+        headingStack.push({ level: line.level, node });
+        listAnchor = node;
+        listStack.length = 0;
+        lastItem = { node, heading: true, markerIndent: line.indent };
+        continue;
+      }
+
+      if (line.kind === "list") {
+        const content = line.ordered ? `${line.marker} ${line.content}` : line.content;
+        const node = addIndented(content, line.indent, listAnchor, {
+          startLine: index,
+          endLine: index + 1,
+          kind: "list",
+          indent: line.indentPrefix,
+          marker: line.marker,
+          prefix: line.prefix
+        });
+        lastItem = { node, heading: false, markerIndent: line.indent };
+        continue;
+      }
+
+      if (line.kind !== "plain") continue;
+      if (line.content === "") continue;
+      const owned =
+        lastItem &&
+        (lastItem.heading
+          ? line.indent <= 3
+          : line.indent > lastItem.markerIndent ||
+            (listStack.length > 0 && line.indent >= listStack[listStack.length - 1].indent));
+      if (owned) {
+        // A lazy continuation - and a second paragraph that stayed inside the
+        // same item - belongs to the topic above it, never to a new child.
+        continueLast(lastItem.node, line.content, sawBlank, index + 1);
+        continue;
+      }
+      const node = addIndented(line.content, line.indent, listAnchor, {
+        startLine: index,
+        endLine: index + 1,
+        kind: "plain",
+        indent: line.text.slice(0, line.text.length - line.content.length),
+        prefix: line.text.slice(0, line.text.length - line.content.length)
+      });
+      listStack.push({ indent: line.indent, node });
+      lastItem = { node, heading: false, markerIndent: line.indent };
+    }
+    if (budgetError) return budgetError;
+
+    const depth = maxDepthOf(roots);
+    if (depth > budgets.maxDepth)
+      return failure(MARKDOWN_CODEC_REASON.DEPTH_BUDGET, { depth, maxDepth: budgets.maxDepth });
+
+    const title = frontmatterTitle(classified.frontmatter);
+    if (title && !sawH1 && roots.length > 0) {
+      roots.unshift({
+        id: uniqueId(null),
+        type: "text",
+        file: null,
+        url: null,
+        text: title,
+        position: "right",
+        children: roots.splice(0),
+        source: null
+      });
+    }
+
+    const ordered = preorder(roots);
+    const metadataIds = frontmatterStringArray(classified.frontmatter, "topicIds").filter((id) =>
+      /^[A-Za-z0-9_-]+$/.test(id)
+    );
+    const metadataKeys = frontmatterStringArray(classified.frontmatter, "topicKeys");
+    const metadataLabels = frontmatterStringArray(classified.frontmatter, "topicLabels");
+    assignStableIds(ordered, metadataIds, metadataKeys, metadataLabels);
+    for (const node of ordered) delete node.legacyId;
+    assignSides(roots);
+
+    const parentOf = new Map();
+    const pending = [...roots];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      for (const child of node.children) {
+        parentOf.set(child, node);
+        pending.push(child);
+      }
+    }
+    const topicSources = ordered.map((node) => ({
+      id: node.id,
+      parentId: parentOf.get(node)?.id ?? null,
+      ...(node.source || {})
+    }));
+    const topicIds = ordered.map((node) => node.id);
+    const topicKeys = ordered.map((node) => identityKey(node.text));
+    const topicLabels = ordered.map((node) => identityLabel(node.text));
+
+    return success({
+      empty: ordered.length === 0,
+      roots,
+      topics: ordered,
+      frontmatter: classified.frontmatter,
+      topicIds,
+      topicKeys,
+      topicLabels,
+      topicSources
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* encoding                                                           */
+  /* ------------------------------------------------------------------ */
+
+  function isStandaloneBlock(text) {
+    const value = String(text ?? "").trim();
+    if (!value) return false;
+    const classified = classifyMarkdownSource(value);
+    for (const line of classified.lines) {
+      if (line.kind === "fence-open" || line.kind === "katex-open" || line.kind === "blockquote-open" || line.kind === "html-open" || line.kind === "table-head")
+        return true;
     }
     return false;
   }
 
-  function reorderPreservingSource(markdown, canvas, dependencies) {
-    const {
+  function isMediaOnly(text) {
+    const value = String(text ?? "").trim();
+    return MEDIA_IMAGE_RE.test(value) || MEDIA_WIKI_RE.test(value);
+  }
+
+  /**
+   * A topic that must be emitted as its own block. A media card is not one: it
+   * is a list item whose body is an embed, so its children stay indented under
+   * it instead of escaping into a sibling paragraph.
+   */
+  function isStructuralBlock(text) {
+    const value = String(text ?? "").trim();
+    if (!value) return false;
+    if (isMediaOnly(value)) return false;
+    return isStandaloneBlock(value);
+  }
+
+  function headingSafe(text) {
+    const firstLine = String(text ?? "").trim().split("\n")[0];
+    if (!firstLine) return false;
+    if (isStandaloneBlock(text)) return false;
+    return !/^(?:[-+*][ \t]+|\d{1,9}[.)][ \t]+|\[[ xX]\][ \t]+)/.test(firstLine);
+  }
+
+  function defaultFrontmatter(file, options) {
+    if (options.exportMarkmapFrontmatter === false) return "";
+    const title = file?.basename || "Mind map";
+    const configured = Number(options.markmapColorFreezeLevel);
+    const freeze = Math.max(0, Math.min(10, Number.isFinite(configured) ? configured : 2));
+    return `---\ntitle: ${JSON.stringify(title)}\nmarkmap:\n  colorFreezeLevel: ${freeze}\n---`;
+  }
+
+  function normalizeFrontmatterBlock(value) {
+    const stored = String(value || "").trim();
+    if (!stored) return "";
+    if (!stored.startsWith("---"))
+      return `---\n${stored}\n---`;
+    const lines = stored.split(/\r?\n/);
+    if (lines.length < 2 || !/^---[ \t]*$/.test(lines[0]) ||
+        !lines.slice(1).some((line) => /^---[ \t]*$/.test(line)))
+      throw new Error("Markdown frontmatter is unterminated");
+    return stored;
+  }
+
+  function canvasFrontmatter(canvas, options) {
+    const data = typeof canvas?.getData === "function" ? canvas.getData() : {};
+    const stored = typeof data?.mindmapMarkdownFrontmatter === "string" ? data.mindmapMarkdownFrontmatter.trim() : "";
+    if (stored) return normalizeFrontmatterBlock(stored);
+    return defaultFrontmatter(canvas?.view?.file, options);
+  }
+
+  function orderForest(roots) {
+    const stack = roots.map((node) => ({ node, isRoot: true }));
+    while (stack.length > 0) {
+      const current = stack.pop();
+      current.node.children = MarkdownOrder.orderChildren(
+        current.node.canvasNode,
+        current.node.children,
+        current.isRoot
+      );
+      for (let index = current.node.children.length - 1; index >= 0; index--)
+        stack.push({ node: current.node.children[index], isRoot: false });
+    }
+    return roots;
+  }
+
+  function portableTopicText(text, idToSlug) {
+    const { text: masked, restore } = protectMarkdownLiterals(stripLeadingHeading(text));
+    const replaced = masked
+      .replace(
+        /obsidian:\/\/tomindmap-navigate\?canvas=[^)\s]+&id=([A-Za-z0-9_-]+)/g,
+        (whole, id) => (idToSlug.has(id) ? `#${idToSlug.get(id)}` : whole)
+      )
+      .replace(/!\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g, (whole, target, alias) => resourceLink(target, alias, true))
+      .replace(
+        /(^|[^!])\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g,
+        (whole, prefix, target, alias) => `${prefix}${resourceLink(target, alias, false)}`
+      );
+    return restore(replaced);
+  }
+
+  function uniqueSlugs(entries) {
+    const counts = new Map();
+    const slugs = new Map();
+    for (const [id, text] of entries) {
+      const base = canonicalAnchor(text);
+      const count = (counts.get(base) || 0) + 1;
+      counts.set(base, count);
+      slugs.set(id, count === 1 ? base : `${base}-${count}`);
+    }
+    return slugs;
+  }
+
+  /**
+   * Serialize a Canvas forest back to Markdown.
+   *
+   * Heading levels are used while every sibling is safe on a heading, then the
+   * level that would exceed six falls back to an indented list, so a deep map
+   * keeps its hierarchy instead of flattening. The whole walk is an explicit
+   * work stack, and the byte, topic, and depth budgets are enforced here too.
+   */
+  function encodeMindMapMarkdown(canvas, options = {}) {
+    const budgeted = resolveBudgets(options);
+    if (!budgeted.ok) return budgeted;
+    const budgets = budgeted.value;
+    const forest = Array.isArray(options.rootTrees) ? options.rootTrees.slice() : buildForest(canvas);
+    forest.sort(
+      (left, right) =>
+        (Number(left.canvasNode.y) || 0) - (Number(right.canvasNode.y) || 0) ||
+        (Number(left.canvasNode.x) || 0) - (Number(right.canvasNode.x) || 0)
+    );
+    if (forest.length === 0) return success({ markdown: "", empty: true, topicIds: [], topicKeys: [], topicLabels: [] });
+
+    orderForest(forest);
+    const entries = [];
+    const work = [...forest];
+    while (work.length > 0) {
+      const node = work.pop();
+      entries.push([node.canvasNode.id, serializeTopicText(node.canvasNode)]);
+      for (const child of node.children) work.push(child);
+    }
+    if (entries.length > budgets.maxTopics)
+      return failure(MARKDOWN_CODEC_REASON.TOPIC_BUDGET, { topics: entries.length, maxTopics: budgets.maxTopics });
+    const depths = new Map();
+    const depthStack = forest.map((node) => ({ node, depth: 1 }));
+    let deepest = 0;
+    while (depthStack.length > 0) {
+      const current = depthStack.pop();
+      depths.set(current.node.canvasNode.id, current.depth);
+      if (current.depth > deepest) deepest = current.depth;
+      for (const child of current.node.children) depthStack.push({ node: child, depth: current.depth + 1 });
+    }
+    if (deepest > budgets.maxDepth)
+      return failure(MARKDOWN_CODEC_REASON.DEPTH_BUDGET, { depth: deepest, maxDepth: budgets.maxDepth });
+
+    const textById = new Map(entries);
+    const idToSlug = uniqueSlugs(entries);
+    const rawText = (node) => portableTopicText(textById.get(node.canvasNode.id), idToSlug);
+    const topicIds = [];
+    const topicKeys = [];
+    const topicLabels = [];
+    const orderedIds = [];
+    for (const root of forest) {
+      const stack = [root];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        const text = textById.get(node.canvasNode.id);
+        orderedIds.push(node.canvasNode.id);
+        topicIds.push(node.canvasNode.id);
+        topicKeys.push(identityKey(text));
+        topicLabels.push(identityLabel(text));
+        for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
+      }
+    }
+
+    const lines = [];
+    if (options.includeFrontmatter !== false) {
+      let frontmatter;
+      try {
+        frontmatter =
+          typeof options.frontmatter === "string" && options.frontmatter
+            ? normalizeFrontmatterBlock(options.frontmatter)
+            : canvasFrontmatter(canvas, options);
+      } catch (error) {
+        return failure(MARKDOWN_CODEC_REASON.INVALID_INPUT, { error });
+      }
+      if (frontmatter) lines.push(frontmatterWithMetadata(frontmatter, topicIds, topicKeys, topicLabels), "");
+    }
+    const pushBlock = (text, indent) => {
+      const prefix = "  ".repeat(indent);
+      for (const line of String(text).split("\n")) lines.push(`${prefix}${line}`);
+    };
+    const stack = [];
+    for (let index = forest.length - 1; index >= 0; index--) {
+      const root = forest[index];
+      const parts = rawText(root).split("\n");
+      stack.push({ kind: "headings", children: root.children, level: 2 });
+      stack.push({ kind: "root", title: parts.shift() || "Untitled", body: parts, separator: index > 0 });
+    }
+    while (stack.length > 0) {
+      const item = stack.pop();
+      if (item.kind === "root") {
+        if (item.separator) lines.push("");
+        lines.push(`# ${item.title}`);
+        lines.push(...item.body);
+        continue;
+      }
+      if (item.kind === "headings") {
+        const children = item.children;
+        if (children.length === 0) continue;
+        const useHeadings =
+          item.level <= 6 &&
+          children.every(
+            (child) =>
+              (isStructuralBlock(rawText(child)) && child.children.length === 0) || headingSafe(rawText(child))
+          );
+        for (let index = children.length - 1; index >= 0; index--) {
+          const child = children[index];
+          if (!useHeadings) {
+            stack.push({ kind: "list", node: child, indent: 0 });
+            continue;
+          }
+          if (isStructuralBlock(rawText(child))) stack.push({ kind: "block-children", node: child, level: item.level });
+          else stack.push({ kind: "heading", node: child, level: item.level });
+        }
+        continue;
+      }
+      if (item.kind === "heading") {
+        const parts = rawText(item.node).split("\n");
+        lines.push("", `${"#".repeat(item.level)} ${parts.shift() || "Untitled"}`);
+        lines.push(...parts);
+        stack.push({ kind: "headings", children: item.node.children, level: item.level + 1 });
+        continue;
+      }
+      if (item.kind === "block-children") {
+        if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+        pushBlock(rawText(item.node), 0);
+        if (lines[lines.length - 1] !== "") lines.push("");
+        stack.push({ kind: "headings", children: item.node.children, level: item.level + 1 });
+        continue;
+      }
+      if (item.kind === "list") {
+        const raw = rawText(item.node);
+        if (isStructuralBlock(raw)) {
+          if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+          pushBlock(raw, item.indent);
+          if (lines[lines.length - 1] !== "") lines.push("");
+          for (let index = item.node.children.length - 1; index >= 0; index--)
+            stack.push({ kind: "list", node: item.node.children[index], indent: item.indent + 1 });
+          continue;
+        }
+        const parts = raw.split("\n");
+        const first = parts.shift() || "Untitled";
+        const prefix = "  ".repeat(item.indent);
+        const keepsMarker = /^(?:[-+*][ \t]+\[[ xX]\]|\d{1,9}[.)][ \t]+)/.test(first);
+        lines.push(`${prefix}${keepsMarker ? first : `- ${first}`}`);
+        for (const part of parts) lines.push(`${prefix}  ${part}`);
+        for (let index = item.node.children.length - 1; index >= 0; index--)
+          stack.push({ kind: "list", node: item.node.children[index], indent: item.indent + 1 });
+      }
+    }
+
+    const markdown = `${lines.join("\n").trim()}\n`;
+    if (byteLength(markdown) > budgets.maxFileBytes)
+      return failure(MARKDOWN_CODEC_REASON.FILE_BYTE_BUDGET, {
+        bytes: byteLength(markdown),
+        maxFileBytes: budgets.maxFileBytes
+      });
+    return success({ markdown, empty: false, topicIds, topicKeys, topicLabels, order: orderedIds });
+  }
+
+  function frontmatterWithMetadata(frontmatter, ids, keys, labels) {
+    const value = String(frontmatter || "").trim();
+    const wrapped = !value.startsWith("---") ? (value ? `---\n${value}\n---` : "---\n---") : value;
+    const lines = wrapped.replace(/\r\n?/g, "\n").split("\n");
+    const start = lines.findIndex((line) => /^tomindmap:[ \t]*$/.test(line));
+    if (start >= 0) {
+      let end = start + 1;
+      while (end < lines.length && (/^[ \t]+/.test(lines[end]) || !lines[end].trim())) end++;
+      const merged = mergeTopicMetadataBlock(lines.slice(start, end).join("\n"), ids, keys, labels, "\n").split("\n");
+      return [...lines.slice(0, start), ...merged, ...lines.slice(end)].join("\n");
+    }
+    let closing = lines.length - 1;
+    while (closing > 0 && lines[closing].trim() !== "---") closing--;
+    return [...lines.slice(0, closing), ...metadataBlock(ids, keys, labels).split("\n"), ...lines.slice(closing)].join("\n");
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Canvas extraction                                                  */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The one parent/child view of a live Canvas.
+   *
+   * It is `buildForest`, so a surplus parent edge, a directed cycle, a self
+   * loop, and a dangling endpoint are ignored in exactly the way layout,
+   * collapse, and navigation already ignore them. A raw last-write-wins parent
+   * map read straight off the edge list would instead let a surplus edge move a
+   * topic under a different parent, reorder the map, and make a source update
+   * report a reparent for a hierarchy the user never changed.
+   */
+  function canvasTopicGraph(canvas) {
+    const groupIds = getGroupIds(canvas);
+    const forest = buildForest(canvas);
+    const nodes = new Map();
+    const parents = new Map();
+    const children = new Map();
+    const depths = new Map();
+    let maxDepth = 0;
+    for (const treeNode of forest) {
+      nodes.set(treeNode.id, treeNode.canvasNode);
+    }
+    const stack = forest.map((treeNode) => ({ treeNode, depth: 1 }));
+    while (stack.length > 0) {
+      const current = stack.pop();
+      const id = current.treeNode.id;
+      if (!children.has(id)) children.set(id, []);
+      depths.set(id, current.depth);
+      if (current.depth > maxDepth) maxDepth = current.depth;
+      for (const child of current.treeNode.children) {
+        nodes.set(child.id, child.canvasNode);
+        parents.set(child.id, id);
+        children.get(id).push(child.id);
+        stack.push({ treeNode: child, depth: current.depth + 1 });
+      }
+    }
+    return {
+      groupIds,
+      forest,
+      // `roots`, `nodes`, `parents`, and `children` are the contract
+      // `MarkdownOrder.canvasTopicGraph` consumes, so one canonical graph is
+      // shared instead of being rebuilt with the same rules in two places.
+      roots: forest.map((treeNode) => treeNode.id),
+      nodes,
+      parents,
+      children,
+      depths,
+      maxDepth
+    };
+  }
+
+  /** Live Canvas topics in the chronological reading order of the forest. */
+  function extractCanvasTopicPreorder(canvas) {
+    const graph = canvasTopicGraph(canvas);
+    const position = (id) => graph.nodes.get(id);
+    const roots = graph.forest
+      .map((treeNode) => treeNode.id)
+      .sort(
+        (left, right) =>
+          (Number(position(left)?.y) || 0) - (Number(position(right)?.y) || 0) ||
+          (Number(position(left)?.x) || 0) - (Number(position(right)?.x) || 0) ||
+          String(left).localeCompare(String(right))
+      );
+    const rootIds = new Set(roots);
+    // Membership is tracked in a Set beside the list. Scanning the growing list
+    // instead would make a 20,000 sibling map quadratic, which is the whole cost
+    // the canonical forest was adopted to avoid.
+    const order = [];
+    const visited = new Set();
+    const stack = [...roots].reverse();
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      order.push(id);
+      const next = MarkdownOrder.orderChildren(
+        position(id),
+        (graph.children.get(id) || []).map(position).filter(Boolean),
+        rootIds.has(id)
+      ).map((node) => node.id);
+      for (let index = next.length - 1; index >= 0; index--) stack.push(next[index]);
+    }
+    return order;
+  }
+
+  /** The outermost selected topics, so a drag never exports a subtree twice. */
+  function extractSelectedTopicForest(canvas) {
+    const groupIds = getGroupIds(canvas);
+    const selected = new Set();
+    for (const item of canvas?.selection || []) {
+      const id = typeof item === "string" ? item : item && typeof item === "object" ? item.id : null;
+      if (id && !groupIds.has(id)) selected.add(id);
+    }
+    if (selected.size === 0) return [];
+    const byId = new Map();
+    const stack = buildForest(canvas);
+    while (stack.length > 0) {
+      const tree = stack.pop();
+      byId.set(tree.canvasNode.id, tree);
+      for (const child of tree.children) stack.push(child);
+    }
+    return Array.from(selected, (id) => byId.get(id)).filter((tree) => {
+      if (!tree) return false;
+      for (let parent = tree.parent; parent; parent = parent.parent) {
+        if (selected.has(parent.canvasNode.id)) return false;
+      }
+      return true;
+    });
+  }
+
+  function documentTopics(document) {
+    const roots = Array.isArray(document?.roots) ? document.roots : [];
+    const topics = Array.isArray(document?.topics) && document.topics.length > 0 ? document.topics : preorder(roots);
+    return topics.map((node) => ({
+      id: node.id,
+      text: node.text,
+      type: node.type ?? "text",
+      file: node.file ?? undefined,
+      url: node.url ?? undefined
+    }));
+  }
+
+  function edgeKey(edge) {
+    return `${edge.fromNode}\\u0000${edge.toNode}`;
+  }
+
+  /** True when the live Canvas already shows exactly the decoded document. */
+  function canvasMatchesDocument(canvas, document, canvasPath) {
+    if (!document) return false;
+    const topics = documentTopics(document);
+    const graph = canvasTopicGraph(canvas);
+    if (graph.nodes.size !== topics.length) return false;
+    const incoming = canvasPath ? convertMarkdownAnchorsToCardLinks(topics, canvasPath) : topics;
+    for (const topic of incoming) {
+      const live = graph.nodes.get(topic.id);
+      if (!live || !topicsMatch(live, topic)) return false;
+    }
+    const ids = new Set(incoming.map((topic) => topic.id));
+    const wanted = new Set();
+    for (const record of document.topicSources || []) {
+      if (!record.parentId || !ids.has(record.id) || !ids.has(record.parentId)) continue;
+      wanted.add(`${record.parentId}\\u0000${record.id}`);
+    }
+    // The same canonical forest decides the edges, so a surplus or cycle edge the
+    // map already ignores cannot make an unchanged hierarchy look changed.
+    const live = new Set();
+    for (const [parentId, children] of graph.children) {
+      if (!ids.has(parentId)) continue;
+      for (const childId of children) {
+        if (ids.has(childId)) live.add(`${parentId}\\u0000${childId}`);
+      }
+    }
+    if (live.size !== wanted.size) return false;
+    for (const key of wanted) if (!live.has(key)) return false;
+    return true;
+  }
+
+  /**
+   * The canonical graph is computed once here and injected, so the order check
+   * and the Canvas itself can never disagree about which edges the map accepts.
+   */
+  function canvasOrderMatchesDocument(canvas, document) {
+    if (!document) return false;
+    return MarkdownOrder.orderMatches(canvas, document, getGroupIds, {
+      graph: canvasTopicGraph(canvas)
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Canvas data adapters and reconciliation                            */
+  /* ------------------------------------------------------------------ */
+
+  /** Adapt raw `.canvas` JSON to the shape every codec entry point accepts. */
+  function canvasDataAdapter(data, file) {
+    const nodes = new Map();
+    for (const item of data?.nodes || []) {
+      const text = item.type === "group" ? item.label || "Group" : serializeTopicText(item);
+      nodes.set(item.id, { ...item, text });
+    }
+    const edges = new Map();
+    for (const item of data?.edges || []) {
+      const from = nodes.get(item.fromNode);
+      const to = nodes.get(item.toNode);
+      if (!from || !to) continue;
+      edges.set(item.id, {
+        ...item,
+        from: { node: from, side: item.fromSide },
+        to: { node: to, side: item.toSide }
+      });
+    }
+    return { nodes, edges, getData: () => data, view: { file } };
+  }
+
+  function canvasDataToMindMapMarkdown(data, file, options = {}) {
+    return encodeMindMapMarkdown(canvasDataAdapter(data, file), options);
+  }
+
+  /**
+   * Merge a freshly decoded document into stored Canvas data.
+   *
+   * Geometry follows the content kind, not the node id: a card only keeps its
+   * current size when both sides are the same kind of content, so a text topic
+   * that became a file card (or the reverse) is measured again instead of
+   * inheriting a dimension that no longer fits.
+   */
+  function reconcileCanvasData(existingData, imported) {
+    const current = existingData && typeof existingData === "object" ? existingData : {};
+    const existingNodes = new Map((current.nodes || []).map((node) => [node.id, node]));
+    const pendingResize = new Set(Array.isArray(current.mindmapPendingResize) ? current.mindmapPendingResize : []);
+    const nodes = [];
+    for (const incoming of imported.nodes) {
+      const existing = existingNodes.get(incoming.id);
+      if (!existing) {
+        if (topicContentKind(incoming) === "text") pendingResize.add(incoming.id);
+        nodes.push({ ...incoming });
+        continue;
+      }
+      const before = topicContentKind(existing);
+      const after = topicContentKind(incoming);
+      const sameKind = before === after;
+      const sameContent = topicsMatch(existing, incoming);
+      const keepGeometry = sameKind && (after === "file" || after === "link" || sameContent);
+      if (after === "file" || after === "link") pendingResize.delete(incoming.id);
+      else if (!sameContent) pendingResize.add(incoming.id);
+      else pendingResize.delete(incoming.id);
+      nodes.push({
+        ...existing,
+        ...incoming,
+        width: keepGeometry ? existing.width : incoming.width,
+        height: keepGeometry ? existing.height : incoming.height
+      });
+    }
+    const groupIds = new Set();
+    for (const node of current.nodes || []) {
+      if (node.type === "group") {
+        groupIds.add(node.id);
+        nodes.push(node);
+      }
+    }
+    const existingEdges = new Map((current.edges || []).map((edge) => [edgeKey(edge), edge]));
+    const edges = imported.edges.map((incoming) => {
+      const existing = existingEdges.get(edgeKey(incoming));
+      return existing
+        ? { ...incoming, ...existing, fromNode: incoming.fromNode, toNode: incoming.toNode }
+        : incoming;
+    });
+    const retained = new Set(nodes.map((node) => node.id));
+    for (const edge of current.edges || []) {
+      if (!groupIds.has(edge.fromNode) && !groupIds.has(edge.toNode)) continue;
+      if (retained.has(edge.fromNode) && retained.has(edge.toNode)) edges.push(edge);
+    }
+    const reconciled = {
+      ...current,
+      nodes,
+      edges,
+      mindmap: true,
+      mindmapMarkdownFrontmatter: imported.frontmatter || current.mindmapMarkdownFrontmatter || ""
+    };
+    delete reconciled.mindmapAutoAdjust;
+    const topicIds = new Set(imported.nodes.map((node) => node.id));
+    const pending = Array.from(pendingResize).filter((id) => topicIds.has(id));
+    if (pending.length > 0) reconciled.mindmapPendingResize = pending;
+    else delete reconciled.mindmapPendingResize;
+    return reconciled;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* checkbox mapping                                                   */
+  /* ------------------------------------------------------------------ */
+
+  function taskMarkerOffset(line) {
+    const candidate =
+      line.kind === "list"
+        ? line.text
+        : line.kind === "blockquote-open" || line.kind === "blockquote-body"
+          ? line.text.replace(BLOCKQUOTE_RE, (whole, _indent, rest) => " ".repeat(whole.length - rest.length) + rest)
+          : null;
+    if (candidate === null) return -1;
+    const match = candidate.match(/^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+\[)([ xX])(\])/);
+    return match ? match[1].length : -1;
+  }
+
+  /**
+   * Toggle the checkbox a reader just clicked.
+   *
+   * Task items are counted in document order from the same classifier the
+   * decoder uses, so fenced samples, inline code, and blockquoted prose are
+   * never mistaken for a source task and ordered tasks are reached correctly.
+   */
+  function toggleTopicCheckbox(text, index) {
+    const source = String(text ?? "");
+    const classified = classifyMarkdownSource(source);
+    const tasks = [];
+    for (const line of classified.lines) {
+      const offset = taskMarkerOffset(line);
+      if (offset >= 0) tasks.push({ line, offset });
+    }
+    const target = tasks[index];
+    if (!target) return { text: source, changed: false };
+    const { line, offset } = target;
+    const body = line.text;
+    const state = body[offset];
+    const next = state === " " ? "x" : " ";
+    const replacement = `${body.slice(0, offset)}${next}${body.slice(offset + 1)}`;
+    const patched =
+      source.slice(0, line.start) + replacement + source.slice(line.contentEnd, line.end) + source.slice(line.end);
+    return { text: patched, changed: true };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* source-preserving update                                           */
+  /* ------------------------------------------------------------------ */
+
+  function rangeFor(records, record) {
+    if (!record || !Number.isInteger(record.startLine) || !Number.isInteger(record.endLine)) return null;
+    const first = records[record.startLine];
+    const last = records[record.endLine - 1];
+    if (!first || !last) return null;
+    return { start: first.start, contentEnd: last.contentEnd, end: last.end };
+  }
+
+  function renderIntoSource(record, text, eol) {
+    const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+    const indent = record.indent || "";
+    if (record.kind === "block") return lines.map((line) => `${indent}${line}`).join("\n");
+    if (record.kind === "heading" || record.kind === "mermaid") {
+      const first = lines.shift() || "Untitled";
+      return `${record.prefix || ""}${first}${lines.length ? `\n${lines.join("\n")}` : ""}`;
+    }
+    let first = lines.shift() || "Untitled";
+    if (record.kind === "list") {
+      const marker = String(record.marker || "");
+      if (marker && first.startsWith(marker)) first = first.slice(marker.length).replace(/^[ \t]+/, "");
+      else first = first.replace(/^[-+*][ \t]+/, "");
+    }
+    const continuation = record.kind === "list" ? `${indent}  ` : indent;
+    return `${record.prefix || ""}${first}${lines.length ? `\n${lines.map((line) => `${continuation}${line}`).join("\n")}` : ""}`;
+  }
+
+  /**
+   * Preorder index of every subtree's last topic, in one pass.
+   *
+   * Source ranges are contiguous in preorder, so a subtree's byte range is the
+   * union of a contiguous slice; the reverse pass then walks each node's direct
+   * children exactly once, which keeps a wide map linear.
+   */
+  function subtreeByteRanges(order, records) {
+    const count = order.length;
+    const byteStart = new Array(count);
+    const byteEnd = new Array(count);
+    const ranges = new Map();
+    for (let index = 0; index < count; index++) {
+      const range = rangeFor(records, order[index]);
+      if (!range) return null;
+      byteStart[index] = range.start;
+      byteEnd[index] = range.end;
+    }
+    const open = [];
+    const endAt = new Array(count).fill(count);
+    for (let index = 0; index < count; index++) {
+      const parentId = order[index].parentId || null;
+      while (open.length > 0 && open[open.length - 1].id !== parentId) {
+        endAt[open.pop().index] = index;
+      }
+      open.push({ index, id: order[index].id });
+    }
+    while (open.length > 0) endAt[open.pop().index] = count;
+    const subtreeEnd = new Array(count);
+    for (let index = count - 1; index >= 0; index--) {
+      let end = byteEnd[index];
+      let child = index + 1;
+      while (child < endAt[index]) {
+        end = Math.max(end, subtreeEnd[child]);
+        child = endAt[child];
+      }
+      subtreeEnd[index] = end;
+      ranges.set(order[index].id, { start: byteStart[index], end });
+    }
+    return ranges;
+  }
+
+  function markdownEol(source) {
+    return source.includes("\r\n") ? "\r\n" : source.includes("\r") ? "\r" : "\n";
+  }
+
+  /**
+   * Plan the Markdown rewrite that makes a document match the live Canvas.
+   *
+   * Topics keep the exact bytes they were parsed from: a rename rewrites only
+   * its own line range, a delete removes only its own range, and an addition
+   * inserts a rendered block next to its new siblings. Anything the plan cannot
+   * express - a reparent, a missing range, overlapping ranges - is refused with
+   * a typed reason so the caller keeps the file it already had.
+   */
+  function planMarkdownSourceUpdate(markdown, canvas, document, canvasPath, options = {}) {
+    if (typeof markdown !== "string") return failure(MARKDOWN_CODEC_REASON.INVALID_INPUT);
+    if (!document || !Array.isArray(document.topicSources))
+      return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE);
+    const source = markdown;
+    const eol = markdownEol(source);
+    const records = lineRecords(source, 0);
+    const previous = documentTopics(document);
+    if (previous.length === 0) return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE);
+    const previousById = new Map(previous.map((topic) => [topic.id, topic]));
+    const sourceById = new Map(document.topicSources.map((record) => [record.id, record]));
+    const order = document.topicSources.slice();
+    const subtreeRanges = subtreeByteRanges(order, records);
+    if (!subtreeRanges) return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE);
+
+    // The live hierarchy is read through the canonical forest, so a surplus
+    // parent, a cycle, or a dangling endpoint is treated exactly as layout
+    // treats it instead of moving a topic and reporting a phantom reparent.
+    const graph = canvasTopicGraph(canvas);
+    const liveNodes = graph.nodes;
+    const liveOrder = extractCanvasTopicPreorder(canvas);
+    const incoming = canvasPath
+      ? convertMarkdownAnchorsToCardLinks(previous, canvasPath)
+      : previous;
+    const incomingById = new Map(incoming.map((topic) => [topic.id, topic]));
+
+    const liveIds = new Set(liveNodes.keys());
+    const previousIds = new Set(previousById.keys());
+    const liveParents = graph.parents;
+    const previousParents = new Map(order.map((record) => [record.id, record.parentId || null]));
+
+    for (const id of liveIds) {
+      if (!previousIds.has(id)) continue;
+      if ((previousParents.get(id) || null) !== (liveParents.get(id) || null))
+        return failure(MARKDOWN_CODEC_REASON.UNSUPPORTED_RESTRUCTURE, { topicId: id });
+    }
+
+    const idToSlug = uniqueSlugs(
+      liveOrder.map((id) => [id, serializeTopicText(liveNodes.get(id))])
+    );
+    const portableText = (id) => portableTopicText(serializeTopicText(liveNodes.get(id)), idToSlug);
+
+    const patches = [];
+    for (const id of liveOrder) {
+      const topic = incomingById.get(id);
+      if (!topic) continue;
+      const live = liveNodes.get(id);
+      if (topicsMatch(live, topic)) continue;
+      const range = rangeFor(records, sourceById.get(id));
+      if (!range) return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE, { topicId: id });
+      patches.push({
+        start: range.start,
+        end: range.end,
+        replacement:
+          renderIntoSource(sourceById.get(id), portableText(id), eol) + source.slice(range.contentEnd, range.end)
+      });
+    }
+    const removedIds = [...previousById.keys()].filter((id) => !liveIds.has(id));
+    for (const id of removedIds) {
+      const range = rangeFor(records, sourceById.get(id));
+      if (!range) return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE, { topicId: id });
+      patches.push({ start: range.start, end: range.end, replacement: "" });
+    }
+    const addedIds = liveOrder.filter((id) => !previousIds.has(id));
+
+    const childList = new Map();
+    for (const id of liveIds) childList.set(id, [...(graph.children.get(id) || [])]);
+    const liveRoots = graph.forest.map((treeNode) => treeNode.id);
+    const spatialSort = (left, right) =>
+      liveNodes.get(left).y - liveNodes.get(right).y ||
+      liveNodes.get(left).x - liveNodes.get(right).x ||
+      String(left).localeCompare(String(right));
+    liveRoots.sort(spatialSort);
+    const liveRootIds = new Set(liveRoots);
+    for (const [parentId, children] of childList) {
+      childList.set(
+        parentId,
+        MarkdownOrder.orderChildren(
+          liveNodes.get(parentId),
+          children.map((id) => liveNodes.get(id)),
+          liveRootIds.has(parentId)
+        ).map((node) => node.id)
+      );
+    }
+
+    const addedSet = new Set(addedIds);
+    const addedPreorder = (rootId) => {
+      const result = [];
+      const stack = [rootId];
+      while (stack.length > 0) {
+        const id = stack.pop();
+        result.push(id);
+        const children = childList.get(id) || [];
+        for (let index = children.length - 1; index >= 0; index--) {
+          if (addedSet.has(children[index])) stack.push(children[index]);
+        }
+      }
+      return result;
+    };
+    const renderAddedTree = (rootId, style) => {
+      const out = [];
+      const stack = [{ id: rootId, style, tail: true }];
+      while (stack.length > 0) {
+        const item = stack.pop();
+        const text = portableText(item.id);
+        // A block under a list item is written at that item's own indentation,
+        // exactly as the encoder writes one, so the new topic cannot escape the
+        // list level it was added into.
+        const indent = item.style.kind === "list" ? item.style.indent || "" : "";
+        let childStyle;
+        if (item.tail) out.push("");
+        if (isMediaOnly(text)) {
+          out.push(`${indent}- ${text}`);
+          childStyle = { kind: "list", indent: `${indent}  ` };
+        } else if (isStructuralBlock(text)) {
+          for (const line of text.split("\n")) out.push(`${indent}${line}`);
+          childStyle = { kind: "list", indent: `${indent}  ` };
+        } else if (item.style.kind === "heading" && item.style.level <= 6) {
+          out.push(`${"#".repeat(item.style.level)} ${text}`);
+          childStyle =
+            item.style.level < 6 ? { kind: "heading", level: item.style.level + 1 } : { kind: "list", indent: "" };
+        } else {
+          out.push(`${indent}- ${text}`);
+          childStyle = { kind: "list", indent: `${indent}  ` };
+        }
+        const children = (childList.get(item.id) || []).filter((id) => addedSet.has(id));
+        for (let index = children.length - 1; index >= 0; index--)
+          stack.push({ id: children[index], style: childStyle, tail: false });
+      }
+      return out.join("\n").replace(/^\n/, "");
+    };
+
+    const addedGroups = new Map();
+    for (const id of addedIds) {
+      const parentId = liveParents.get(id) || null;
+      if (parentId && addedSet.has(parentId)) continue;
+      if (parentId && !previousIds.has(parentId))
+        return failure(MARKDOWN_CODEC_REASON.UNSUPPORTED_RESTRUCTURE, { topicId: id });
+      const key = parentId || "";
+      if (!addedGroups.has(key)) addedGroups.set(key, []);
+      addedGroups.get(key).push(id);
+    }
+
+    const visualIndex = new Map(liveOrder.map((id, index) => [id, index]));
+    const insertionPlans = [];
+    for (const [parentKey, roots] of addedGroups) {
+      const parentId = parentKey || null;
+      let style = { kind: "heading", level: 1 };
+      if (parentId) {
+        const parentRecord = sourceById.get(parentId);
+        if (!parentRecord) return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE, { topicId: parentId });
+        style =
+          parentRecord.kind === "heading" && Number(parentRecord.level) < 6
+            ? { kind: "heading", level: Number(parentRecord.level) + 1 }
+            : { kind: "list", indent: `${parentRecord.indent || ""}  ` };
+      }
+      const addedRoots = new Set(roots);
+      const siblings = parentId ? childList.get(parentId) || [] : liveRoots;
+      for (let index = 0; index < siblings.length; ) {
+        if (!addedRoots.has(siblings[index])) {
+          index++;
+          continue;
+        }
+        const run = [];
+        while (index < siblings.length && addedRoots.has(siblings[index])) run.push(siblings[index++]);
+        const nextExisting = siblings.slice(index).find((id) => !addedSet.has(id)) || null;
+        const previousExisting =
+          siblings
+            .slice(0, index - run.length)
+            .reverse()
+            .find((id) => !addedSet.has(id)) || null;
+        let offset;
+        if (nextExisting) offset = subtreeRanges.get(nextExisting)?.start;
+        else if (previousExisting) offset = subtreeRanges.get(previousExisting)?.end;
+        else if (parentId) offset = rangeFor(records, sourceById.get(parentId))?.end;
+        else offset = source.length;
+        if (offset === undefined || offset === null)
+          return failure(MARKDOWN_CODEC_REASON.MISSING_SOURCE, { topicId: run[0] });
+        insertionPlans.push({
+          offset,
+          desiredIndex: Math.min(...run.map((id) => visualIndex.get(id) ?? Number.MAX_SAFE_INTEGER)),
+          rendered: run.map((id) => renderAddedTree(id, style)).join("\n\n"),
+          newIds: run.flatMap(addedPreorder)
+        });
+      }
+    }
+    insertionPlans.sort((left, right) => left.offset - right.offset || left.desiredIndex - right.desiredIndex);
+    const merged = [];
+    for (const plan of insertionPlans) {
+      const previousPlan = merged[merged.length - 1];
+      if (previousPlan && previousPlan.offset === plan.offset) {
+        previousPlan.rendered += `\n${plan.rendered}`;
+        previousPlan.newIds.push(...plan.newIds);
+      } else {
+        merged.push({ ...plan, newIds: [...plan.newIds] });
+      }
+    }
+    for (const plan of merged) {
+      const prefix = plan.offset > 0 && !/[\r\n]$/.test(source.slice(0, plan.offset)) ? eol : "";
+      patches.push({
+        start: plan.offset,
+        end: plan.offset,
+        replacement: `${prefix}${plan.rendered.replace(/\n/g, eol)}${eol}`
+      });
+    }
+
+    const orderEntries = (document.topicIds || [])
+      .filter((id) => liveIds.has(id))
+      .map((id) => ({ offset: rangeFor(records, sourceById.get(id))?.start ?? source.length, inserted: false, ids: [id] }));
+    for (const plan of merged)
+      orderEntries.push({ offset: plan.offset, inserted: true, desiredIndex: plan.desiredIndex, ids: plan.newIds });
+    orderEntries.sort(
+      (left, right) =>
+        left.offset - right.offset ||
+        Number(right.inserted) - Number(left.inserted) ||
+        (left.desiredIndex ?? Number.MAX_SAFE_INTEGER) - (right.desiredIndex ?? Number.MAX_SAFE_INTEGER)
+    );
+    const sourceOrder = orderEntries.flatMap((entry) => entry.ids);
+
+    patches.sort((left, right) => right.start - left.start || right.end - left.end);
+    for (let index = 1; index < patches.length; index++) {
+      if (patches[index - 1].start < patches[index].end)
+        return failure(MARKDOWN_CODEC_REASON.UNSUPPORTED_RESTRUCTURE);
+    }
+    let patched = source;
+    for (const patch of patches) patched = patched.slice(0, patch.start) + patch.replacement + patched.slice(patch.end);
+
+    const withMetadata = markdownWithTopicMetadata(withoutLegacyPluginComments(patched), {
+      topicIds: sourceOrder,
+      topicKeys: sourceOrder.map((id) => identityKey(serializeTopicText(liveNodes.get(id)))),
+      topicLabels: sourceOrder.map((id) => identityLabel(serializeTopicText(liveNodes.get(id))))
+    });
+    if (addedIds.length === 0 && removedIds.length === 0) {
+      const reordered = planMarkdownTopicReorder(withMetadata, canvas, options);
+      return reordered.ok
+        ? success({ markdown: reordered.value.markdown, addedIds, removedIds })
+        : success({ markdown: withMetadata, addedIds, removedIds });
+    }
+    return success({ markdown: withMetadata, addedIds, removedIds });
+  }
+
+  /**
+   * Reorder sibling subtrees by moving their original source slices.
+   *
+   * The live depth is measured from the canonical forest first, iteratively, so a
+   * deep map is refused with a typed reason before the recursive slice-moving
+   * walk in `lib/markdown-order.js` can ask for more stack than the engine has.
+   * No option raises that ceiling; a caller that needs a deeper reorder should
+   * regenerate the document with `encodeMindMapMarkdown`, which is iterative end
+   * to end.
+   */
+  function planMarkdownTopicReorder(markdown, canvas, options = {}) {
+    if (typeof markdown !== "string") return failure(MARKDOWN_CODEC_REASON.INVALID_INPUT);
+    const budgeted = resolveBudgets(options);
+    if (!budgeted.ok) return budgeted;
+    const limit = Math.min(
+      MARKDOWN_REORDER_DEPTH_CEILING,
+      budgeted.value.maxDepth,
+      budgeted.value.maxReorderDepth
+    );
+    const graph = canvasTopicGraph(canvas);
+    const depth = graph.maxDepth;
+    if (depth > limit)
+      return failure(MARKDOWN_CODEC_REASON.DEPTH_BUDGET, { depth, maxDepth: limit });
+    const reordered = MarkdownOrder.reorderPreservingSource(String(markdown), canvas, {
       getGroupIds,
-      parseDocument,
-      lineRecords,
-      withMetadata,
-      withoutLegacyComments,
+      graph,
+      parseDocument: (text) => {
+        const parsed = decodeMarkdownMindMap(text);
+        return parsed.ok ? parsed.value : { topicSources: [] };
+      },
+      lineRecords: (text) => lineRecords(String(text), 0),
+      withMetadata: (text, ids, keys, labels) =>
+        markdownWithTopicMetadata(text, { topicIds: ids, topicKeys: keys, topicLabels: labels }),
+      withoutLegacyComments: withoutLegacyPluginComments,
       identityKey,
       identityLabel,
-      nodeText = (node) => node?.text || "Untitled"
-    } = dependencies;
-    let result = String(markdown || "");
-    const desiredOrder = canvasTopicPreorder(canvas, getGroupIds);
-    const desiredIndex = new Map(desiredOrder.map((id, index) => [id, index]));
-    const desiredChildren = new Map();
-    const addDesired = (parentId, id) => {
-      const key = parentId || "";
-      if (!desiredChildren.has(key))
-        desiredChildren.set(key, []);
-      desiredChildren.get(key).push(id);
+      nodeText: (node) => serializeTopicText(node)
+    });
+    return success({ markdown: reordered });
+  }
+
+  /**
+   * Turn a decoded document into flat Canvas nodes and edges.
+   *
+   * Positions are not this module's concern, so the caller passes the layout
+   * function it already uses for every other import. Root ids come from the
+   * decoded roots directly instead of being rediscovered by scanning the edge
+   * list, which keeps a wide map linear.
+   */
+  function layoutMarkdownMindMap(document, options = {}) {
+    const decoded = document && Array.isArray(document.roots) ? success(document) : decodeMarkdownMindMap(document, options);
+    if (!decoded.ok) return decoded;
+    const value = decoded.value;
+    const shared = {
+      frontmatter: value.frontmatter,
+      topicIds: value.topicIds,
+      topicKeys: value.topicKeys,
+      topicLabels: value.topicLabels,
+      topicSources: value.topicSources
     };
-    const groupIds = getGroupIds(canvas);
-    const liveIds = new Set(Array.from(canvas.nodes.keys()).filter((id) => !groupIds.has(id)));
-    const liveParents = new Map();
-    for (const edge of canvas.getData().edges || []) {
-      if (liveIds.has(edge.fromNode) && liveIds.has(edge.toNode))
-        liveParents.set(edge.toNode, edge.fromNode);
+    if (value.empty) return success({ ...shared, nodes: [], edges: [], rootIds: [] });
+    const layout = typeof options.layout === "function" ? options.layout : null;
+    if (!layout) return failure(MARKDOWN_CODEC_REASON.LAYOUT_UNAVAILABLE);
+    const nodes = [];
+    const edges = [];
+    const treeGap = Math.max(120, (Number(options.verticalGap) || 0) * 6);
+    let currentY = 0;
+    for (const root of value.roots) {
+      currentY += layout(root, 0, currentY, options, nodes, edges) + treeGap;
     }
-    for (const id of desiredOrder)
-      addDesired(liveParents.get(id), id);
-
-    for (let pass = 0; pass < Math.max(1, desiredOrder.length); pass++) {
-      const parsed = parseDocument(result);
-      const sourceById = new Map(parsed.topicSources.map((record) => [record.id, record]));
-      const sourceChildren = new Map();
-      for (const record of parsed.topicSources) {
-        const key = record.parentId || "";
-        if (!sourceChildren.has(key))
-          sourceChildren.set(key, []);
-        sourceChildren.get(key).push(record.id);
-      }
-      const mismatches = [];
-      for (const [parentKey, wanted] of desiredChildren) {
-        const current = sourceChildren.get(parentKey) || [];
-        if (current.length !== wanted.length)
-          continue;
-        const currentSet = new Set(current);
-        if (wanted.some((id) => !currentSet.has(id)) || wanted.every((id, index) => current[index] === id))
-          continue;
-        const siblingRecords = current.map((id) => sourceById.get(id)).filter(Boolean);
-        if (siblingRecords.length !== current.length || !canMoveSourceSiblings(siblingRecords))
-          continue;
-        let depth = 0;
-        let parent = parentKey || null;
-        const seen = new Set();
-        while (parent && !seen.has(parent)) {
-          seen.add(parent);
-          depth++;
-          parent = sourceById.get(parent)?.parentId || null;
-        }
-        mismatches.push({ parentKey, wanted, current, depth });
-      }
-      if (mismatches.length === 0)
-        break;
-      mismatches.sort((a, b) => b.depth - a.depth
-        || (desiredIndex.get(a.parentKey) || 0) - (desiredIndex.get(b.parentKey) || 0));
-      const mismatch = mismatches[0];
-      const records = lineRecords(result);
-      const descendants = (id, found = new Set()) => {
-        if (found.has(id))
-          return found;
-        found.add(id);
-        for (const child of sourceChildren.get(id) || [])
-          descendants(child, found);
-        return found;
-      };
-      const ranges = new Map();
-      let valid = true;
-      for (const id of mismatch.current) {
-        const topics = Array.from(descendants(id))
-          .map((candidate) => sourceById.get(candidate))
-          .filter(Boolean);
-        const startLine = Math.min(...topics.map((record) => record.startLine));
-        const endLine = Math.max(...topics.map((record) => record.endLine));
-        const first = records[startLine];
-        const last = records[endLine - 1];
-        if (!first || !last) {
-          valid = false;
-          break;
-        }
-        ranges.set(id, { start: first.start, end: last.end });
-      }
-      const ordered = mismatch.current.map((id) => ranges.get(id));
-      if (!valid || ordered.some((range) => !range))
-        break;
-      if (ordered.some((range, index) => index > 0 && ordered[index - 1].end > range.start))
-        break;
-      const gaps = ordered.slice(0, -1)
-        .map((range, index) => result.slice(range.end, ordered[index + 1].start));
-      const pieces = new Map(mismatch.current.map((id) => {
-        const range = ranges.get(id);
-        return [id, result.slice(range.start, range.end)];
-      }));
-      const replacement = mismatch.wanted
-        .map((id, index) => `${index > 0 ? gaps[index - 1] || "" : ""}${pieces.get(id) || ""}`)
-        .join("");
-      const updated = result.slice(0, ordered[0].start)
-        + replacement
-        + result.slice(ordered[ordered.length - 1].end);
-      if (updated === result)
-        break;
-      result = updated;
-    }
-
-    const liveById = new Map(Array.from(canvas.nodes.values()).map((node) => [node.id, node]));
-    return withMetadata(
-      withoutLegacyComments(result),
-      desiredOrder,
-      desiredOrder.map((id) => identityKey(nodeText(liveById.get(id)))),
-      desiredOrder.map((id) => identityLabel(nodeText(liveById.get(id))))
-    );
+    return success({ ...shared, nodes, edges, rootIds: value.roots.map((root) => root.id) });
   }
 
   module.exports = {
-    compareTopToBottom,
-    orderChildren,
-    canvasTopicPreorder,
-    orderMatches,
-    reorderPreservingSource
+    DEFAULT_MARKDOWN_BUDGETS,
+    MARKDOWN_CODEC_REASON,
+    canvasDataAdapter,
+    canvasDataToMindMapMarkdown,
+    canvasMatchesDocument,
+    canvasOrderMatchesDocument,
+    canonicalAnchor,
+    canonicalAnchorMap,
+    classifyMarkdownSource,
+    convertMarkdownAnchorsToCardLinks,
+    decodeMarkdownMindMap,
+    encodeMindMapMarkdown,
+    extractCanvasTopicPreorder,
+    extractLocalMediaTargets,
+    extractSelectedTopicForest,
+    layoutMarkdownMindMap,
+    markdownWithTopicMetadata,
+    parseTopicResource,
+    planMarkdownSourceUpdate,
+    planMarkdownTopicReorder,
+    protectMarkdownLiterals,
+    reconcileCanvasData,
+    serializeTopicText,
+    topicIdentity,
+    topicTitle,
+    toggleTopicCheckbox,
+    withoutLegacyPluginComments
   };
   return module.exports;
 })();
-// </tomindmap:module markdown-order>
+// </tomindmap:module markdown-codec>
 // <tomindmap:module clipboard-markdown>
-var { normalizeClipboardMarkdown } = (() => {
+var {
+  normalizeClipboardMarkdown
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
+  const HTML_TAGS = new Set([
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+    "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+    "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del", "details",
+    "dfn", "dialog", "div", "dl", "dt", "em", "embed", "fieldset", "figcaption",
+    "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "head",
+    "header", "hgroup", "hr", "html", "i", "iframe", "img", "input", "ins",
+    "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta",
+    "meter", "nav", "noscript", "object", "ol", "optgroup", "option", "output",
+    "p", "param", "picture", "pre", "progress", "q", "rp", "rt", "ruby", "s",
+    "samp", "script", "search", "section", "select", "slot", "small", "source",
+    "span", "strong", "style", "sub", "summary", "sup", "svg", "table", "tbody",
+    "td", "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "u", "ul", "var", "video", "wbr"
+  ]);
+
+  const HEADING = /^ {0,3}#{1,6}(?:[ \t]+|$)/;
+  const LIST_ITEM = /^ {0,6}(?:[-+*]|\d+[.)])(?:[ \t]+|$)/;
+  const BLOCKQUOTE = /^ {0,3}>/;
+  const THEMATIC_BREAK = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+  const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
+  const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+  const TABLE_DELIMITER_CELL = /^:?-{3,}:?$/;
+  const HTML_COMMENT = /<!--[\s\S]*?-->/;
+  const HTML_TAG = /<\/?([A-Za-z][A-Za-z0-9:-]*)(?:\s[^<>]*?)?\/?\s*>/;
+  const HTML_SELF_CLOSING = /<([A-Za-z][A-Za-z0-9:-]*)(?:\s[^<>]*?)?\/\s*>/;
+  const HTML_DOCTYPE = /<![A-Za-z][^>]*>/;
+  const INLINE_MARKDOWN = /!?\[[^\]\n]+\]\([^)\n]*\)|`[^`\n]+`|~~[^~\n]+~~|\*\*[^*\n]+\*\*|__[^_\n]+__|(^|[^\w*])\*[^*\n]+\*(?![\w*])|(^|[^\w_])_[^_\n]+_(?![\w_])|\[\^[^\]\n]+\]|<(?:https?|mailto):[^>\s]+>/;
+
+  function withoutBom(line) {
+    return String(line || "").replace(/^\uFEFF/, "");
+  }
+
+  function isFenceClose(line, marker) {
+    const trimmed = String(line || "").trim();
+    return trimmed.length >= marker.length && [...trimmed].every((character) => character === marker[0]);
+  }
+
+  function hasFence(lines) {
+    let openMarker = null;
+    for (const line of lines) {
+      if (openMarker) {
+        if (isFenceClose(line, openMarker)) return true;
+        continue;
+      }
+      const match = line.match(FENCE);
+      if (!match) continue;
+      const marker = match[1];
+      const info = match[2];
+      if (marker[0] === "`" && info.includes("`")) continue;
+      openMarker = marker;
+    }
+    return openMarker !== null;
+  }
+
+  function tableCells(line) {
+    const value = String(line || "").trim();
+    if (!value.includes("|")) return null;
+    const cells = [];
+    let cell = "";
+    let escaped = false;
+    for (const character of value) {
+      if (escaped) {
+        cell += character;
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === "|") {
+        cells.push(cell.trim());
+        cell = "";
+      } else {
+        cell += character;
+      }
+    }
+    cells.push(cell.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells.length > 0 ? cells : null;
+  }
+
+  function hasTable(lines) {
+    for (let index = 1; index < lines.length; index++) {
+      const delimiter = tableCells(lines[index]);
+      if (!delimiter || !lines[index - 1].trim().includes("|")) continue;
+      if (delimiter.every((cell) => TABLE_DELIMITER_CELL.test(cell))) return true;
+    }
+    return false;
+  }
+
+  function hasHtml(lines) {
+    const source = lines.join("\n");
+    if (HTML_COMMENT.test(source) || HTML_DOCTYPE.test(source)) return true;
+    const match = source.match(HTML_TAG) || source.match(HTML_SELF_CLOSING);
+    if (!match) return false;
+    const name = match[1].toLowerCase();
+    return HTML_TAGS.has(name) || name.includes("-");
+  }
+
+  function hasFrontmatter(lines) {
+    if (lines.length < 2 || !/^---[ \t]*$/.test(withoutBom(lines[0]))) return false;
+    for (let index = 1; index < lines.length; index++) {
+      if (/^(?:---|\.\.\.)[ \t]*$/.test(lines[index])) return true;
+    }
+    return false;
+  }
+
+  function hasIndentedCode(lines) {
+    return lines.some((line) => /^(?: {4}|\t)\S/.test(line));
+  }
+
+  function hasBlockStructure(lines) {
+    if (hasFrontmatter(lines) || hasFence(lines) || hasIndentedCode(lines) || hasTable(lines) || hasHtml(lines)) return true;
+    if (lines.some((line) => HEADING.test(line) || LIST_ITEM.test(line) || BLOCKQUOTE.test(line))) return true;
+    if (lines.some((line) => THEMATIC_BREAK.test(line) || SETEXT.test(line))) return true;
+    return lines.some((line) => INLINE_MARKDOWN.test(line));
+  }
+
   function hasMarkdownStructure(text) {
-    return /^(?:\uFEFF?---[\s\S]*?---\s*)?(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)/m.test(text);
+    const normalized = String(text || "").replace(/\r\n?/g, "\n");
+    const trimmed = normalized.trim();
+    return Boolean(trimmed) && hasBlockStructure(trimmed.split("\n"));
   }
 
   /**
    * Convert unstructured clipboard text into the smallest useful Markdown tree.
    * One prose block remains one card; blank-line-separated blocks become sibling
-   * cards. Existing headings/lists are left untouched for the full parser.
+   * cards. Valid Markdown blocks are returned unchanged for the full parser.
    */
   function normalizeClipboardMarkdown(value) {
     const text = String(value || "").replace(/\r\n?/g, "\n").trim();
-    if (!text || hasMarkdownStructure(text))
-      return text;
+    if (!text || hasMarkdownStructure(text)) return text;
     const blocks = text.split(/\n[ \t]*\n+/).map((block) => block.trim()).filter(Boolean);
-    if (blocks.length <= 1)
-      return (blocks[0] || "").replace(/\n+/g, " ");
+    if (blocks.length <= 1) return (blocks[0] || "").replace(/\n+/g, " ");
     return blocks.map((block) => `- ${block.replace(/\n+/g, " ")}`).join("\n");
   }
 
@@ -1452,9 +4749,28 @@ var { normalizeClipboardMarkdown } = (() => {
 })();
 // </tomindmap:module clipboard-markdown>
 // <tomindmap:module export>
-var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, rasterizeSvg, renderHtmlAsVectorPdf, saveToDownloads, visibleCardPaint } = (() => {
+var {
+  createApprovedPublicHttpsAssetResolver,
+  createExportAssetResolver,
+  createExportDelivery,
+  createExportMindMapModal,
+  createExportPlan,
+  createRasterExportSession,
+  embedDocumentAssets,
+  paginatedPdfDocument,
+  rasterizeSvg,
+  renderHtmlAsVectorPdf,
+  sanitizeExportElement,
+  serializeXmlSafe,
+  saveToDownloads,
+  visibleCardPaint
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
+  const EXPORT_FILENAME_ENCODER = new TextEncoder();
+
   function createExportMindMapModal(Modal) {
   	return class ExportMindMapModal extends Modal {
   		constructor(app, selectionAvailable, onExport) {
@@ -1623,18 +4939,552 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
       const svgToPdf = options.svgToPdf || (
           typeof renderSvgToPdf === 'function'
               ? renderSvgToPdf
-              : require('./vector-pdf-bundle.js').renderSvgToPdf
+              : {
+    renderSvgToPdf
+  }.renderSvgToPdf
       );
-      return svgToPdf(svgInfo, document.pageSize, options.ownerDocument || globalThis.document);
+      const output = await svgToPdf(
+          svgInfo,
+          document.pageSize,
+          options.ownerDocument || globalThis.document,
+          { maxOutputBytes: options.maxOutputBytes }
+      );
+      return (() => {
+          const maxOutputBytes = Number.isFinite(options.maxOutputBytes)
+              ? Math.max(1, options.maxOutputBytes)
+              : 64 * 1024 * 1024;
+          assertExportOutputWithinBudget(output, maxOutputBytes);
+          return output;
+      })();
   }
 
-  function escapeXml(value) {
-      return String(value)
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&apos;');
+  function isLocalFileUrl(value) {
+      try {
+          const url = new URL(String(value || ''));
+          return (
+              url.protocol === 'file:' &&
+              !url.username &&
+              !url.password &&
+              (!url.hostname || url.hostname === 'localhost')
+          );
+      } catch (_) {
+          return false;
+      }
+  }
+
+  function isSafeVaultAssetPath(value) {
+      const path = String(value || '');
+      if (!path || path.includes('\\') || /[\u0000-\u001F]/.test(path) || path.startsWith('/'))
+          return false;
+      return !path.split('/').some((segment) => segment === '.' || segment === '..');
+  }
+
+  function publicIpv4Address(hostname) {
+      const parts = hostname.split('.');
+      if (parts.length < 1 || parts.length > 4) return false;
+      const numbers = parts.map((part) => {
+          if (/^0x[\da-f]+$/i.test(part)) return Number.parseInt(part.slice(2), 16);
+          if (/^0[0-7]+$/.test(part)) return Number.parseInt(part.slice(1), 8);
+          if (!/^\d+$/.test(part)) return Number.NaN;
+          return Number(part);
+      });
+      if (numbers.some((part) => !Number.isInteger(part) || part < 0)) return false;
+      const last = numbers[numbers.length - 1];
+      if (numbers.slice(0, -1).some((part) => part > 255) || last > 0xFFFFFFFF) return false;
+      const value = numbers.length === 1
+          ? numbers[0]
+          : numbers.reduce((address, part, index) =>
+              address + part * 256 ** (index === numbers.length - 1 ? 0 : 3 - index), 0);
+      const first = Math.floor(value / 0x1000000);
+      const second = Math.floor(value / 0x10000) % 0x100;
+      const third = Math.floor(value / 0x100) % 0x100;
+      return !(
+          first === 0 ||
+          first === 10 ||
+          first === 127 ||
+          (first === 100 && second >= 64 && second <= 127) ||
+          (first === 169 && second === 254) ||
+          (first === 172 && second >= 16 && second <= 31) ||
+          (first === 192 && second === 0 && third === 0) ||
+          (first === 192 && second === 0 && third === 2) ||
+          (first === 192 && second === 168) ||
+          (first === 198 && (second === 18 || second === 19)) ||
+          (first === 198 && second === 51 && third === 100) ||
+          (first === 203 && second === 0 && third === 113) ||
+          first >= 224
+      );
+  }
+
+  function parseIpv6Address(rawHostname) {
+      let hostname = rawHostname.replace(/^\[|\]$/g, '').split('%')[0];
+      const lastColon = hostname.lastIndexOf(':');
+      if (hostname.slice(lastColon + 1).includes('.')) {
+          const trailingIpv4 = hostname.slice(lastColon + 1);
+          if (!/^\d+(?:\.\d+){1,3}$/.test(trailingIpv4)) return null;
+          const octets = trailingIpv4.split('.').map(Number);
+          if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+          const high = ((octets[0] << 8) | octets[1]).toString(16);
+          const low = ((octets[2] << 8) | octets[3]).toString(16);
+          hostname = `${hostname.slice(0, lastColon + 1)}${high}:${low}`;
+      }
+      if ((hostname.match(/::/g) || []).length > 1) return null;
+      const [left, right = ''] = hostname.split('::');
+      const leftParts = left ? left.split(':') : [];
+      const rightParts = right ? right.split(':') : [];
+      if ([...leftParts, ...rightParts].some((part) => !/^[\da-f]{1,4}$/i.test(part))) return null;
+      const missing = 8 - leftParts.length - rightParts.length;
+      if (missing < 0 || (missing === 0 && hostname.includes('::'))) return null;
+      const words = [
+          ...leftParts,
+          ...Array.from({ length: missing }, () => '0'),
+          ...rightParts
+      ].map((part) => Number.parseInt(part, 16));
+      return words.length === 8 ? words : null;
+  }
+
+  function publicIpv6Address(hostname) {
+      const words = parseIpv6Address(hostname);
+      if (!words) return false;
+      if ((words[0] & 0xe000) !== 0x2000) return false;
+      if (words[0] === 0x2001 && words[1] === 0x0db8) return false;
+      return true;
+  }
+
+  function isPublicHttpsUrl(url) {
+      if (url.protocol !== 'https:' || url.username || url.password) return false;
+      const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+      if (!hostname) return false;
+      if (hostname.includes(':')) return publicIpv6Address(hostname);
+      if (/^\d+(?:\.\d+){0,3}$/.test(hostname)) return publicIpv4Address(hostname);
+      if (
+          !hostname.includes('.') ||
+          hostname.split('.').some((label) => !label) ||
+          /(^|\.)(?:localhost|local|localdomain|lan|home|internal|intranet|private|test|example|invalid)$/.test(hostname)
+      )
+          return false;
+      return true;
+  }
+
+  async function readBoundedResponseBytes(
+      response,
+      maxBytes,
+      reserveAggregate = () => {},
+      signal = null
+  ) {
+      const reader = response?.body?.getReader?.();
+      if (!reader) return null;
+      const chunks = [];
+      let length = 0;
+      let cancelled = signal?.aborted || false;
+      const cancelReader = () => {
+          cancelled = true;
+          const reason = signal?.reason || new Error('Asset request was cancelled');
+          try {
+              void Promise.resolve(reader.cancel?.(reason)).catch(() => {});
+          } catch (_) {
+              // A reader may already be closed; the cancellation flag remains authoritative.
+          }
+      };
+      if (cancelled) cancelReader();
+      else signal?.addEventListener('abort', cancelReader, { once: true });
+      try {
+          while (true) {
+              const next = await reader.read();
+              if (cancelled || signal?.aborted)
+                  throw signal?.reason || new Error('Asset request was cancelled');
+              if (next?.done) break;
+              const value = next?.value instanceof Uint8Array
+                  ? next.value
+                  : new Uint8Array(next?.value || []);
+              if (length + value.length > maxBytes) {
+                  const error = new Error('Asset exceeds the resource byte budget');
+                  try {
+                      await reader.cancel?.(error);
+                  } catch (_) {
+                      // The original budget failure remains authoritative.
+                  }
+                  throw error;
+              }
+              try {
+                  reserveAggregate(value.length);
+              } catch (error) {
+                  try {
+                      await reader.cancel?.(error);
+                  } catch (_) {
+                      // The original budget failure remains authoritative.
+                  }
+                  throw error;
+              }
+              chunks.push(value);
+              length += value.length;
+          }
+      } finally {
+          signal?.removeEventListener('abort', cancelReader);
+          try {
+              reader.releaseLock?.();
+          } catch (_) {
+              // Preserve the resource or budget error that ended the read.
+          }
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+      }
+      return bytes;
+  }
+
+  async function assertPublicDnsAnswers(hostname, resolveHostname) {
+      let addresses;
+      try {
+          addresses = await resolveHostname(hostname);
+      } catch (_) {
+          throw new Error('Asset URL must be an absolute public HTTPS URL');
+      }
+      if (
+          !Array.isArray(addresses) ||
+          addresses.length === 0 ||
+          addresses.some((address) => {
+              const value = String(address || '');
+              return value.includes(':')
+                  ? !publicIpv6Address(value)
+                  : !publicIpv4Address(value);
+          })
+      )
+          throw new Error('Asset URL must be an absolute public HTTPS URL');
+  }
+
+  function createApprovedPublicHttpsAssetResolver(options = {}) {
+      if (typeof options.isApproved !== 'function')
+          throw new TypeError('An explicit HTTPS asset approval policy is required');
+      if (typeof options.fetch !== 'function')
+          throw new TypeError('An HTTPS fetch capability is required');
+      const maxResourceBytes = Number.isFinite(options.maxResourceBytes)
+          ? Math.max(1, options.maxResourceBytes)
+          : 8 * 1024 * 1024;
+      const maxTotalBytes = Number.isFinite(options.maxTotalBytes)
+          ? Math.max(1, options.maxTotalBytes)
+          : 32 * 1024 * 1024;
+      let totalBytes = 0;
+      const reserveAggregate = (byteLength) => {
+          if (totalBytes + byteLength > maxTotalBytes)
+              throw new Error('Assets exceed the aggregate byte budget');
+          totalBytes += byteLength;
+      };
+
+      return async function resolveApprovedPublicHttpsAsset(rawUrl, requestOptions = {}) {
+          let url;
+          try {
+              url = new URL(String(rawUrl || ''));
+          } catch (_) {
+              throw new Error('Asset URL must be an absolute public HTTPS URL');
+          }
+          if (!isPublicHttpsUrl(url))
+              throw new Error('Asset URL must be an absolute public HTTPS URL');
+          if (typeof options.resolveHostname === 'function')
+              await assertPublicDnsAnswers(
+                  url.hostname.replace(/^\[|\]$/g, ''),
+                  options.resolveHostname
+              );
+          const originalHref = url.href;
+          const approvalUrl = new URL(url.href);
+          if (!(await options.isApproved(approvalUrl)))
+              throw new Error('Asset URL is not approved for export');
+          if (!isPublicHttpsUrl(approvalUrl))
+              throw new Error('Asset URL must be an absolute public HTTPS URL');
+          if (typeof options.resolveHostname === 'function' && approvalUrl.href !== originalHref)
+              await assertPublicDnsAnswers(
+                  approvalUrl.hostname.replace(/^\[|\]$/g, ''),
+                  options.resolveHostname
+              );
+          url = approvalUrl;
+          const controller = new AbortController();
+          const callerSignal = requestOptions.signal;
+          let timedOut = false;
+          const abortFromCaller = () => controller.abort(callerSignal.reason);
+          if (callerSignal?.aborted) abortFromCaller();
+          else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+          const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1, options.timeoutMs) : 10000;
+          const timeout = setTimeout(() => {
+              timedOut = true;
+              controller.abort(new Error('Asset request timed out'));
+          }, timeoutMs);
+          if (callerSignal?.aborted) {
+              clearTimeout(timeout);
+              throw callerSignal.reason || new Error('Asset request was cancelled');
+          }
+          try {
+              const response = await options.fetch(url.href, {
+                  credentials: 'omit',
+                  redirect: 'error',
+                  referrerPolicy: 'no-referrer',
+                  signal: controller.signal
+              });
+              const responseUrl = response?.url
+                  ? new URL(response.url)
+                  : null;
+              if (
+                  response?.redirected ||
+                  response?.type === 'opaqueredirect' ||
+                  (Number.isInteger(response?.status) && response.status >= 300 && response.status < 400) ||
+                  (responseUrl && responseUrl.href.replace(/#.*$/, '') !== url.href.replace(/#.*$/, ''))
+              )
+                  throw new Error('Asset HTTPS redirects are not allowed');
+              if (!response?.ok) return null;
+              const declaredBytes = Number(response.headers?.get?.('content-length'));
+              if (Number.isFinite(declaredBytes) && declaredBytes > maxResourceBytes)
+                  throw new Error('Asset exceeds the resource byte budget');
+              if (Number.isFinite(declaredBytes) && totalBytes + declaredBytes > maxTotalBytes)
+                  throw new Error('Assets exceed the aggregate byte budget');
+              return await readBoundedResponseBytes(
+                  response,
+                  maxResourceBytes,
+                  reserveAggregate,
+                  controller.signal
+              );
+          } catch (error) {
+              if (timedOut) throw new Error('Asset request timed out');
+              if (callerSignal?.aborted)
+                  throw callerSignal.reason || new Error('Asset request was cancelled');
+              throw error;
+          } finally {
+              clearTimeout(timeout);
+              callerSignal?.removeEventListener('abort', abortFromCaller);
+          }
+      };
+  }
+
+  const EXPORT_UNSAFE_ELEMENTS = new Set([
+      'script',
+      'style',
+      'iframe',
+      'object',
+      'embed',
+      'link',
+      'base',
+      'form'
+  ]);
+  const EXPORT_RESOURCE_ATTRIBUTES = new Set([
+      'src',
+      'poster',
+      'href',
+      'xlink:href',
+      'background',
+      'action',
+      'formaction',
+      'cite',
+      'srcset',
+      'imagesrcset'
+  ]);
+
+  function exportDataUrlIsSafe(value) {
+      const source = String(value || '').trim();
+      if (/^data:image\/svg\+xml(?:;|,)/i.test(source)) return false;
+      return /^data:(?:image\/(?:avif|bmp|gif|jpe?g|png|webp)|audio\/|video\/|application\/pdf)(?:[;,])/i.test(source);
+  }
+
+  function exportUrlIsSafe(value) {
+      const source = String(value || '').trim();
+      return source.startsWith('#') || exportDataUrlIsSafe(source);
+  }
+
+  const EXPORT_SAFE_STYLE_PROPERTIES = new Set([
+      'display', 'position', 'inset', 'top', 'right', 'bottom', 'left',
+      'width', 'min-width', 'max-width', 'height', 'min-height', 'max-height',
+      'box-sizing', 'overflow', 'overflow-x', 'overflow-y', 'visibility',
+      'opacity', 'z-index', 'isolation', 'mix-blend-mode', 'pointer-events',
+      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'border', 'border-top', 'border-right', 'border-bottom', 'border-left',
+      'border-width', 'border-style', 'border-color',
+      'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+      'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+      'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+      'border-radius', 'border-top-left-radius', 'border-top-right-radius',
+      'border-bottom-left-radius', 'border-bottom-right-radius',
+      'outline', 'outline-color', 'outline-style', 'outline-width', 'outline-offset',
+      'flex', 'flex-basis', 'flex-direction', 'flex-flow', 'flex-grow', 'flex-shrink',
+      'flex-wrap', 'order', 'align-items', 'align-self', 'align-content',
+      'justify-content', 'justify-items', 'justify-self', 'place-content', 'place-items', 'place-self',
+      'grid', 'grid-area', 'grid-auto-columns', 'grid-auto-flow', 'grid-auto-rows',
+      'grid-column', 'grid-row', 'grid-template', 'grid-template-areas',
+      'grid-template-columns', 'grid-template-rows', 'gap', 'row-gap', 'column-gap',
+      'color', 'background-color', 'fill', 'stroke', 'stroke-width',
+      'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'stroke-dasharray',
+      'stroke-dashoffset', 'vector-effect', 'shape-rendering', 'paint-order',
+      'font', 'font-family', 'font-size', 'font-style', 'font-variant',
+      'font-weight', 'font-stretch', 'line-height', 'letter-spacing', 'word-spacing',
+      'text-align', 'text-decoration', 'text-decoration-color', 'text-decoration-line',
+      'text-decoration-style', 'text-indent', 'text-overflow', 'text-transform',
+      'vertical-align', 'white-space', 'word-break', 'overflow-wrap',
+      'list-style-position', 'list-style-type', 'transform', 'transform-origin',
+      'transform-box', 'unicode-bidi', 'direction'
+  ]);
+  const EXPORT_NETWORK_STYLE_VALUE = /(?:\\|@import|expression\s*\(|url\s*\(|image-set\s*\(|cross-fade\s*\(|element\s*\(|paint\s*\(|https?:|file:|data:|blob:|javascript:|app:)/i;
+
+  function splitStyleDeclarations(value) {
+      const declarations = [];
+      let start = 0;
+      let quote = '';
+      let depth = 0;
+      const source = String(value || '');
+      for (let index = 0; index < source.length; index++) {
+          const character = source[index];
+          if (quote) {
+              if (character === quote) quote = '';
+              continue;
+          }
+          if (character === '"' || character === "'") {
+              quote = character;
+              continue;
+          }
+          if (character === '(') depth += 1;
+          else if (character === ')' && depth > 0) depth -= 1;
+          else if (character === ';' && depth === 0) {
+              declarations.push(source.slice(start, index));
+              start = index + 1;
+          }
+      }
+      declarations.push(source.slice(start));
+      return declarations;
+  }
+
+  function sanitizeExportStyle(value) {
+      const safe = [];
+      for (const declaration of splitStyleDeclarations(value)) {
+          const colon = declaration.indexOf(':');
+          if (colon <= 0) continue;
+          const property = declaration.slice(0, colon).trim().toLowerCase();
+          const propertyValue = declaration.slice(colon + 1).trim();
+          if (!propertyValue || !EXPORT_SAFE_STYLE_PROPERTIES.has(property)) continue;
+          if (EXPORT_NETWORK_STYLE_VALUE.test(propertyValue)) continue;
+          safe.push(`${property}:${propertyValue}`);
+      }
+      return safe.join(';');
+  }
+
+  function sanitizeExportElement(element, options = {}) {
+      if (!element?.cloneNode) throw new TypeError('An export DOM element is required');
+      if (EXPORT_UNSAFE_ELEMENTS.has(String(element.tagName || '').toLowerCase()))
+          throw new Error('Unsafe root element cannot be serialized for export');
+      const clone = element.cloneNode(true);
+      const elements = [clone, ...(clone.querySelectorAll?.('*') || [])];
+      for (const current of elements) {
+          const tagName = String(current.tagName || '').toLowerCase();
+          if (EXPORT_UNSAFE_ELEMENTS.has(tagName)) {
+              current.remove?.();
+              continue;
+          }
+          for (const attribute of [...(current.attributes || [])]) {
+              const name = String(attribute.name || '').toLowerCase();
+              const value = String(attribute.value || '');
+              if (
+                  /^on/i.test(name) ||
+                  name === 'srcdoc' ||
+                  name === 'ping' ||
+                  name === 'nonce' ||
+                  name === 'action' ||
+                  name === 'formaction'
+              ) {
+                  current.removeAttribute?.(attribute.name);
+                  continue;
+              }
+              if (EXPORT_RESOURCE_ATTRIBUTES.has(name) && !exportUrlIsSafe(value)) {
+                  current.removeAttribute?.(attribute.name);
+                  if (tagName === 'a') current.remove?.();
+                  continue;
+              }
+              if (name === 'style')
+                  current.setAttribute?.(attribute.name, sanitizeExportStyle(value));
+          }
+      }
+      return clone;
+  }
+
+  function serializeXmlSafe(element, options = {}) {
+      const clone = sanitizeExportElement(element, options);
+      const ownerDocument = options.document || element.ownerDocument || globalThis.document;
+      const ownerWindow = ownerDocument?.defaultView || globalThis;
+      const XMLSerializerConstructor =
+          options.XMLSerializer || ownerWindow?.XMLSerializer || globalThis.XMLSerializer;
+      if (typeof XMLSerializerConstructor !== 'function')
+          throw new Error('XML serialization is unavailable');
+      const serialized = new XMLSerializerConstructor().serializeToString(clone);
+      if (typeof serialized !== 'string') throw new Error('XML serialization returned no markup');
+      return serialized;
+  }
+
+  function exportCollection(value) {
+      if (value instanceof Map) return Array.from(value.values());
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object') return Object.values(value);
+      return [];
+  }
+
+  function createExportPlan(snapshot = {}, options = {}) {
+      const source = snapshot?.data && typeof snapshot.data === 'object'
+          ? snapshot.data
+          : snapshot;
+      const replacementInput = options.replacements || {};
+      const replacements = new Map();
+      const replacementEntries = replacementInput instanceof Map
+          ? Array.from(replacementInput.entries())
+          : Object.entries(replacementInput);
+      for (const [key, value] of replacementEntries)
+          replacements.set(String(key), value);
+      const sourceTopics = exportCollection(source.nodes ?? source.topics);
+      const topicIds = new Set();
+      const topics = [];
+      for (const topic of sourceTopics) {
+          if (!topic || topic.id === undefined || topic.id === null)
+              throw new Error('Export plan topics must have stable IDs');
+          const id = String(topic.id);
+          if (topicIds.has(id)) throw new Error('Export plan topic IDs must be unique');
+          topicIds.add(id);
+          if (!replacements.has(id)) topics.push({ ...topic, id });
+      }
+      const includedIds = new Set(topics.map((topic) => topic.id));
+      const expandEndpoint = (value) => {
+          const id = String(value ?? '');
+          const replacement = replacements.get(id);
+          if (Array.isArray(replacement)) return replacement.map(String);
+          if (replacement !== undefined) return [String(replacement)];
+          return [id];
+      };
+      const edges = [];
+      const edgeKeys = new Set();
+      for (const [sourceIndex, sourceEdge] of exportCollection(source.edges).entries()) {
+          if (!sourceEdge) continue;
+          const fromValues = expandEndpoint(sourceEdge.fromNode ?? sourceEdge.from);
+          const toValues = expandEndpoint(sourceEdge.toNode ?? sourceEdge.to);
+          for (const fromNode of fromValues) {
+              for (const toNode of toValues) {
+                  if (!includedIds.has(fromNode) || !includedIds.has(toNode)) {
+                      if (options.strictEdges)
+                          throw new Error('Export edge endpoint is not present in the plan');
+                      continue;
+                  }
+                  const key = `${sourceIndex}\u0000${fromNode}\u0000${toNode}`;
+                  if (edgeKeys.has(key)) continue;
+                  edgeKeys.add(key);
+                  edges.push({ ...sourceEdge, fromNode, toNode });
+              }
+          }
+      }
+      const connected = new Set(edges.map((edge) => edge.toNode));
+      return {
+          title: String(snapshot.title || source.title || 'Mind map'),
+          format: snapshot.format || source.format || options.format || 'svg',
+          scope: snapshot.scope || source.scope || options.scope || 'whole',
+          includeNestedMaps: Boolean(
+              snapshot.includeNestedMaps ?? source.includeNestedMaps ?? options.includeNestedMaps ?? false
+          ),
+          topics,
+          nodes: topics,
+          edges,
+          roots: topics.filter((topic) => !connected.has(topic.id)).map((topic) => topic.id)
+      };
   }
 
   const MEDIA_MIME_BY_EXTENSION = {
@@ -1682,22 +5532,70 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
       return `data:${mime};base64,${bytesToBase64(bytes)}`;
   }
 
+  function throwIfExportCancelled(signal) {
+      if (signal?.aborted)
+          throw signal.reason || new Error('Export asset request was cancelled');
+  }
+
+  async function mapExportAssetsWithConcurrency(items, concurrency, resolveAsset) {
+      const results = new Array(items.length);
+      let nextIndex = 0;
+      const worker = async () => {
+          while (nextIndex < items.length) {
+              const index = nextIndex++;
+              results[index] = await resolveAsset(items[index], index);
+          }
+      };
+      const workerCount = Math.min(items.length, concurrency);
+      await Promise.all(Array.from({ length: workerCount }, worker));
+      return results;
+  }
+
   /**
    * Rewrite media references in an exported document so the standalone PDF, SVG,
    * and PNG show exactly what the canvas showed: Obsidian vault paths
-   * (app://local/..., /...), file:// URLs, and remote http(s) resources are
-   * inlined as data URIs. Resolvers are injected so this stays testable without
-   * an Obsidian runtime.
+   * (app://local/..., /...), explicitly approved local file resources, and
+   * explicitly approved public HTTPS resources are inlined as data URIs.
+   * Resolvers are injected so this stays testable without an Obsidian runtime.
    */
   async function embedDocumentAssets(html, options = {}) {
-      const maxBytes = options.maxBytes ?? 12 * 1024 * 1024;
+      throwIfExportCancelled(options.signal);
+      const maxBytes = Number.isFinite(options.maxBytes)
+          ? Math.max(1, options.maxBytes)
+          : 12 * 1024 * 1024;
+      const maxTotalBytes = Number.isFinite(options.maxTotalBytes)
+          ? Math.max(1, options.maxTotalBytes)
+          : 32 * 1024 * 1024;
+      const maxOutputBytes = Number.isFinite(options.maxOutputBytes)
+          ? Math.max(1, options.maxOutputBytes)
+          : 64 * 1024 * 1024;
+      const assetResolver = options.assetResolver || createExportAssetResolver({
+          ...options,
+          maxResourceBytes: maxBytes,
+          maxTotalBytes
+      });
+      if (typeof assetResolver?.resolve !== 'function')
+          throw new TypeError('An export asset resolver capability is required');
+      const concurrency = Number.isFinite(options.concurrency)
+          ? Math.max(1, Math.floor(options.concurrency))
+          : 4;
       const cache = new Map();
       const resolve = (url) => {
           if (cache.has(url)) return cache.get(url);
           const pending = (async () => {
               try {
-                  return await embedUrl(url, options, maxBytes);
-              } catch (_) {
+                  throwIfExportCancelled(options.signal);
+                  const bytes = await assetResolver.resolve(url, { signal: options.signal });
+                  throwIfExportCancelled(options.signal);
+                  if (!bytes) return null;
+                  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+                  if (view.length === 0 || view.length > maxBytes) return null;
+                  const mime = mimeForUrl(url);
+                  if (mime === "image/svg+xml") return null;
+                  return toDataUri(view, mime);
+              } catch (error) {
+                  if (options.signal?.aborted)
+                      throw options.signal.reason || error;
                   return null;
               }
           })();
@@ -1733,7 +5631,11 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
           }
       }
       targets.sort((a, b) => a.start - b.start);
-      const embedded = await Promise.all(targets.map((target) => resolve(target.url)));
+      const embedded = await mapExportAssetsWithConcurrency(
+          targets,
+          concurrency,
+          (target) => resolve(target.url)
+      );
       let output = source;
       for (let index = targets.length - 1; index >= 0; index--) {
           const dataUri = embedded[index];
@@ -1741,13 +5643,14 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
           const target = targets[index];
           output = output.slice(0, target.start) + dataUri + output.slice(target.end);
       }
+      assertExportOutputWithinBudget(output, maxOutputBytes);
       return output;
   }
 
-  async function embedUrl(url, options, maxBytes) {
+  async function readExportAssetBytes(url, options = {}) {
+      throwIfExportCancelled(options.signal);
       if (/^(data:|blob:|about:|javascript:|#)/i.test(url)) return null;
       let bytes = null;
-      let mime = mimeForUrl(url);
       if (url.startsWith('app://local/')) {
           const raw = url.slice('app://local/'.length);
           const candidates = [];
@@ -1769,128 +5672,361 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
               }
           }
           for (const candidate of candidates) {
+              if (!isSafeVaultAssetPath(candidate)) continue;
               const resolved = await options.readVaultFile?.(candidate);
+              throwIfExportCancelled(options.signal);
               if (resolved) {
                   bytes = resolved;
                   break;
               }
           }
       } else if (url.startsWith('file://')) {
-          if (options.readExternalFile) {
+          if (options.readExternalFile && isLocalFileUrl(url))
               bytes = await options.readExternalFile(url);
-          } else if (typeof require === 'function') {
-              const fs = require('fs');
-              const filePath = decodeURIComponent(new URL(url).pathname);
-              bytes = await fs.promises.readFile(filePath);
+      } else if (/^https:\/\//i.test(url)) {
+          let publicUrl;
+          try {
+              publicUrl = new URL(url);
+          } catch (_) {
+              return null;
           }
-      } else if (/^https?:\/\//i.test(url)) {
-          if (options.fetchUrl) bytes = await options.fetchUrl(url);
+          if (!isPublicHttpsUrl(publicUrl)) return null;
+          if (options.resolveRemoteAsset)
+              bytes = await options.resolveRemoteAsset(url, { signal: options.signal });
       } else if (url.startsWith('/')) {
-          bytes = await options.readVaultFile?.(url.slice(1));
+          const vaultPath = url.slice(1);
+          if (isSafeVaultAssetPath(vaultPath))
+              bytes = await options.readVaultFile?.(vaultPath);
       }
       if (!bytes) return null;
-      const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      if (view.length === 0 || view.length > maxBytes) return null;
-      return toDataUri(view, mime);
+      throwIfExportCancelled(options.signal);
+      return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }
 
-  async function rasterizeSvg(svgInfo, ownerDocument, type = 'image/png') {
-  	const ownerWindow = ownerDocument.defaultView || window;
-  	const maxDimension = 8192;
-  	const scale = Math.min(
-  		3,
-  		maxDimension / Math.max(svgInfo.width, svgInfo.height)
-  	);
-  	const width = Math.max(1, Math.round(svgInfo.width * scale));
-  	const height = Math.max(1, Math.round(svgInfo.height * scale));
-  	const blob = new Blob([svgInfo.svg], {
-  		type: 'image/svg+xml;charset=utf-8'
-  	});
-  	const url = ownerWindow.URL.createObjectURL(blob);
-  	try {
-  		const image = new ownerWindow.Image();
-  		image.decoding = 'async';
-  		await new Promise((resolve, reject) => {
-  			image.onload = resolve;
-  			image.onerror = () => reject(new Error('Could not render the SVG'));
-  			image.src = url;
-  		});
-  		const bitmap = ownerDocument.createElement('canvas');
-  		bitmap.width = width;
-  		bitmap.height = height;
-  		const context = bitmap.getContext('2d');
-  		if (!context) throw new Error('Canvas rendering is unavailable');
-  		context.imageSmoothingEnabled = true;
-  		context.imageSmoothingQuality = 'high';
-  		context.fillStyle = '#ffffff';
-  		context.fillRect(0, 0, width, height);
-  		context.drawImage(image, 0, 0, width, height);
-  		const encoded = await new Promise((resolve, reject) =>
-  			bitmap.toBlob(
-  				(value) =>
-  					value
-  						? resolve(value)
-  						: reject(new Error('Could not encode the image')),
-  				type,
-  				type === 'image/jpeg' ? 0.94 : void 0
-  			)
-  		);
-  		return new Uint8Array(await encoded.arrayBuffer());
-  	} finally {
-  		ownerWindow.URL.revokeObjectURL(url);
-  	}
+  function createExportAssetResolver(options = {}) {
+      const maxResourceBytes = Number.isFinite(options.maxResourceBytes)
+          ? Math.max(1, options.maxResourceBytes)
+          : 12 * 1024 * 1024;
+      const maxTotalBytes = Number.isFinite(options.maxTotalBytes)
+          ? Math.max(1, options.maxTotalBytes)
+          : 32 * 1024 * 1024;
+      let totalBytes = 0;
+      const reserve = (byteLength) => {
+          if (totalBytes + byteLength > maxTotalBytes)
+              throw new Error('Assets exceed the aggregate byte budget');
+          totalBytes += byteLength;
+      };
+      return Object.freeze({
+          async resolve(url, requestOptions = {}) {
+              const context = {
+                  ...options,
+                  signal: requestOptions.signal ?? options.signal
+              };
+              const bytes = await readExportAssetBytes(url, context);
+              if (!bytes) return null;
+              if (bytes.length === 0 || bytes.length > maxResourceBytes) return null;
+              reserve(bytes.length);
+              return bytes;
+          }
+      });
+  }
+
+  async function renderRasterPlan(svgInfo, ownerDocument, type, plan) {
+      const ownerWindow = ownerDocument?.defaultView || globalThis.window;
+      const BlobConstructor = ownerWindow?.Blob || globalThis.Blob;
+      if (
+          typeof ownerWindow?.Image !== 'function' ||
+          typeof ownerWindow?.URL?.createObjectURL !== 'function' ||
+          typeof ownerWindow?.URL?.revokeObjectURL !== 'function' ||
+          typeof BlobConstructor !== 'function'
+      )
+          throw new Error('Image raster export capability is unavailable');
+      const blob = new BlobConstructor([svgInfo.svg], {
+          type: 'image/svg+xml;charset=utf-8'
+      });
+      const url = ownerWindow.URL.createObjectURL(blob);
+      try {
+          const image = new ownerWindow.Image();
+          image.decoding = 'async';
+          await new Promise((resolve, reject) => {
+              image.onload = resolve;
+              image.onerror = () => reject(new Error('Could not render the SVG'));
+              image.src = url;
+          });
+          const bitmap = ownerDocument.createElement('canvas');
+          bitmap.width = plan.width;
+          bitmap.height = plan.height;
+          const context = bitmap.getContext('2d');
+          if (!context) throw new Error('Canvas rendering is unavailable');
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = 'high';
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, plan.width, plan.height);
+          context.drawImage(image, 0, 0, plan.width, plan.height);
+          const encoded = await new Promise((resolve, reject) =>
+              bitmap.toBlob(
+                  (value) =>
+                      value
+                          ? resolve(value)
+                          : reject(new Error('Could not encode the image')),
+                  type,
+                  type === 'image/jpeg' ? 0.94 : void 0
+              )
+          );
+          const output = new Uint8Array(await encoded.arrayBuffer());
+          if (output.byteLength > plan.maxOutputBytes)
+              throw new Error('Raster export exceeds the final output byte budget');
+          return output;
+      } finally {
+          ownerWindow.URL.revokeObjectURL(url);
+      }
+  }
+
+  function createRasterExportSession(options = {}) {
+      const maxPixels = Number.isFinite(options.maxPixels)
+          ? Math.max(1, Math.floor(options.maxPixels))
+          : 16 * 1024 * 1024;
+      const maxEstimatedBytes = Number.isFinite(options.maxEstimatedBytes)
+          ? Math.max(1, options.maxEstimatedBytes)
+          : 96 * 1024 * 1024;
+      const maxDimension = Number.isFinite(options.maxDimension)
+          ? Math.max(1, options.maxDimension)
+          : 8192;
+      const bytesPerPixel = Number.isFinite(options.bytesPerPixel)
+          ? Math.max(1, options.bytesPerPixel)
+          : 4;
+      const maxOutputBytes = Number.isFinite(options.maxOutputBytes)
+          ? Math.max(1, options.maxOutputBytes)
+          : 64 * 1024 * 1024;
+      let totalPixels = 0;
+      let totalEstimatedBytes = 0;
+
+      async function rasterize(svgInfo, ownerDocument, type = 'image/png') {
+          const sourceWidth = Number(svgInfo?.width);
+          const sourceHeight = Number(svgInfo?.height);
+          if (
+              !Number.isFinite(sourceWidth) ||
+              !Number.isFinite(sourceHeight) ||
+              sourceWidth <= 0 ||
+              sourceHeight <= 0
+          )
+              throw new Error('SVG raster dimensions are invalid');
+          const sourcePixels = sourceWidth * sourceHeight;
+          const remainingPixels = maxPixels - totalPixels;
+          const scale = Math.min(
+              3,
+              maxDimension / Math.max(sourceWidth, sourceHeight),
+              Math.sqrt(remainingPixels / sourcePixels)
+          );
+          const width = Math.max(1, Math.round(sourceWidth * scale));
+          const height = Math.max(1, Math.round(sourceHeight * scale));
+          const pixels = width * height;
+          const estimatedBytes =
+              pixels * bytesPerPixel +
+              new TextEncoder().encode(String(svgInfo?.svg || '')).byteLength;
+          if (totalPixels + pixels > maxPixels)
+              throw new Error('Raster export exceeds the total pixel budget');
+          if (totalEstimatedBytes + estimatedBytes > maxEstimatedBytes)
+              throw new Error('Raster export exceeds the estimated byte budget');
+          totalPixels += pixels;
+          totalEstimatedBytes += estimatedBytes;
+          return renderRasterPlan(svgInfo, ownerDocument, type, {
+              width,
+              height,
+              pixels,
+              estimatedBytes,
+              maxOutputBytes
+          });
+      }
+
+      return Object.freeze({ rasterize });
+  }
+
+  async function rasterizeSvg(svgInfo, ownerDocument, type = 'image/png', options = {}) {
+      const session = options.session || createRasterExportSession(options);
+      return session.rasterize(svgInfo, ownerDocument, type);
   }
 
   function safeBaseName(value) {
-  	return (
-  		String(value || 'Mind map')
-  			.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
-  			.trim() || 'Mind map'
-  	);
+  	const source = String(value || '').trim();
+  	return portableFilenameStem(source || 'Mind map');
   }
 
-  async function saveToDownloads(baseName, suffix, extension, content) {
-  	const stem = `${safeBaseName(baseName)}${suffix ? ` - ${suffix}` : ''}`;
-  	if (typeof require !== 'function') {
-  		// Mobile (and any non-Node host): no filesystem access — hand the file
-  		// to the platform download pipeline instead of the ~/Downloads folder.
-  		const fileName = `${stem}.${extension}`;
-  		const type = mimeForUrl(fileName) || 'application/octet-stream';
-  		const url = URL.createObjectURL(new Blob([content], { type }));
-  		const anchor = document.createElement('a');
-  		anchor.href = url;
-  		anchor.download = fileName;
-  		document.body.appendChild(anchor);
-  		anchor.click();
-  		anchor.remove();
-  		setTimeout(() => URL.revokeObjectURL(url), 10000);
-  		return fileName;
-  	}
-  	const fs = require('fs');
-  	const path = require('path');
-  	const os = require('os');
-  	const downloads = path.join(os.homedir(), 'Downloads');
-  	await fs.promises.mkdir(downloads, { recursive: true });
-  	for (let counter = 1; ; counter++) {
-  		const numberedStem = counter === 1 ? stem : `${stem} ${counter}`;
-  		const output = path.join(downloads, `${numberedStem}.${extension}`);
-  		try {
-  			await fs.promises.writeFile(output, content, { flag: 'wx' });
-  			return path.basename(output);
-  		} catch (error) {
-  			if (error?.code !== 'EEXIST') throw error;
-  		}
-  	}
+  function safeExportExtension(value) {
+      return String(value || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 32) || 'bin';
+  }
+
+  function exportFileName(baseName, suffix, extension, reservedBytes = 0) {
+      const safeSuffix = suffix ? ` - ${safeBaseName(suffix)}` : '';
+      const safeExtension = safeExportExtension(extension);
+      const filenameBudget = Math.max(1, MAX_FILENAME_BYTES - Math.max(0, reservedBytes));
+      const fixedBytes = EXPORT_FILENAME_ENCODER.encode(`${safeSuffix}.${safeExtension}`).length;
+      const baseBudget = filenameBudget - fixedBytes;
+      if (baseBudget < 1) {
+          const extensionOnlyBudget = filenameBudget - EXPORT_FILENAME_ENCODER.encode(`.${safeExtension}`).length;
+          return `${portableFilenameStem(safeBaseName(baseName), Math.max(1, extensionOnlyBudget))}.${safeExtension}`;
+      }
+      return `${portableFilenameStem(safeBaseName(baseName), baseBudget)}${safeSuffix}.${safeExtension}`;
+  }
+
+  function exportContentByteLength(content) {
+      if (typeof content === 'string')
+          return new TextEncoder().encode(content).byteLength;
+      if (content instanceof ArrayBuffer)
+          return content.byteLength;
+      if (ArrayBuffer.isView(content))
+          return content.byteLength;
+      if (Number.isFinite(content?.size)) return content.size;
+      if (Number.isFinite(content?.byteLength)) return content.byteLength;
+      return new TextEncoder().encode(String(content ?? '')).byteLength;
+  }
+
+  function assertExportOutputWithinBudget(content, maxOutputBytes) {
+      const byteLength = exportContentByteLength(content);
+      const limit = Number.isFinite(maxOutputBytes)
+          ? Math.max(1, maxOutputBytes)
+          : 64 * 1024 * 1024;
+      if (byteLength > limit)
+          throw new Error('Export exceeds the final output byte budget');
+      return byteLength;
+  }
+
+  function createBrowserExportDelivery(browser, maxOutputBytes = 64 * 1024 * 1024) {
+      return {
+          kind: 'browser',
+          async deliver(request) {
+              assertExportOutputWithinBudget(request.content, maxOutputBytes);
+              const ownerWindow = browser?.window;
+              const ownerDocument = browser?.document || ownerWindow?.document;
+              if (
+                  typeof ownerWindow?.Blob !== 'function' ||
+                  typeof ownerWindow?.URL?.createObjectURL !== 'function' ||
+                  typeof ownerWindow?.URL?.revokeObjectURL !== 'function' ||
+                  typeof ownerDocument?.createElement !== 'function' ||
+                  typeof ownerDocument?.body?.appendChild !== 'function'
+              )
+                  throw new Error('Browser export download capability is unavailable');
+              const fileName = exportFileName(
+                  request.baseName,
+                  request.suffix,
+                  request.extension
+              );
+              const blob = new ownerWindow.Blob([request.content], {
+                  type: mimeForUrl(fileName)
+              });
+              const url = ownerWindow.URL.createObjectURL(blob);
+              let revoked = false;
+              let revocationScheduled = false;
+              const revoke = () => {
+                  if (revoked) return;
+                  revoked = true;
+                  ownerWindow.URL.revokeObjectURL(url);
+              };
+              try {
+                  const anchor = ownerDocument.createElement('a');
+                  anchor.href = url;
+                  anchor.download = fileName;
+                  anchor.rel = 'noopener';
+                  ownerDocument.body.appendChild(anchor);
+                  try {
+                      anchor.click();
+                  } finally {
+                      try {
+                          anchor.remove();
+                      } catch (_) {
+                          // Keep the download/activation error as the primary failure.
+                      }
+                  }
+                  (browser.setTimeout || setTimeout)(revoke, 10000);
+                  revocationScheduled = true;
+                  return fileName;
+              } finally {
+                  if (!revocationScheduled) revoke();
+              }
+          }
+      };
+  }
+
+  function createFilesystemExportDelivery(
+      filesystem,
+      maxOutputBytes = 64 * 1024 * 1024
+  ) {
+      const fs = filesystem?.fs;
+      const path = filesystem?.path;
+      if (
+          typeof fs?.promises?.mkdir !== 'function' ||
+          typeof fs?.promises?.writeFile !== 'function' ||
+          typeof path?.join !== 'function' ||
+          typeof path?.basename !== 'function' ||
+          !filesystem?.directory
+      )
+          throw new Error('Filesystem export delivery capability is unavailable');
+      return {
+          kind: 'filesystem',
+          async deliver(request) {
+              assertExportOutputWithinBudget(request.content, maxOutputBytes);
+              const extension = safeExportExtension(request.extension);
+              const firstName = exportFileName(
+                  request.baseName,
+                  request.suffix,
+                  extension,
+                  6
+              );
+              const stem = firstName.slice(0, -(extension.length + 1));
+              await fs.promises.mkdir(filesystem.directory, { recursive: true });
+              for (let counter = 1; counter <= 10000; counter++) {
+                  const numberedStem = counter === 1 ? stem : `${stem} ${counter}`;
+                  const fileName = `${numberedStem}.${extension}`;
+                  const output = path.join(filesystem.directory, fileName);
+                  try {
+                      await fs.promises.writeFile(output, request.content, { flag: 'wx' });
+                      return path.basename(output);
+                  } catch (error) {
+                      if (error?.code !== 'EEXIST') throw error;
+                  }
+              }
+              throw new Error('Could not allocate an export filename');
+          }
+      };
+  }
+
+  function createExportDelivery(capabilities = {}) {
+      const maxOutputBytes = Number.isFinite(capabilities.maxOutputBytes)
+          ? Math.max(1, capabilities.maxOutputBytes)
+          : 64 * 1024 * 1024;
+      if (capabilities.canWriteDownloads === true)
+          return createFilesystemExportDelivery(capabilities.filesystem, maxOutputBytes);
+      if (capabilities.canDownloadFiles === true)
+          return createBrowserExportDelivery(capabilities.browser, maxOutputBytes);
+      throw new Error('No supported export delivery capability is available');
+  }
+
+  async function saveToDownloads(baseName, suffix, extension, content, capabilities = {}) {
+      return createExportDelivery(capabilities).deliver({
+          baseName,
+          suffix,
+          extension,
+          content
+      });
   }
 
   module.exports = {
+      createApprovedPublicHttpsAssetResolver,
+      createBrowserExportDelivery,
+      createExportAssetResolver,
+      createExportDelivery,
+      createFilesystemExportDelivery,
       createExportMindMapModal,
+      createExportPlan,
+      createRasterExportSession,
       embedDocumentAssets,
       paginatedPdfDocument,
       rasterizeSvg,
       renderHtmlAsVectorPdf,
       safeBaseName,
+      sanitizeExportElement,
       saveToDownloads,
+      serializeXmlSafe,
       vectorPdfPageSize,
       visibleCardPaint
   };
@@ -1898,7 +6034,10 @@ var { createExportMindMapModal, embedDocumentAssets, paginatedPdfDocument, raste
 })();
 // </tomindmap:module export>
 // <tomindmap:module vector-pdf>
-var { renderSvgToPdf } = (() => {
+var {
+  renderSvgToPdf
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
   var __create = Object.create;
@@ -38634,7 +42773,7 @@ var { renderSvgToPdf } = (() => {
   var { jsPDF } = (init_jspdf_es_min(), __toCommonJS(jspdf_es_min_exports));
   init_svg2pdf_es_min();
   var MICRONS_PER_POINT = 25400 / 72;
-  async function renderSvgToPdf(svgInfo, pageSize, ownerDocument) {
+  async function renderSvgToPdf(svgInfo, pageSize, ownerDocument, options = {}) {
     if (!ownerDocument?.defaultView?.DOMParser)
       throw new Error("The document SVG parser is unavailable");
     const parser = new ownerDocument.defaultView.DOMParser();
@@ -38656,7 +42795,11 @@ var { renderSvgToPdf } = (() => {
       putOnlyUsedFonts: true
     });
     await pdf.svg(svg2, { x: 0, y: 0, width, height });
-    return new Uint8Array(pdf.output("arraybuffer"));
+    const output = new Uint8Array(pdf.output("arraybuffer"));
+    const maxOutputBytes = Number.isFinite(options.maxOutputBytes) ? Math.max(1, options.maxOutputBytes) : 64 * 1024 * 1024;
+    if (output.byteLength > maxOutputBytes)
+      throw new Error("Vector PDF exceeds the final output byte budget");
+    return output;
   }
   module.exports = { renderSvgToPdf };
   /*! Bundled license information:
@@ -38862,10 +43005,125 @@ var { renderSvgToPdf } = (() => {
 var ExportMindMapModal = createExportMindMapModal(import_obsidian5.Modal);
 
 // <tomindmap:module canvas-api>
-var { CanvasAPI, findNodeFromEvent, genId } = (() => {
+var {
+  CanvasAPI,
+  findNodeFromEvent,
+  genId
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   const { ItemView } = require('obsidian');
+
+  function graphNodeId(node) {
+  	const id = typeof node === 'string' ? node : node?.id;
+  	return typeof id === 'string' && id.length > 0 ? id : null;
+  }
+
+  class CanvasGraphQuery {
+  	constructor(canvas, revision) {
+  		this.canvas = canvas;
+  		this.revision = revision;
+  		this.nodeCount = canvas?.nodes?.size || 0;
+  		this.edgeCount = canvas?.edges?.size || 0;
+  		this.forest = buildForest(canvas);
+  		this.treeNodes = new Map();
+  		this.roots = new Map();
+  		this.incomingEdges = new Map();
+  		this.outgoingEdges = new Map();
+  		for (const edge of canvas?.edges?.values?.() || []) {
+  			const fromId = graphNodeId(edge?.from?.node);
+  			const toId = graphNodeId(edge?.to?.node);
+  			if (fromId) {
+  				const edges = this.outgoingEdges.get(fromId) || [];
+  				edges.push(edge);
+  				this.outgoingEdges.set(fromId, edges);
+  			}
+  			if (toId) {
+  				const edges = this.incomingEdges.get(toId) || [];
+  				edges.push(edge);
+  				this.incomingEdges.set(toId, edges);
+  			}
+  		}
+  		const pending = [];
+  		for (let index = this.forest.length - 1; index >= 0; index--)
+  			pending.push({ treeNode: this.forest[index], root: this.forest[index].canvasNode });
+  		while (pending.length > 0) {
+  			const current = pending.pop();
+  			const treeNode = current?.treeNode;
+  			if (!treeNode) continue;
+  			const id = graphNodeId(treeNode.canvasNode);
+  			if (id) {
+  				this.treeNodes.set(id, treeNode);
+  				this.roots.set(id, current.root);
+  			}
+  			for (let index = treeNode.children.length - 1; index >= 0; index--)
+  				pending.push({ treeNode: treeNode.children[index], root: current.root });
+  		}
+  	}
+
+  	treeNodeOf(node) {
+  		const id = graphNodeId(node);
+  		return id ? this.treeNodes.get(id) || null : null;
+  	}
+
+  	parentOf(node) {
+  		return this.treeNodeOf(node)?.parent || null;
+  	}
+
+  	rootOf(node) {
+  		const id = graphNodeId(node);
+  		return id ? this.roots.get(id) || null : null;
+  	}
+
+  	parentEdgeOf(node) {
+  		const treeNode = this.treeNodeOf(node);
+  		const parent = treeNode?.parent;
+  		if (!treeNode || !parent) return null;
+  		const childId = graphNodeId(treeNode.canvasNode);
+  		const parentId = graphNodeId(parent.canvasNode);
+  		return (this.incomingEdges.get(childId) || []).find(
+  			(edge) =>
+  				!edge?.__mindMapPreview &&
+  				graphNodeId(edge?.from?.node) === parentId
+  		) || null;
+  	}
+
+  	incomingEdgesOf(node) {
+  		const id = graphNodeId(node);
+  		return id ? this.incomingEdges.get(id) || [] : [];
+  	}
+
+  	outgoingEdgesOf(node) {
+  		const id = graphNodeId(node);
+  		return id ? this.outgoingEdges.get(id) || [] : [];
+  	}
+
+  	childrenOf(node) {
+  		return this.treeNodeOf(node)?.children || [];
+  	}
+
+  	descendantsOf(node) {
+  		const root = this.treeNodeOf(node);
+  		if (!root) return [];
+  		const result = [];
+  		const stack = [...root.children].reverse();
+  		while (stack.length > 0) {
+  			const treeNode = stack.pop();
+  			if (!treeNode) continue;
+  			result.push(treeNode.canvasNode);
+  			for (let index = treeNode.children.length - 1; index >= 0; index--)
+  				stack.push(treeNode.children[index]);
+  		}
+  		return result;
+  	}
+
+  	visibleForest() {
+  		return buildForest(this.canvas, { includeHidden: false });
+  	}
+  }
+
   function genId() {
   	const bytes = new Uint8Array(8);
   	if (
@@ -38894,59 +43152,37 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   var CanvasAPI = class {
   	constructor(app) {
   		this.app = app;
-  		this.edgeIndex = null;
-  		this.indexedCanvas = null;
-  		this.indexedEdgeCount = -1;
+  		this.graphQueries = /* @__PURE__ */ new WeakMap();
+  		this.graphRevision = 0;
   		this.navigationRevealFrames = /* @__PURE__ */ new WeakMap();
   	}
   	/**
-  	 * Get or rebuild the edge index for the given canvas.
-  	 * Rebuilds if canvas changed or edge count changed (structural mutation).
+  	 * Return the canonical topic graph for the current Canvas revision.
+  	 * Structural mutations invalidate the index; size checks also observe
+  	 * direct native Canvas changes made before those mutations are wrapped.
   	 */
-  	getEdgeIndex(canvas) {
+  	getGraphQuery(canvas) {
+  		const cached = this.graphQueries.get(canvas);
   		if (
-  			this.edgeIndex &&
-  			this.indexedCanvas === canvas &&
-  			this.edgeIdsMatch(canvas)
-  		) {
-  			return this.edgeIndex;
-  		}
-  		const incoming = /* @__PURE__ */ new Map();
-  		const outgoing = /* @__PURE__ */ new Map();
-  		for (const edge of canvas.edges.values()) {
-  			const fromId = edge.from.node.id;
-  			const toId = edge.to.node.id;
-  			let out = outgoing.get(fromId);
-  			if (!out) {
-  				out = [];
-  				outgoing.set(fromId, out);
-  			}
-  			out.push(edge);
-  			let inc = incoming.get(toId);
-  			if (!inc) {
-  				inc = [];
-  				incoming.set(toId, inc);
-  			}
-  			inc.push(edge);
-  		}
-  		this.edgeIndex = { incoming, outgoing };
-  		this.indexedCanvas = canvas;
-  		this.indexedEdgeCount = canvas.edges.size;
-  		return this.edgeIndex;
+  			cached &&
+  			cached.nodeCount === (canvas?.nodes?.size || 0) &&
+  			cached.edgeCount === (canvas?.edges?.size || 0)
+  		)
+  			return cached;
+  		const query = new CanvasGraphQuery(canvas, ++this.graphRevision);
+  		this.graphQueries.set(canvas, query);
+  		return query;
   	}
-  	/**
-  	 * Structural Canvas methods are wrapped by the plugin and invalidate this
-  	 * index. The count check also covers changes made before wrapping.
-  	 */
-  	edgeIdsMatch(canvas) {
-  		return canvas.edges.size === this.indexedEdgeCount;
+
+  	invalidateGraphQuery() {
+  		this.graphQueries = /* @__PURE__ */ new WeakMap();
   	}
+
   	/**
   	 * Invalidate the edge index (call after adding/removing edges).
   	 */
   	invalidateEdgeIndex() {
-  		this.edgeIndex = null;
-  		this.indexedEdgeCount = -1;
+  		this.invalidateGraphQuery();
   	}
   	/**
   	 * Get the active canvas if a canvas view is currently focused.
@@ -38974,7 +43210,7 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   		const selection = canvas.selection;
   		if (selection.size !== 1) return null;
   		const item = selection.values().next().value;
-  		if (!item || !('nodeEl' in item)) return null;
+  		if (!item || typeof item !== "object" || !("nodeEl" in item)) return null;
   		return item;
   	}
   	/**
@@ -39024,7 +43260,8 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   			focus: false,
   			save: false
   		});
-      if (!String(text || '').trim()) node.__tomindmapPendingCreation = true;
+  		if (!node) return null;
+  		if (!String(text || '').trim()) node.__tomindmapPendingCreation = true;
   		return node;
   	}
   	/**
@@ -39056,6 +43293,15 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   						: {}),
   					...(options.label !== undefined
   						? { label: options.label }
+  						: {}),
+  					...(options.lineType !== undefined
+  						? { lineType: options.lineType }
+  						: {}),
+  					...(options.curve !== undefined
+  						? { curve: options.curve }
+  						: {}),
+  					...(options.curvature !== undefined
+  						? { curvature: options.curvature }
   						: {})
   				}
   			],
@@ -39064,6 +43310,60 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   		this.invalidateEdgeIndex();
   		return canvas.edges.get(id) || null;
   	}
+  	/**
+  	 * Replace an authored edge while preserving its identity. The original is
+  	 * restored if Canvas rejects the replacement import.
+  	 */
+  	replaceEdge(
+  		canvas,
+  		edge,
+  		fromNode,
+  		toNode,
+  		fromSide = 'right',
+  		toSide = 'left',
+  		color,
+  		options = {}
+  	) {
+  		if (!edge || !canvas?.removeEdge) return null;
+  		const snapshot = {
+  			id: edge.id,
+  			fromNode: edge.from?.node?.id,
+  			fromSide: edge.from?.side || fromSide,
+  			fromEnd: edge.from?.end || 'none',
+  			toNode: edge.to?.node?.id,
+  			toSide: edge.to?.side || toSide,
+  			toEnd: edge.to?.end || 'arrow',
+  			...(edge.color || color ? { color: edge.color || color } : {}),
+  			...(edge.label !== undefined ? { label: edge.label } : {}),
+  			...(edge.lineType !== undefined ? { lineType: edge.lineType } : {}),
+  			...(edge.curve !== undefined ? { curve: edge.curve } : {}),
+  			...(edge.curvature !== undefined ? { curvature: edge.curvature } : {})
+  		};
+  		canvas.removeEdge(edge);
+  		this.invalidateEdgeIndex();
+  		try {
+  			const replacement = this.createEdge(
+  				canvas,
+  				fromNode,
+  				toNode,
+  				fromSide,
+  				toSide,
+  				color,
+  				{ ...options, id: edge.id }
+  			);
+  			if (!replacement) throw new Error('Canvas did not create the replacement edge');
+  			return replacement;
+  		} catch (error) {
+  			try {
+  				canvas.importData({ nodes: [], edges: [snapshot] });
+  				this.invalidateEdgeIndex();
+  			} catch (_) {
+  				// Preserve the original replacement error; the host may have already restored state.
+  			}
+  			return null;
+  		}
+  	}
+
   	/**
   	 * Recreate an existing edge after one endpoint has been replaced.
   	 */
@@ -39081,7 +43381,10 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   			{
   				fromEnd: edge.from?.end,
   				toEnd: edge.to?.end,
-  				label: edge.label
+  				label: edge.label,
+  				lineType: edge.lineType,
+  				curve: edge.curve,
+  				curvature: edge.curvature
   			}
   		);
   	}
@@ -39107,57 +43410,61 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   	 * Get all edges connected to a node (incoming + outgoing).
   	 */
   	getConnectedEdges(canvas, node) {
-  		var _a, _b;
-  		const idx = this.getEdgeIndex(canvas);
-  		const inc = (_a = idx.incoming.get(node.id)) != null ? _a : [];
-  		const out = (_b = idx.outgoing.get(node.id)) != null ? _b : [];
-  		return [...inc, ...out];
+  		const query = this.getGraphQuery(canvas);
+  		return Array.from(new Set([
+  			...query.incomingEdgesOf(node),
+  			...query.outgoingEdgesOf(node)
+  		]));
   	}
   	/**
   	 * Get parent node (the node that has an edge pointing TO this node).
   	 */
   	getParentNode(canvas, node) {
-  		const idx = this.getEdgeIndex(canvas);
-  		const inc = idx.incoming.get(node.id);
-  		return inc && inc.length > 0 ? inc[0].from.node : null;
+  		return this.getGraphQuery(canvas).parentOf(node)?.canvasNode || null;
+  	}
+  	/**
+  	 * Find the root of the canonical map affected by this topic.
+  	 */
+  	getAffectedRootNode(canvas, node) {
+  		return this.getGraphQuery(canvas).rootOf(node);
+  	}
+  	/**
+  	 * Get the stable edge that defines this node's canonical parent.
+  	 */
+  	getParentEdge(canvas, node) {
+  		return this.getGraphQuery(canvas).parentEdgeOf(node);
   	}
   	/**
   	 * Get child nodes (nodes that this node has edges pointing TO).
   	 */
   	getChildNodes(canvas, node) {
-  		var _a;
-  		const idx = this.getEdgeIndex(canvas);
-  		const out = (_a = idx.outgoing.get(node.id)) != null ? _a : [];
-  		const children = out.map((e) => e.to.node);
-  		children.sort((a, b) => a.y - b.y);
-  		return children;
+  		return this.getGraphQuery(canvas)
+  			.childrenOf(node)
+  			.map((treeNode) => treeNode.canvasNode);
   	}
   	/**
-  	 * Get outgoing edges from a node (for BFS traversal).
+  	 * Get the complete canonical branch below a topic.
   	 */
-  	getOutgoingEdges(canvas, nodeId) {
-  		var _a;
-  		const idx = this.getEdgeIndex(canvas);
-  		return (_a = idx.outgoing.get(nodeId)) != null ? _a : [];
+  	getDescendantNodes(canvas, node) {
+  		return this.getGraphQuery(canvas).descendantsOf(node);
   	}
   	/**
-  	 * Get incoming edges to a node.
+  	 * Project the canonical topics currently visible outside collapsed subtrees.
+  	 */
+  	getVisibleForest(canvas) {
+  		return this.getGraphQuery(canvas).visibleForest();
+  	}
+  	/**
+  	 * Get outgoing edges from a node for edge-preserving mutations.
+  	 */
+  	getOutgoingEdges(canvas, node) {
+  		return this.getGraphQuery(canvas).outgoingEdgesOf(node);
+  	}
+  	/**
+  	 * Get incoming edges to a node for edge-preserving mutations.
   	 */
   	getIncomingEdges(canvas, node) {
-  		const id = typeof node === 'string' ? node : node?.id;
-  		if (!id) return [];
-  		const idx = this.getEdgeIndex(canvas);
-  		return idx.incoming.get(id) || [];
-  	}
-  	/**
-  	 * Get sibling nodes (other children of the same parent).
-  	 */
-  	getSiblingNodes(canvas, node) {
-  		const parent = this.getParentNode(canvas, node);
-  		if (!parent) return [];
-  		return this.getChildNodes(canvas, parent).filter(
-  			(n) => n.id !== node.id
-  		);
+  		return this.getGraphQuery(canvas).incomingEdgesOf(node);
   	}
   	/**
   	 * Select a node and zoom to it with padding.
@@ -39271,6 +43578,2078 @@ var { CanvasAPI, findNodeFromEvent, genId } = (() => {
   return module.exports;
 })();
 // </tomindmap:module canvas-api>
+// <tomindmap:module markdown-sync>
+var {
+  LINK_REASON,
+  DEFAULT_INDEX_LIMIT,
+  DEFAULT_DEBOUNCE_MS,
+  MARKDOWN_EXTENSION,
+  CANVAS_EXTENSION,
+  OWNERSHIP_SCHEMA,
+  OWNERSHIP_VERSION,
+  OWNERSHIP_KIND,
+  OWNERSHIP_BLOCK_KEY,
+  OWNERSHIP_FIELD_KEY,
+  CARD_SYNC_KEY,
+  createSyncId,
+  createMarkdownSyncOwnership,
+  loadMarkdownSyncOwnership,
+  MarkdownSyncOwnership,
+  OwnershipRegistry,
+  isCanonicalVaultPath,
+  parseFrontmatterOwnership,
+  decodeSyncIdScalar,
+  encodeSyncIdScalar,
+  syncIdFrontmatterLines,
+  patchSyncIdOwnership,
+  resolveMarkdownSyncLink,
+  resolveParentLink,
+  adoptMarkdownSyncLink,
+  adoptParentLink,
+  MarkdownSyncIndex,
+  MarkdownSyncCoordinator
+} = (() => {
+  "use strict";
+  const module = { exports: {} };
+  const exports = module.exports;
+
+  /**
+   * Private ownership, indexing, and scheduling for Markdown/nested-map links.
+   *
+   * A `.canvas` link is untrusted input. Its syncId (and any opaque proof) is
+   * public metadata, so equality with a target's frontmatter/card token is only
+   * defense-in-depth. Authorization comes from `MarkdownSyncOwnership`, a
+   * JSON-serializable registry kept in plugin loadData. The registry owns a
+   * private CSPRNG secret and records bind the exact Canvas path, link kind,
+   * target path, syncId, and optional parent card/node. A proof copied from a
+   * different record therefore cannot pass the registry binding check.
+   *
+   * Nothing in this module writes vault or plugin data. Adoption returns the
+   * exact target patch, public Canvas link, and private registry record/upsert;
+   * the caller persists those together. Missing, stale, or ambiguous ownership
+   * fails closed before target I/O. Frontmatter/card tokens remain optional
+   * compatibility defenses, never the authorization proof.
+   */
+
+  const MARKDOWN_EXTENSION = "md";
+  const CANVAS_EXTENSION = "canvas";
+  const SYNC_ID_PATTERN = /^[0-9a-z]{32}$/;
+  const SYNC_ID_LENGTH = 32;
+  const SYNC_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
+  const PROOF_PATTERN = /^[0-9a-f]{32}\.[0-9a-f]{32}$/;
+  const SECRET_PATTERN = /^[0-9a-f]{64}$/;
+  const MAX_CARD_ID_LENGTH = 128;
+  const MAX_LINK_TARGET_BYTES = 5 * 1024 * 1024;
+  const MAX_LINK_NODES = 20000;
+  const MAX_LINK_EDGES = 40000;
+  const MAX_PATH_LENGTH = 4096;
+  const MAX_RECORDS = 10000;
+  const NESTED_MAP_CARD_KIND = "nested-map";
+  const CARD_KIND_KEY = "tomindmapCardKind";
+  /** The plugin-owned card field that remains defense-in-depth only. */
+  const CARD_SYNC_KEY = "tomindmapSyncId";
+  const PRIVATE_OWNERSHIP_KEYS = new Set(["secret", "secretCheck", "records", "ownership"]);
+  const OWNERSHIP_BLOCK_KEY = "tomindmap";
+  const OWNERSHIP_FIELD_KEY = "syncId";
+  const OWNERSHIP_FIELD_INDENT = "  ";
+  const OWNERSHIP_SCHEMA = "tomindmap.markdown-sync-ownership";
+  const OWNERSHIP_VERSION = 1;
+  const OWNERSHIP_KIND = Object.freeze({
+    MARKDOWN: "markdown",
+    PARENT: "parent"
+  });
+  // A startup scan of a very large vault must not build an unbounded index.
+  const DEFAULT_INDEX_LIMIT = 5000;
+  const DEFAULT_DEBOUNCE_MS = 350;
+  const MAX_SYNC_ATTEMPTS = 3;
+  const MAX_DRAIN_PASSES = 8;
+
+  /** Typed outcomes shared by every link decision and sync result. */
+  const LINK_REASON = {
+    NO_LINK: "no-link",
+    UNCANONICAL_PATH: "uncanonical-path",
+    NOT_MARKDOWN: "not-markdown",
+    UNOWNED_LINK: "unowned-link",
+    MISSING_REGISTRY: "missing-registry",
+    STALE_REGISTRY: "stale-registry",
+    RECORD_MISSING: "record-missing",
+    RECORD_INVALID: "record-invalid",
+    WRONG_CANVAS: "wrong-canvas",
+    WRONG_TARGET: "wrong-target",
+    WRONG_KIND: "wrong-kind",
+    WRONG_CARD: "wrong-card",
+    UNOWNED_TARGET: "unowned-target",
+    MALFORMED_TARGET: "malformed-target",
+    ALREADY_OWNED: "already-owned",
+    NEEDS_CONFIRMATION: "needs-confirmation",
+    MISSING_TARGET: "missing-target",
+    NOT_CANVAS: "not-canvas",
+    NO_PARENT_CARD: "no-parent-card",
+    DETACHED: "detached",
+    CONFLICT: "conflict",
+    EDITING: "editing",
+    DECODE: "decode",
+    FAILED: "failed",
+    NO_PENDING: "no-pending",
+    DISPOSING: "disposing",
+    DRAIN_LIMIT: "drain-limit",
+    UNSAVED: "unsaved"
+  };
+
+
+  function reject(reason) {
+    return { ok: false, reason };
+  }
+
+  /**
+   * Control characters never occur in a filename this plugin writes, cannot name
+   * a real vault entry, and can hide a segment from a reader.
+   *
+   * A literal `%` is deliberately allowed: the plugin's own path generator emits
+   * names like `100% done.md` from the topic title, and a vault lookup is exact —
+   * nothing decodes a path before the segments have been checked, so `%2e%2e` is
+   * just a folder whose name happens to look like an escape.
+   */
+  function hasControlCharacter(value) {
+    for (let index = 0; index < value.length; index++) {
+      const code = value.charCodeAt(index);
+      if (code < 0x20 || code === 0x7f) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A vault path is canonical when it is relative, uses Obsidian's `/`
+   * separator, and names a real location without traversal, empty, or dot
+   * segments. Anything else is rejected before the vault is ever consulted.
+   */
+  function isCanonicalVaultPath(path) {
+    if (typeof path !== "string") return false;
+    const value = path;
+    if (!value || value.length > MAX_PATH_LENGTH || value.startsWith("/") || value.includes("\\"))
+      return false;
+    if (/^[A-Za-z]:/.test(value) || hasControlCharacter(value)) return false;
+    const segments = value.split("/");
+    return segments.every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== ".."
+    );
+  }
+
+  function extensionOf(path) {
+    const name = String(path ?? "").split("/").pop() || "";
+    const dot = name.lastIndexOf(".");
+    return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  }
+
+  /** Obsidian models a vault entry as a `TFile` carrying a string extension. */
+  function isFileEntry(entry) {
+    return Boolean(entry) && typeof entry.extension === "string";
+  }
+
+  function resolveVaultFile(vault, path, extension) {
+    if (typeof vault?.getAbstractFileByPath !== "function") return null;
+    let entry;
+    try {
+      entry = vault.getAbstractFileByPath(path);
+    } catch (_) {
+      return null;
+    }
+    if (!isFileEntry(entry)) return null;
+    if (typeof entry.path !== "string" || entry.path !== path) return null;
+    if (String(entry.extension).toLowerCase() !== extension) return null;
+    return entry;
+  }
+
+  /**
+   * Mint an unpredictable ownership token. Links recorded before tokens existed
+   * are migrated by issuing a fresh one, so a shared Canvas can only carry a
+   * token this installation made up itself.
+   */
+  function createSyncId() {
+    const hex = randomHex(SYNC_ID_LENGTH);
+    if (!hex) return "";
+    let id = "";
+    for (let index = 0; index < SYNC_ID_LENGTH * 2; index += 2)
+      id += SYNC_ID_ALPHABET[Number.parseInt(hex.slice(index, index + 2), 16) % SYNC_ID_ALPHABET.length];
+    return id;
+  }
+
+  /**
+   * The ownership frontmatter codec.
+   *
+   * Obsidian reads YAML, but this module must stay dependency-free and must not
+   * guess: a value is only a claim when it is a single, well-formed, non-empty
+   * scalar under the plugin's own key. Anything ambiguous — two blocks, two
+   * keys, an unterminated document, a value that is not a plain string — is
+   * refused instead of resolved, because resolving it would let the writer pick
+   * which claim counts.
+   */
+  const BOM = "\uFEFF";
+  const FRONTMATTER_OPEN = /^---[ \t]*(?:\r\n|\n|\r)/;
+  const FRONTMATTER_CLOSE = /^---[ \t]*$/;
+  const FRONTMATTER_END = /^\.\.\.[ \t]*$/;
+  const MAPPING_ENTRY = /^([ \t]*)("?)([A-Za-z0-9_.-]+)\2[ \t]*:(?:[ \t]+(.*?))?[ \t]*$/;
+  // A double-quoted scalar may carry only the escapes a single token needs.
+  const DOUBLE_QUOTED = /^"((?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*)"[ \t]*(?:#.*)?$/;
+  const SINGLE_QUOTED = /^'((?:[^']|'')*)'[ \t]*(?:#.*)?$/;
+  const PLAIN_SCALAR = /^[A-Za-z0-9_-]{1,64}$/;
+  // Unquoted words YAML would read as something other than a string.
+  const RESERVED_PLAIN = /^(?:true|false|yes|no|on|off|null|~)$/i;
+  const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+  function stripBom(text) {
+    return text.startsWith(BOM) ? text.slice(1) : text;
+  }
+
+  /** One physical line, with the offsets a byte-preserving edit needs. */
+  function readLine(source, start) {
+    let end = start;
+    while (end < source.length && source[end] !== "\n" && source[end] !== "\r") end++;
+    let next = end;
+    if (source[end] === "\r" && source[end + 1] === "\n") next = end + 2;
+    else if (end < source.length) next = end + 1;
+    return { start, end, next, text: source.slice(start, end) };
+  }
+
+  /**
+   * Locate the frontmatter block. It is only frontmatter when it opens on the
+   * very first line of the document, so a `---` inside the body can never be
+   * mistaken for a claim.
+   */
+  function frontmatterRegion(source) {
+    const opening = FRONTMATTER_OPEN.exec(source);
+    if (!opening) return { state: "absent" };
+    const bodyStart = opening[0].length;
+    let cursor = bodyStart;
+    while (cursor <= source.length) {
+      const line = readLine(source, cursor);
+      if (FRONTMATTER_CLOSE.test(line.text) || FRONTMATTER_END.test(line.text))
+        return {
+          state: "present",
+          bodyStart,
+          bodyEnd: cursor,
+          contentStart: line.next
+        };
+      if (line.next <= cursor) break;
+      cursor = line.next;
+    }
+    return { state: "unterminated", bodyStart };
+  }
+
+  function frontmatterLines(source, region) {
+    const lines = [];
+    for (let cursor = region.bodyStart; cursor < region.bodyEnd; ) {
+      const line = readLine(source, cursor);
+      lines.push(line);
+      if (line.next <= cursor) break;
+      cursor = line.next;
+    }
+    return lines;
+  }
+
+  /** `key: value`, `key:`, or nothing at all. A trailing comment is not a value. */
+  function splitMappingEntry(text) {
+    const match = MAPPING_ENTRY.exec(text);
+    if (!match) return null;
+    const value = String(match[4] ?? "").trim();
+    return {
+      indent: match[1],
+      key: match[3],
+      value: value.startsWith("#") ? "" : value
+    };
+  }
+
+  /** The line ending the document already uses, so a patch never mixes styles. */
+  function documentEol(source) {
+    if (source.includes("\r\n")) return "\r\n";
+    if (source.includes("\r")) return "\r";
+    return "\n";
+  }
+
+  /**
+   * The single plugin-owned block, or `null` when the document has none. A
+   * second block, or a top-level line that is not a mapping entry at all, is
+   * ambiguous: both are reported as malformed rather than resolved.
+   */
+  function findOwnershipBlock(lines) {
+    let index = -1;
+    let mapping = true;
+    let ended = false;
+    for (let position = 0; position < lines.length; position++) {
+      const text = lines[position].text;
+      if (text.trim() === "" || text.trim().startsWith("#")) continue;
+      const topLevel = !/^[ \t]/.test(text);
+      if (!topLevel) {
+        // Unrelated frontmatter before the plugin block is untrusted input, not
+        // a reason to reject the document. Once the block starts, however, an
+        // indented non-mapping line is ambiguous plugin data.
+        if (index >= 0 && !ended && !splitMappingEntry(text)) return null;
+        continue;
+      }
+      const entry = splitMappingEntry(text);
+      if (!entry) {
+        // Before the plugin block, lists, block-scalar continuations, and other
+        // unrelated YAML are ignored. Once it starts, ambiguity is malformed.
+        if (index >= 0) return null;
+        continue;
+      }
+      if (entry.key !== OWNERSHIP_BLOCK_KEY) {
+        if (index >= 0) ended = true;
+        continue;
+      }
+      // Two top-level plugin blocks are ambiguous even if unrelated YAML sits
+      // between them.
+      if (index >= 0) return null;
+      mapping = entry.value === "";
+      index = position;
+    }
+    if (index < 0) return { index: -1, mapping: true };
+    if (!mapping) return { index: -1, mapping: false };
+    return { index, mapping: true };
+  }
+
+  /**
+   * Every ownership key inside the plugin block, at any depth, so a claim that
+   * was buried under another key still counts. More than one is ambiguous.
+   */
+  function ownershipFields(lines, blockIndex) {
+    const fields = [];
+    for (let position = blockIndex + 1; position < lines.length; position++) {
+      const text = lines[position].text;
+      if (text.trim() === "") continue;
+      if (!/^[ \t]/.test(text)) break;
+      if (text.trim().startsWith("#")) continue;
+      const entry = splitMappingEntry(text);
+      if (!entry) return null;
+      if (entry.key === OWNERSHIP_FIELD_KEY)
+        fields.push({ value: entry.value, line: lines[position], indent: entry.indent });
+    }
+    return fields;
+  }
+
+  function hasPrivateOwnershipFields(lines, blockIndex) {
+    for (let position = blockIndex + 1; position < lines.length; position++) {
+      const text = lines[position].text;
+      if (text.trim() === "") continue;
+      if (!/^[ \t]/.test(text)) break;
+      if (text.trim().startsWith("#")) continue;
+      const entry = splitMappingEntry(text);
+      if (!entry) return true;
+      if (PRIVATE_OWNERSHIP_KEYS.has(entry.key)) return true;
+    }
+    return false;
+  }
+
+  function unescapeDoubleQuoted(body) {
+    const simple = {
+      '"': '"',
+      "\\": "\\",
+      "/": "/",
+      b: "\b",
+      f: "\f",
+      n: "\n",
+      r: "\r",
+      t: "\t"
+    };
+    let result = "";
+    for (let index = 0; index < body.length; index++) {
+      const character = body[index];
+      if (character !== "\\") {
+        result += character;
+        continue;
+      }
+      const escape = body[++index];
+      if (escape === "u") {
+        const code = body.slice(index + 1, index + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(code)) return null;
+        result += String.fromCharCode(Number.parseInt(code, 16));
+        index += 4;
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(simple, escape)) return null;
+      result += simple[escape];
+    }
+    return result;
+  }
+
+  /**
+   * Decode one ownership scalar, or `null` for anything that is not exactly one
+   * non-empty string: a non-string YAML value, a broken escape, an alias, a tag,
+   * or a block scalar.
+   */
+  function decodeSyncIdScalar(raw) {
+    const value = String(raw ?? "").trim();
+    let decoded = null;
+    const double = DOUBLE_QUOTED.exec(value);
+    if (double) decoded = unescapeDoubleQuoted(double[1]);
+    else {
+      const single = SINGLE_QUOTED.exec(value);
+      if (single) decoded = single[1].replace(/''/g, "'");
+      else if (PLAIN_SCALAR.test(value) && !RESERVED_PLAIN.test(value))
+        decoded = value;
+    }
+    if (decoded === null || decoded === "") return null;
+    if (CONTROL_CHARACTERS.test(decoded)) return null;
+    return decoded;
+  }
+
+  /**
+   * Encode a value as the double-quoted scalar this module writes, escaping
+   * everything a YAML reader could otherwise reinterpret. The result is exactly
+   * what `decodeSyncIdScalar` accepts.
+   */
+  function encodeSyncIdScalar(value) {
+    const text = String(value ?? "");
+    let encoded = '"';
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      const code = text.charCodeAt(index);
+      if (character === '"' || character === "\\") encoded += `\\${character}`;
+      else if (character === "\n") encoded += "\\n";
+      else if (character === "\r") encoded += "\\r";
+      else if (character === "\t") encoded += "\\t";
+      else if (code < 0x20 || code === 0x7f)
+        encoded += `\\u${code.toString(16).padStart(4, "0")}`;
+      else encoded += character;
+    }
+    return `${encoded}"`;
+  }
+
+  /**
+   * Read the ownership token a Markdown document claims for itself.
+   *
+   * @returns {{ok:true, syncId:string|null}|{ok:false, reason:string}}
+   *   `syncId: null` means the document claims nothing; a `reason` means it
+   *   claims something this module refuses to interpret exactly.
+   */
+  function parseFrontmatterOwnership(text) {
+    const source = stripBom(String(text ?? ""));
+    const region = frontmatterRegion(source);
+    if (region.state === "absent") return { ok: true, syncId: null };
+    if (region.state !== "present") return reject(LINK_REASON.MALFORMED_TARGET);
+    const lines = frontmatterLines(source, region);
+    const block = findOwnershipBlock(lines);
+    if (!block) return reject(LINK_REASON.MALFORMED_TARGET);
+    if (block.index < 0) return { ok: true, syncId: null };
+    if (hasPrivateOwnershipFields(lines, block.index))
+      return reject(LINK_REASON.MALFORMED_TARGET);
+    const fields = ownershipFields(lines, block.index);
+    if (fields === null || fields.length > 1)
+      return reject(LINK_REASON.MALFORMED_TARGET);
+    if (fields.length === 0) return { ok: true, syncId: null };
+    const decoded = decodeSyncIdScalar(fields[0].value);
+    if (decoded === null) return reject(LINK_REASON.MALFORMED_TARGET);
+    return { ok: true, syncId: decoded };
+  }
+
+  /**
+   * The frontmatter lines that record a token, for a caller that writes the
+   * plugin's whole metadata block itself. `null` for a value that is not a token.
+   */
+  function syncIdFrontmatterLines(syncId) {
+    if (typeof syncId !== "string" || !SYNC_ID_PATTERN.test(syncId)) return null;
+    return [
+      `${OWNERSHIP_BLOCK_KEY}:`,
+      `${OWNERSHIP_FIELD_INDENT}${OWNERSHIP_FIELD_KEY}: ${encodeSyncIdScalar(syncId)}`
+    ];
+  }
+
+  /**
+   * Return the document that claims `syncId`, without touching the input. Only
+   * the ownership key is added or replaced: the body, the byte order mark, the
+   * line endings, and every other frontmatter key survive unchanged.
+   *
+   * @returns {{ok:true, markdown:string}|{ok:false, reason:string}}
+   */
+  function patchSyncIdOwnership(text, syncId) {
+    if (typeof syncId !== "string" || !SYNC_ID_PATTERN.test(syncId))
+      return reject(LINK_REASON.UNOWNED_LINK);
+    const original = String(text ?? "");
+    const bom = original.startsWith(BOM) ? BOM : "";
+    const source = bom ? original.slice(1) : original;
+    const eol = documentEol(source);
+    const blockLine = `${OWNERSHIP_BLOCK_KEY}:`;
+    const field = `${OWNERSHIP_FIELD_INDENT}${OWNERSHIP_FIELD_KEY}: ${encodeSyncIdScalar(syncId)}`;
+    const region = frontmatterRegion(source);
+    if (region.state === "unterminated")
+      return reject(LINK_REASON.MALFORMED_TARGET);
+    if (region.state === "absent") {
+      const separator = source === "" ? "" : eol;
+      return {
+        ok: true,
+        markdown: `${bom}---${eol}${blockLine}${eol}${field}${eol}---${eol}${separator}${source}`
+      };
+    }
+    const lines = frontmatterLines(source, region);
+    const block = findOwnershipBlock(lines);
+    // A plugin key that is not a mapping can neither be read nor extended, so it
+    // is never patched: a second `tomindmap:` key would be a duplicate claim.
+    if (!block || !block.mapping) return reject(LINK_REASON.MALFORMED_TARGET);
+    if (block.index >= 0 && hasPrivateOwnershipFields(lines, block.index))
+      return reject(LINK_REASON.MALFORMED_TARGET);
+    if (block.index < 0) {
+      // No plugin block yet: add one at the end of the frontmatter, which keeps
+      // every existing key exactly where its author put it.
+      const body = source.slice(region.bodyStart, region.bodyEnd);
+      const lead = body === "" || /(?:\r\n|\n|\r)$/.test(body) ? "" : eol;
+      const addition = `${lead}${blockLine}${eol}${field}${eol}`;
+      return {
+        ok: true,
+        markdown: `${bom}${source.slice(0, region.bodyEnd)}${addition}${source.slice(region.bodyEnd)}`
+      };
+    }
+    const fields = ownershipFields(lines, block.index);
+    if (fields === null || fields.length > 1)
+      return reject(LINK_REASON.MALFORMED_TARGET);
+    if (fields.length === 0) {
+      const anchor = lines[block.index];
+      // Insert with the ending the block itself uses, not a guessed one.
+      const lineEol = source.startsWith("\r\n", anchor.end)
+        ? "\r\n"
+        : source[anchor.end] === "\r"
+          ? "\r"
+          : "\n";
+      return {
+        ok: true,
+        markdown: `${bom}${source.slice(0, anchor.next)}${field}${lineEol}${source.slice(anchor.next)}`
+      };
+    }
+    const existing = fields[0];
+    const replacement = `${existing.indent}${OWNERSHIP_FIELD_KEY}: ${encodeSyncIdScalar(syncId)}`;
+    return {
+      ok: true,
+      markdown: `${bom}${source.slice(0, existing.line.start)}${replacement}${source.slice(existing.line.end)}`
+    };
+  }
+
+  /* ------------------------------------------------------------------------- *
+   * Private ownership registry
+   * ------------------------------------------------------------------------- */
+
+  /**
+   * The registry is deliberately separate from every public link.  The secret
+   * and the complete record set are kept in a WeakMap closure, so neither is
+   * accidentally copied by a spread, a Canvas patch, or a Markdown frontmatter
+   * codec.  `toJSON()` is the one explicit persistence boundary for loadData.
+   */
+  const OWNERSHIP_STATES = new WeakMap();
+
+  function isObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function cloneRecord(record) {
+    return {
+      canvasPath: record.canvasPath,
+      kind: record.kind,
+      targetPath: record.targetPath,
+      syncId: record.syncId,
+      nodeId: record.nodeId,
+      proof: record.proof,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt
+    };
+  }
+
+  function isTimestamp(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+
+  function timestamp(now) {
+    if (now === null || now === undefined) return Date.now();
+    const value = typeof now === "function" ? now() : now;
+    const number = Number(value);
+    return isTimestamp(number) ? number : Date.now();
+  }
+
+  /** Generate lowercase hex without requiring Node's crypto module. */
+  function randomHex(byteLength, random = null) {
+    const bytes = new Uint8Array(byteLength);
+    try {
+      const source = globalThis.crypto;
+      if (typeof random === "function") {
+        const supplied = random(byteLength);
+        if (supplied instanceof Uint8Array) bytes.set(supplied.subarray(0, byteLength));
+        else if (Array.isArray(supplied)) {
+          for (let index = 0; index < byteLength; index++)
+            bytes[index] = Number(supplied[index]) & 0xff;
+        } else return "";
+      } else if (source && typeof source.getRandomValues === "function") {
+        source.getRandomValues(bytes);
+      } else return "";
+    } catch (_) {
+      return "";
+    }
+    let result = "";
+    for (let index = 0; index < bytes.length; index++)
+      result += bytes[index].toString(16).padStart(2, "0");
+    return result;
+  }
+
+  function unsignedHex(value) {
+    return (value >>> 0).toString(16).padStart(8, "0");
+  }
+
+  /**
+   * Dependency-free digest used as a local corruption guard.  The secret never
+   * leaves private plugin data; this is intentionally not a security boundary
+   * against arbitrary JavaScript running in the same Obsidian process.
+   */
+  function opaqueDigest(input) {
+    const text = String(input);
+    let a = 0x811c9dc5;
+    let b = 0x9e3779b9;
+    let c = 0x85ebca6b;
+    let d = 0xc2b2ae35;
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      a = Math.imul(a ^ code, 0x01000193);
+      b = Math.imul(b ^ (code + index), 0x85ebca6b);
+      c = Math.imul(c ^ (code + 0x9e37), 0xc2b2ae35);
+      d = Math.imul(d ^ (code ^ 0x27d4eb2f), 0x165667b1);
+    }
+    return `${unsignedHex(a)}${unsignedHex(b)}${unsignedHex(c)}${unsignedHex(d)}`;
+  }
+
+  function recordMaterial(record) {
+    return JSON.stringify([
+      record.canvasPath,
+      record.kind,
+      record.targetPath,
+      record.syncId,
+      record.nodeId ?? null,
+      record.createdAt,
+      record.updatedAt
+    ]);
+  }
+
+  function proofFor(secret, record, random) {
+    const nonce = randomHex(16, random);
+    const digest = opaqueDigest(`${secret}\u0000${nonce}\u0000${recordMaterial(record)}`);
+    return `${nonce}.${digest}`;
+  }
+
+  function validSecret(secret, check) {
+    return typeof secret === "string" && SECRET_PATTERN.test(secret) &&
+      typeof check === "string" && /^[0-9a-f]{32}$/.test(check) &&
+      check === opaqueDigest(`tomindmap-secret\\u0000${secret}`);
+  }
+
+  function normalizeNodeId(nodeId, kind) {
+    if (kind === OWNERSHIP_KIND.MARKDOWN) return null;
+    return typeof nodeId === "string" && nodeId.length > 0 &&
+      nodeId.length <= MAX_CARD_ID_LENGTH && !hasControlCharacter(nodeId)
+      ? nodeId
+      : null;
+  }
+
+  function normalizeBinding(binding) {
+    if (!isObject(binding)) return null;
+    const kind = binding.kind;
+    if (kind !== OWNERSHIP_KIND.MARKDOWN && kind !== OWNERSHIP_KIND.PARENT)
+      return null;
+    if (typeof binding.canvasPath !== "string" ||
+        !isCanonicalVaultPath(binding.canvasPath) ||
+        extensionOf(binding.canvasPath) !== CANVAS_EXTENSION)
+      return null;
+    const expectedExtension = kind === OWNERSHIP_KIND.MARKDOWN
+      ? MARKDOWN_EXTENSION
+      : CANVAS_EXTENSION;
+    if (typeof binding.targetPath !== "string" ||
+        !isCanonicalVaultPath(binding.targetPath) ||
+        extensionOf(binding.targetPath) !== expectedExtension)
+      return null;
+    if (typeof binding.syncId !== "string" || !SYNC_ID_PATTERN.test(binding.syncId))
+      return null;
+    const nodeId = binding.nodeId === undefined ? null : binding.nodeId;
+    if (kind === OWNERSHIP_KIND.MARKDOWN && nodeId !== null) return null;
+    if (kind === OWNERSHIP_KIND.PARENT && binding.targetPath === binding.canvasPath) return null;
+    if (kind === OWNERSHIP_KIND.PARENT && !normalizeNodeId(nodeId, kind)) return null;
+    return {
+      canvasPath: binding.canvasPath,
+      kind,
+      targetPath: binding.targetPath,
+      syncId: binding.syncId,
+      nodeId
+    };
+  }
+
+  function normalizeRecord(raw, secret) {
+    if (!isObject(raw)) return null;
+    const binding = normalizeBinding(raw);
+    if (!binding) return null;
+    if (typeof raw.proof !== "string" || !PROOF_PATTERN.test(raw.proof)) return null;
+    if (!isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt)) return null;
+    const record = { ...binding, proof: raw.proof, createdAt: raw.createdAt, updatedAt: raw.updatedAt };
+    if (proofForDigest(secret, record) !== record.proof) return null;
+    return record;
+  }
+
+  function proofForDigest(secret, record) {
+    const [nonce, digest] = String(record.proof).split(".");
+    return `${nonce}.${opaqueDigest(`${secret}\u0000${nonce}\u0000${recordMaterial(record)}`)}`;
+  }
+
+  function sameNode(left, right) {
+    return (left.nodeId ?? null) === (right.nodeId ?? null);
+  }
+
+  function sameRecord(left, right) {
+    return left.canvasPath === right.canvasPath && left.kind === right.kind &&
+      left.targetPath === right.targetPath && left.syncId === right.syncId &&
+      sameNode(left, right) && left.proof === right.proof &&
+      left.createdAt === right.createdAt && left.updatedAt === right.updatedAt;
+  }
+
+  /** A target has one private owner unless replacement is explicit. */
+  function recordsConflict(left, right) {
+    if (left.kind !== right.kind) return false;
+    if (left.kind === OWNERSHIP_KIND.MARKDOWN) {
+      // One Canvas has one Markdown link, and one Markdown target has one
+      // authorizing Canvas. The second rule is what revokes a copied link.
+      return left.targetPath === right.targetPath || left.canvasPath === right.canvasPath;
+    }
+    return left.targetPath === right.targetPath && sameNode(left, right);
+  }
+
+  function createOwnershipState(options = {}) {
+    const testOnlyRandom = options.testOnly === true &&
+      typeof options.testOnlyRandom === "function"
+      ? options.testOnlyRandom
+      : null;
+    const secret = randomHex(32, testOnlyRandom);
+    return {
+      schema: OWNERSHIP_SCHEMA,
+      version: OWNERSHIP_VERSION,
+      secret,
+      secretCheck: opaqueDigest(`tomindmap-secret\\u0000${secret}`),
+      createdAt: timestamp(options.now),
+      updatedAt: timestamp(options.now),
+      stale: false,
+      now: options.now ?? null,
+      testOnlyRandom,
+      records: []
+    };
+  }
+
+  function parseOwnershipState(data) {
+    if (!isObject(data) || data.schema !== OWNERSHIP_SCHEMA ||
+        data.version !== OWNERSHIP_VERSION ||
+        (data.stale !== undefined && data.stale !== false) ||
+        !validSecret(data.secret, data.secretCheck) ||
+        !isTimestamp(data.createdAt) || !isTimestamp(data.updatedAt) ||
+        data.updatedAt < data.createdAt ||
+        !Array.isArray(data.records) || data.records.length > MAX_RECORDS)
+      return null;
+    const records = [];
+    const seenTargets = new Set();
+    const seenCanvases = new Set();
+    const seenParents = new Set();
+    for (const raw of data.records) {
+      let record;
+      try {
+        record = normalizeRecord(raw, data.secret);
+      } catch (_) {
+        return null;
+      }
+      if (!record) return null;
+      const parentKey = JSON.stringify([record.targetPath, record.nodeId ?? null]);
+      if (record.kind === OWNERSHIP_KIND.MARKDOWN) {
+        if (seenTargets.has(record.targetPath) || seenCanvases.has(record.canvasPath)) return null;
+        seenTargets.add(record.targetPath);
+        seenCanvases.add(record.canvasPath);
+      } else {
+        if (seenParents.has(parentKey)) return null;
+        seenParents.add(parentKey);
+      }
+      records.push(record);
+    }
+    return {
+      schema: OWNERSHIP_SCHEMA,
+      version: OWNERSHIP_VERSION,
+      secret: data.secret,
+      secretCheck: data.secretCheck,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      stale: false,
+      now: null,
+      testOnlyRandom: null,
+      records
+    };
+  }
+
+  function ownershipPublicLink(record, includeCanvasPath = false) {
+    const link = {
+      syncId: record.syncId,
+      proof: record.proof,
+      ownership: { source: "plugin-data" }
+    };
+    if (includeCanvasPath) link.canvasPath = record.canvasPath;
+    if (record.kind === OWNERSHIP_KIND.MARKDOWN) link.path = record.targetPath;
+    else {
+      link.canvas = record.targetPath;
+      link.nodeId = record.nodeId;
+    }
+    return link;
+  }
+
+  function ownershipLookup(state, binding, proof) {
+    if (!state) return reject(LINK_REASON.MISSING_REGISTRY);
+    if (state.stale) return reject(LINK_REASON.STALE_REGISTRY);
+    const records = state.records;
+    if (records.length === 0) return reject(LINK_REASON.RECORD_MISSING);
+    const canvasRecords = records.filter((record) => record.canvasPath === binding.canvasPath);
+    if (canvasRecords.length === 0) return reject(LINK_REASON.WRONG_CANVAS);
+    const kindRecords = canvasRecords.filter((record) => record.kind === binding.kind);
+    if (kindRecords.length === 0) return reject(LINK_REASON.WRONG_KIND);
+    const targetRecords = kindRecords.filter((record) => record.targetPath === binding.targetPath);
+    if (targetRecords.length === 0) return reject(LINK_REASON.WRONG_TARGET);
+    const syncRecords = targetRecords.filter((record) => record.syncId === binding.syncId);
+    if (syncRecords.length === 0) return reject(LINK_REASON.RECORD_MISSING);
+    const cardRecords = binding.kind === OWNERSHIP_KIND.PARENT
+      ? syncRecords.filter((record) => sameNode(record, binding))
+      : syncRecords;
+    if (cardRecords.length === 0) return reject(LINK_REASON.WRONG_CARD);
+    const record = cardRecords.find((candidate) => candidate.proof === proof);
+    if (!record) return reject(LINK_REASON.RECORD_INVALID);
+    return { ok: true, record };
+  }
+
+  function ownershipConflicts(state, binding) {
+    const conflicts = [];
+    for (const record of state.records) {
+      if (record.canvasPath === binding.canvasPath && record.kind === binding.kind &&
+          record.targetPath === binding.targetPath && sameNode(record, binding)) {
+        conflicts.push(record);
+        continue;
+      }
+      const candidate = { ...binding, nodeId: binding.nodeId ?? null };
+      if (recordsConflict(record, candidate)) conflicts.push(record);
+    }
+    return conflicts.map(cloneRecord);
+  }
+
+  /**
+   * JSON-safe private ownership registry.
+   *
+   * Integration boundary:
+   *   const registry = MarkdownSyncOwnership.fromJSON(loadData()?.markdownSyncOwnership)
+   *     ?? createMarkdownSyncOwnership();
+   *   await saveData({ ...data, markdownSyncOwnership: registry.toJSON() });
+   *
+   * `toJSON()` is the only representation that contains the private secret;
+   * resolver/adoption results never do.
+   */
+  class MarkdownSyncOwnership {
+    constructor(data = null, options = {}) {
+      const state = data === null || data === undefined
+        ? createOwnershipState(options)
+        : parseOwnershipState(data);
+      OWNERSHIP_STATES.set(this, state);
+    }
+
+    static create(options = {}) {
+      return new MarkdownSyncOwnership(null, options);
+    }
+
+    static fromJSON(data) {
+      if (parseOwnershipState(data) === null) return null;
+      return new MarkdownSyncOwnership(data);
+    }
+
+    static deserialize(data) {
+      return MarkdownSyncOwnership.fromJSON(data);
+    }
+
+    static load(data) {
+      return MarkdownSyncOwnership.fromJSON(data);
+    }
+
+    isValid() {
+      const state = OWNERSHIP_STATES.get(this);
+      return state !== null && parseOwnershipState(this.toJSON()) !== null;
+    }
+
+    isStale(now = Date.now(), maxAgeMs = null) {
+      if (!this.isValid()) return true;
+      const state = OWNERSHIP_STATES.get(this);
+      return Number.isFinite(maxAgeMs) && maxAgeMs >= 0 &&
+        Number(now) - state.updatedAt > maxAgeMs;
+    }
+
+    markStale() {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state) return false;
+      state.stale = true;
+      return true;
+    }
+
+    toJSON() {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state) return null;
+      return {
+        schema: state.schema,
+        version: state.version,
+        secret: state.secret,
+        secretCheck: state.secretCheck,
+        createdAt: state.createdAt,
+        updatedAt: state.updatedAt,
+        stale: state.stale,
+        records: state.records.map(cloneRecord)
+      };
+    }
+
+    serialize() {
+      return this.toJSON();
+    }
+
+    get records() {
+      const state = OWNERSHIP_STATES.get(this);
+      return state ? state.records.map(cloneRecord) : [];
+    }
+
+    recordsForCanvas(canvasPath) {
+      return this.records.filter((record) => record.canvasPath === canvasPath);
+    }
+
+    find(binding, proof = null) {
+      const state = OWNERSHIP_STATES.get(this);
+      const normalized = normalizeBinding(binding);
+      if (!normalized || !state) return null;
+      const found = ownershipLookup(state, normalized, proof);
+      return found.record ? cloneRecord(found.record) : null;
+    }
+
+    issueRecord(binding, { now = null } = {}) {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state) return reject(LINK_REASON.STALE_REGISTRY);
+      const normalized = normalizeBinding(binding);
+      if (!normalized) return reject(LINK_REASON.RECORD_INVALID);
+      const at = timestamp(state.now ?? now);
+      const record = {
+        ...normalized,
+        proof: "",
+        createdAt: at,
+        updatedAt: at
+      };
+      record.proof = proofFor(state.secret, record, state.testOnlyRandom);
+      if (normalizeRecord(record, state.secret) === null)
+        return reject(LINK_REASON.RECORD_INVALID);
+      return { ok: true, record: cloneRecord(record) };
+    }
+
+    upsert(input, { replaceExisting = false } = {}) {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state || !this.isValid()) return reject(LINK_REASON.STALE_REGISTRY);
+      const envelope = isObject(input) && isObject(input.record) ? input : null;
+      const record = envelope ? input.record : input;
+      const shouldReplace = envelope && envelope.replaceExisting === true
+        ? true
+        : replaceExisting;
+      const normalized = normalizeRecord(record, state.secret);
+      if (!normalized) return reject(LINK_REASON.RECORD_INVALID);
+      const exact = state.records.find((candidate) =>
+        candidate.proof === normalized.proof &&
+        candidate.canvasPath === normalized.canvasPath &&
+        candidate.kind === normalized.kind &&
+        candidate.targetPath === normalized.targetPath
+      );
+      if (exact) return { ok: true, record: cloneRecord(exact), replaces: [] };
+      const conflicts = ownershipConflicts(state, normalized);
+      if (conflicts.length > 0 && !shouldReplace)
+        return { ok: false, reason: LINK_REASON.ALREADY_OWNED, replaces: conflicts };
+      if (conflicts.length === 0) {
+        const exact = state.records.find((candidate) => candidate.proof === normalized.proof);
+        if (exact) return { ok: true, record: cloneRecord(exact), replaces: [] };
+      }
+      const removed = conflicts.map(cloneRecord);
+      state.records = state.records.filter((candidate) =>
+        !conflicts.some((conflict) => sameRecord(candidate, conflict))
+      );
+      state.records.push(normalized);
+      state.updatedAt = timestamp(state.now);
+      return { ok: true, record: cloneRecord(normalized), replaces: removed };
+    }
+
+    removeCanvas(canvasPath) {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state || !this.isValid())
+        return reject(LINK_REASON.STALE_REGISTRY);
+      if (!isCanonicalVaultPath(canvasPath) || extensionOf(canvasPath) !== CANVAS_EXTENSION)
+        return reject(LINK_REASON.UNCANONICAL_PATH);
+      const removed = state.records.filter((record) => record.canvasPath === canvasPath).map(cloneRecord);
+      state.records = state.records.filter((record) => record.canvasPath !== canvasPath);
+      if (removed.length > 0) state.updatedAt = timestamp(state.now);
+      return { ok: true, records: removed };
+    }
+
+    renameCanvas(oldPath, newPath, { replaceExisting = false } = {}) {
+      const state = OWNERSHIP_STATES.get(this);
+      if (!state || !this.isValid()) return reject(LINK_REASON.STALE_REGISTRY);
+      if (!isCanonicalVaultPath(oldPath) || !isCanonicalVaultPath(newPath) ||
+          extensionOf(oldPath) !== CANVAS_EXTENSION || extensionOf(newPath) !== CANVAS_EXTENSION)
+        return reject(LINK_REASON.UNCANONICAL_PATH);
+      if (oldPath === newPath)
+        return { ok: true, records: [], links: [], parentLinks: [] };
+      const moving = state.records.filter((record) => record.canvasPath === oldPath);
+      if (moving.length === 0) return reject(LINK_REASON.RECORD_MISSING);
+      const atNewPath = state.records.filter((record) => record.canvasPath === newPath);
+      const conflicts = atNewPath.filter((existing) =>
+        moving.some((record) => recordsConflict(existing, record))
+      );
+      if (conflicts.length > 0 && !replaceExisting)
+        return { ok: false, reason: LINK_REASON.ALREADY_OWNED, replaces: conflicts.map(cloneRecord) };
+      const removed = conflicts.map(cloneRecord);
+      state.records = state.records.filter((record) =>
+        !conflicts.some((conflict) => sameRecord(record, conflict))
+      );
+      const moved = moving.map((record) => {
+        const next = { ...record, canvasPath: newPath, updatedAt: timestamp(state.now), proof: "" };
+        next.proof = proofFor(state.secret, next, state.testOnlyRandom);
+        return next;
+      });
+      state.records = state.records.filter((record) => record.canvasPath !== oldPath).concat(moved);
+      state.updatedAt = timestamp(state.now);
+      return {
+        ok: true,
+        records: moved.map(cloneRecord),
+        links: moved
+          .filter((record) => record.kind === OWNERSHIP_KIND.MARKDOWN)
+          .map((record) => ownershipPublicLink(record, true)),
+        parentLinks: moved
+          .filter((record) => record.kind === OWNERSHIP_KIND.PARENT)
+          .map((record) => ownershipPublicLink(record, true)),
+        replaces: removed
+      };
+    }
+
+    migrateCanvas(oldPath, newPath, options = {}) {
+      return this.renameCanvas(oldPath, newPath, options);
+    }
+  }
+
+  const OwnershipRegistry = MarkdownSyncOwnership;
+
+  function createMarkdownSyncOwnership(options = {}) {
+    return new MarkdownSyncOwnership(null, options);
+  }
+
+  function loadMarkdownSyncOwnership(data) {
+    return MarkdownSyncOwnership.fromJSON(data);
+  }
+
+  function isVault(value) {
+    return isObject(value) && typeof value.getAbstractFileByPath === "function" &&
+      typeof value.cachedRead === "function";
+  }
+
+  function isOwnership(value) {
+    return value instanceof MarkdownSyncOwnership;
+  }
+
+  function coerceOwnership(value) {
+    if (isOwnership(value)) return value;
+    if (isObject(value) && value.schema === OWNERSHIP_SCHEMA)
+      return new MarkdownSyncOwnership(value);
+    return null;
+  }
+
+  function resolveArguments(second, third, fourth, fifth) {
+    // Canonical form: (currentCanvasPath, registry, vault).
+    const directOwnership = coerceOwnership(third);
+    if (typeof second === "string" && directOwnership && isVault(fourth))
+      return { canvasPath: second, ownership: directOwnership, vault: fourth, options: fifth };
+    // A named-options form is convenient for callers that already keep a
+    // context object, while still requiring all three values.
+    if (isObject(second) && !isVault(second) && !isOwnership(second)) {
+      const contextPath = second.canvasPath ?? second.currentCanvasPath;
+      const contextOwnership = coerceOwnership(second.ownership ?? second.registry);
+      if (typeof contextPath === "string" && contextOwnership && isVault(second.vault))
+        return { canvasPath: contextPath, ownership: contextOwnership, vault: second.vault, options: third };
+    }
+    // Also accept the old vault-first positional order when the new Canvas path
+    // and registry are explicitly supplied: (vault, currentCanvasPath, registry).
+    const lastOwnership = coerceOwnership(fourth);
+    if (isVault(second) && typeof third === "string" && lastOwnership)
+      return { canvasPath: third, ownership: lastOwnership, vault: second, options: fifth };
+    if (isVault(second) && isObject(third) && !isOwnership(third)) {
+      const contextPath = third.canvasPath ?? third.currentCanvasPath;
+      const contextOwnership = coerceOwnership(third.ownership ?? third.registry);
+      if (typeof contextPath === "string" && contextOwnership)
+        return { canvasPath: contextPath, ownership: contextOwnership, vault: second, options: fourth ?? fifth };
+    }
+    return null;
+  }
+
+  function validateRegistry(ownership) {
+    if (!isOwnership(ownership)) return reject(LINK_REASON.MISSING_REGISTRY);
+    if (!ownership.isValid()) return reject(LINK_REASON.STALE_REGISTRY);
+    return null;
+  }
+
+  function publicBinding(rawLink, kind, currentCanvasPath) {
+    if (!isObject(rawLink)) return reject(LINK_REASON.NO_LINK);
+    if (typeof currentCanvasPath !== "string" ||
+        !isCanonicalVaultPath(currentCanvasPath) || extensionOf(currentCanvasPath) !== CANVAS_EXTENSION)
+      return reject(LINK_REASON.WRONG_CANVAS);
+    const targetPath = kind === OWNERSHIP_KIND.MARKDOWN ? rawLink.path : rawLink.canvas;
+    if (typeof targetPath !== "string" || !isCanonicalVaultPath(targetPath))
+      return reject(LINK_REASON.UNCANONICAL_PATH);
+    if (extensionOf(targetPath) !== (kind === OWNERSHIP_KIND.MARKDOWN ? MARKDOWN_EXTENSION : CANVAS_EXTENSION))
+      return reject(kind === OWNERSHIP_KIND.MARKDOWN ? LINK_REASON.NOT_MARKDOWN : LINK_REASON.NOT_CANVAS);
+    if (kind === OWNERSHIP_KIND.PARENT &&
+        (typeof rawLink.nodeId !== "string" || !rawLink.nodeId ||
+          rawLink.nodeId.length > MAX_CARD_ID_LENGTH || hasControlCharacter(rawLink.nodeId)))
+      return reject(LINK_REASON.NO_PARENT_CARD);
+    if (rawLink.syncId === undefined || rawLink.syncId === null || rawLink.proof === undefined || rawLink.proof === null)
+      return reject(LINK_REASON.NEEDS_CONFIRMATION);
+    if (typeof rawLink.syncId !== "string" || !SYNC_ID_PATTERN.test(rawLink.syncId) ||
+        typeof rawLink.proof !== "string" || !PROOF_PATTERN.test(rawLink.proof))
+      return reject(LINK_REASON.UNOWNED_LINK);
+    return {
+      ok: true,
+      binding: {
+        canvasPath: currentCanvasPath,
+        kind,
+        targetPath,
+        syncId: rawLink.syncId,
+        nodeId: kind === OWNERSHIP_KIND.MARKDOWN ? null : rawLink.nodeId
+      }
+    };
+  }
+
+  function conflictForAdoption(state, binding) {
+    const conflicts = ownershipConflicts(state, binding);
+    if (conflicts.length > 0) return conflicts;
+    return [];
+  }
+
+  function replacementSummary(records) {
+    return records.length === 0 ? null : records[0];
+  }
+
+  /** Shape-check a persisted path and a linked card id without any I/O. */
+  function validateLinkShape(path, extension, wrongExtensionReason, nodeId = null) {
+    if (!path) return reject(LINK_REASON.NO_LINK);
+    if (!isCanonicalVaultPath(path)) return reject(LINK_REASON.UNCANONICAL_PATH);
+    if (extensionOf(path) !== extension)
+      return reject(wrongExtensionReason);
+    if (nodeId !== null &&
+      (typeof nodeId !== "string" || !nodeId || nodeId.length > MAX_CARD_ID_LENGTH ||
+        hasControlCharacter(nodeId)))
+      return reject(LINK_REASON.NO_PARENT_CARD);
+    return null;
+  }
+
+  /**
+   * Resolve a Markdown link only after the private registry proves the exact
+   * Canvas/target relationship.  A matching public syncId is checked later as
+   * defense-in-depth only; it is never the authorization decision.
+   */
+  async function resolveMarkdownSyncLink(rawLink, second, third, fourth, fifth) {
+    const args = resolveArguments(second, third, fourth, fifth);
+    if (!args) return reject(LINK_REASON.MISSING_REGISTRY);
+    const registry = validateRegistry(args.ownership);
+    if (registry) return registry;
+    const parsed = publicBinding(rawLink, OWNERSHIP_KIND.MARKDOWN, args.canvasPath);
+    if (parsed.reason) return parsed;
+    const state = OWNERSHIP_STATES.get(args.ownership);
+    const found = ownershipLookup(state, parsed.binding, rawLink.proof);
+    if (!found.record) return found;
+    const file = resolveVaultFile(args.vault, parsed.binding.targetPath, MARKDOWN_EXTENSION);
+    if (!file) return reject(LINK_REASON.MISSING_TARGET);
+    const text = await readVaultText(args.vault, file);
+    if (text === null) return reject(LINK_REASON.UNOWNED_TARGET);
+    const claimed = parseFrontmatterOwnership(text);
+    if (!claimed.ok) return claimed;
+    if (claimed.syncId !== null && claimed.syncId !== parsed.binding.syncId)
+      return reject(LINK_REASON.UNOWNED_TARGET);
+    return {
+      ok: true,
+      link: {
+        file,
+        path: parsed.binding.targetPath,
+        syncId: parsed.binding.syncId,
+        proof: rawLink.proof,
+        ownership: { source: "plugin-data" }
+      }
+    };
+  }
+
+  /**
+   * Adopt a legacy Markdown link without mutating either file or the registry.
+   * The caller must persist the target patch, the private registry upsert, and
+   * the returned public Canvas link as one explicit transaction.
+   */
+  async function adoptMarkdownSyncLink(rawLink, second, third, fourth, fifth) {
+    const args = resolveArguments(second, third, fourth, fifth);
+    if (!args) return reject(LINK_REASON.MISSING_REGISTRY);
+    const options = isObject(args.options) ? args.options : {};
+    if (options.confirmed !== true) return reject(LINK_REASON.NEEDS_CONFIRMATION);
+    const registry = validateRegistry(args.ownership);
+    if (registry) return registry;
+    const path = typeof rawLink?.path === "string" ? rawLink.path : "";
+    const shape = validateLinkShape(path, MARKDOWN_EXTENSION, LINK_REASON.NOT_MARKDOWN);
+    if (shape) return shape;
+    if (!isCanonicalVaultPath(args.canvasPath) || extensionOf(args.canvasPath) !== CANVAS_EXTENSION)
+      return reject(LINK_REASON.WRONG_CANVAS);
+    const binding = {
+      canvasPath: args.canvasPath,
+      kind: OWNERSHIP_KIND.MARKDOWN,
+      targetPath: path,
+      syncId: "0".repeat(SYNC_ID_LENGTH),
+      nodeId: null
+    };
+    const conflicts = conflictForAdoption(OWNERSHIP_STATES.get(args.ownership), binding);
+    if (conflicts.length > 0 && options.replaceExisting !== true)
+      return reject(LINK_REASON.ALREADY_OWNED);
+    const file = resolveVaultFile(args.vault, path, MARKDOWN_EXTENSION);
+    if (!file) return reject(LINK_REASON.MISSING_TARGET);
+    const text = await readVaultText(args.vault, file);
+    if (text === null) return reject(LINK_REASON.UNOWNED_TARGET);
+    const claimed = parseFrontmatterOwnership(text);
+    if (!claimed.ok) return claimed;
+    if (claimed.syncId !== null && options.replaceExisting !== true)
+      return reject(LINK_REASON.ALREADY_OWNED);
+    binding.syncId = createSyncId();
+    if (binding.syncId === "") return reject(LINK_REASON.UNOWNED_LINK);
+    const issued = args.ownership.issueRecord(binding);
+    if (!issued.ok) return issued;
+    const patch = patchSyncIdOwnership(text, issued.record.syncId);
+    if (!patch.ok) return patch;
+    const targetPatch = {
+      path,
+      file,
+      syncId: issued.record.syncId,
+      previousSyncId: claimed.syncId,
+      block: OWNERSHIP_BLOCK_KEY,
+      key: OWNERSHIP_FIELD_KEY,
+      scalar: encodeSyncIdScalar(issued.record.syncId),
+      lines: syncIdFrontmatterLines(issued.record.syncId),
+      markdown: patch.markdown
+    };
+    const link = {
+      path,
+      syncId: issued.record.syncId,
+      proof: issued.record.proof,
+      ownership: { source: "plugin-data" }
+    };
+    return {
+      ok: true,
+      link,
+      targetPatch,
+      // `adoption` is retained as a descriptive alias for callers migrating
+      // from the old mutation-free result shape.
+      adoption: targetPatch,
+      registryRecord: issued.record,
+      registryUpsert: {
+        record: issued.record,
+        replaceExisting: options.replaceExisting === true
+      },
+      replaces: replacementSummary(conflicts)
+    };
+  }
+
+  /** Read one vault file, or null when it cannot be read at all. */
+  function readVaultText(vault, file) {
+    if (typeof vault?.cachedRead !== "function") return Promise.resolve(null);
+    const advertisedSize = Number(file?.size ?? file?.stat?.size);
+    if (Number.isFinite(advertisedSize) && advertisedSize > MAX_LINK_TARGET_BYTES)
+      return Promise.resolve(null);
+    let raw = null;
+    try {
+      raw = vault.cachedRead(file);
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(raw).then(
+      (text) =>
+        typeof text === "string" && new TextEncoder().encode(text).byteLength <= MAX_LINK_TARGET_BYTES
+          ? text
+          : null,
+      () => null
+    );
+  }
+
+  /** Read a Canvas record, or null when it is missing or not readable JSON. */
+  function readCanvasRecord(vault, file) {
+    return readVaultText(vault, file).then((text) =>
+      text === null ? null : parseCanvasRecord(text)
+    );
+  }
+
+  function parseCanvasRecord(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text ?? ""));
+    } catch (_) {
+      return null;
+    }
+    // The Canvas schema is an object carrying a node and edge array.
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) return null;
+    if (data.nodes.length > MAX_LINK_NODES || data.edges.length > MAX_LINK_EDGES) return null;
+    return data;
+  }
+
+  /**
+   * The parent link may only address a card the plugin marked as a nested map
+   * and stamped with this link's relationship token, so neither a coincidental
+   * card id nor a copied token in the untrusted child Canvas is enough.
+   */
+  function findNestedMapCard(record, nodeId) {
+    let found = null;
+    let idSeen = false;
+    for (const node of record.nodes) {
+      if (!node || typeof node !== "object" || node.id !== nodeId) continue;
+      if (idSeen) return null;
+      idSeen = true;
+      if (typeof node.file !== "string" || !node.file) continue;
+      if (extensionOf(node.file) !== CANVAS_EXTENSION) continue;
+      if (node.unknownData?.[CARD_KIND_KEY] !== NESTED_MAP_CARD_KIND)
+        continue;
+      found = node;
+    }
+    return found;
+  }
+
+  function cardSyncState(card) {
+    const data = card?.unknownData;
+    if (!isObject(data) || !Object.prototype.hasOwnProperty.call(data, CARD_SYNC_KEY))
+      return { present: false, invalid: false, syncId: null };
+    const stored = data[CARD_SYNC_KEY];
+    if (typeof stored !== "string" || !SYNC_ID_PATTERN.test(stored))
+      return { present: true, invalid: true, syncId: null };
+    return { present: true, invalid: false, syncId: stored };
+  }
+
+  function cardUnknownDataPatch(card, syncId) {
+    const patch = {};
+    for (const [key, value] of Object.entries(card.unknownData)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+      if (!PRIVATE_OWNERSHIP_KEYS.has(key)) patch[key] = value;
+    }
+    patch[CARD_SYNC_KEY] = syncId;
+    return patch;
+  }
+
+  /**
+   * Validate a persisted parent link. A nested mind map may only patch the
+   * Canvas that actually holds its marked nested-map card carrying the very same
+   * relationship token, so the target has to satisfy the Canvas schema, own that
+   * card, and prove the relationship before any record is touched.
+   *
+   * @returns {Promise<{ok:true, link:{file:object, canvas:string, nodeId:string,
+   *   syncId:string, proof:string, ownership:{source:"plugin-data"}}} |
+   *   {ok:false, reason:string}>}
+   */
+  function resolveParentLink(rawLink, second, third, fourth, fifth) {
+    const args = resolveArguments(second, third, fourth, fifth);
+    if (!args) return Promise.resolve(reject(LINK_REASON.MISSING_REGISTRY));
+    const registry = validateRegistry(args.ownership);
+    if (registry) return Promise.resolve(registry);
+    const parsed = publicBinding(rawLink, OWNERSHIP_KIND.PARENT, args.canvasPath);
+    if (parsed.reason) return Promise.resolve(parsed);
+    const state = OWNERSHIP_STATES.get(args.ownership);
+    const found = ownershipLookup(state, parsed.binding, rawLink.proof);
+    if (!found.record) return Promise.resolve(found);
+    const file = resolveVaultFile(args.vault, parsed.binding.targetPath, CANVAS_EXTENSION);
+    if (!file) return Promise.resolve(reject(LINK_REASON.NOT_CANVAS));
+    return readCanvasRecord(args.vault, file).then((record) => {
+      if (!record) return reject(LINK_REASON.NOT_CANVAS);
+      const card = findNestedMapCard(record, rawLink.nodeId);
+      if (!card) return reject(LINK_REASON.NO_PARENT_CARD);
+      const cardClaim = cardSyncState(card);
+      if (cardClaim.invalid) return reject(LINK_REASON.MALFORMED_TARGET);
+      if (cardClaim.present && cardClaim.syncId !== parsed.binding.syncId)
+        return reject(LINK_REASON.UNOWNED_TARGET);
+      return {
+        ok: true,
+        link: {
+          file,
+          canvas: parsed.binding.targetPath,
+          nodeId: rawLink.nodeId,
+          syncId: parsed.binding.syncId,
+          proof: rawLink.proof,
+          ownership: { source: "plugin-data" }
+        }
+      };
+    });
+  }
+
+  /**
+   * Adopt a parent link recorded before ownership tokens existed, under the same
+   * explicit-confirmation policy as a Markdown sync link.
+   *
+   * Nothing is written here: the record read from the parent Canvas is never
+   * modified, and the result carries the exact `unknownData` the caller assigns
+   * to that card to record the relationship. A card another live child already
+   * owns is reported rather than taken over unless `replaceExisting` says the
+   * user agreed to that.
+   *
+   * @returns {Promise<{ok:true, link:object, adoption:{canvas:string, file:object,
+   *   nodeId:string, syncId:string, previousSyncId:string|null, key:string,
+   *   unknownDataPatch:object}} | {ok:false, reason:string}>}
+   */
+  async function adoptParentLink(rawLink, second, third, fourth, fifth) {
+    const args = resolveArguments(second, third, fourth, fifth);
+    if (!args) return reject(LINK_REASON.MISSING_REGISTRY);
+    const options = isObject(args.options) ? args.options : {};
+    if (options.confirmed !== true) return reject(LINK_REASON.NEEDS_CONFIRMATION);
+    const registry = validateRegistry(args.ownership);
+    if (registry) return registry;
+    const path = typeof rawLink?.canvas === "string" ? rawLink.canvas : "";
+    const shape = validateLinkShape(
+      path,
+      CANVAS_EXTENSION,
+      LINK_REASON.NOT_CANVAS,
+      rawLink?.nodeId
+    );
+    if (shape) return shape;
+    if (!isCanonicalVaultPath(args.canvasPath) || extensionOf(args.canvasPath) !== CANVAS_EXTENSION)
+      return reject(LINK_REASON.WRONG_CANVAS);
+    const binding = {
+      canvasPath: args.canvasPath,
+      kind: OWNERSHIP_KIND.PARENT,
+      targetPath: path,
+      syncId: "0".repeat(SYNC_ID_LENGTH),
+      nodeId: rawLink.nodeId
+    };
+    const conflicts = conflictForAdoption(OWNERSHIP_STATES.get(args.ownership), binding);
+    if (conflicts.length > 0 && options.replaceExisting !== true)
+      return reject(LINK_REASON.ALREADY_OWNED);
+    const file = resolveVaultFile(args.vault, path, CANVAS_EXTENSION);
+    if (!file) return reject(LINK_REASON.NOT_CANVAS);
+    const record = await readCanvasRecord(args.vault, file);
+    if (!record) return reject(LINK_REASON.NOT_CANVAS);
+    const card = findNestedMapCard(record, rawLink.nodeId);
+    if (!card || !isObject(card.unknownData)) return reject(LINK_REASON.NO_PARENT_CARD);
+    const cardClaim = cardSyncState(card);
+    if (cardClaim.invalid) return reject(LINK_REASON.MALFORMED_TARGET);
+    const previousSyncId = cardClaim.syncId;
+    if (previousSyncId !== null && options.replaceExisting !== true)
+      return reject(LINK_REASON.ALREADY_OWNED);
+    binding.syncId = createSyncId();
+    if (binding.syncId === "") return reject(LINK_REASON.UNOWNED_LINK);
+    const issued = args.ownership.issueRecord(binding);
+    if (!issued.ok) return issued;
+    const targetPatch = {
+      canvas: path,
+      file,
+      nodeId: rawLink.nodeId,
+      syncId: issued.record.syncId,
+      previousSyncId,
+      key: CARD_SYNC_KEY,
+      unknownDataPatch: cardUnknownDataPatch(card, issued.record.syncId)
+    };
+    const link = {
+      canvas: path,
+      nodeId: rawLink.nodeId,
+      syncId: issued.record.syncId,
+      proof: issued.record.proof,
+      ownership: { source: "plugin-data" }
+    };
+    return {
+      ok: true,
+      link,
+      targetPatch,
+      adoption: targetPatch,
+      registryRecord: issued.record,
+      registryUpsert: {
+        record: issued.record,
+        replaceExisting: options.replaceExisting === true
+      },
+      replaces: replacementSummary(conflicts)
+    };
+  }
+
+  /**
+   * The bidirectional lookup that answers "which Markdown feeds this Canvas"
+   * and "which Canvases does this Markdown feed".
+   *
+   * Startup walks every Canvas in the vault, so the index is bounded: a target
+   * that is already known always accepts more Canvases, and only a genuinely
+   * new target is refused once the limit is reached. Refusals are counted
+   * rather than thrown, so one oversized vault cannot stop the scan.
+   */
+  class MarkdownSyncIndex {
+    constructor({ limit = DEFAULT_INDEX_LIMIT } = {}) {
+      this.limit = Number.isFinite(limit) && limit > 0
+        ? Math.floor(limit)
+        : DEFAULT_INDEX_LIMIT;
+      this.dropped = 0;
+      this.markdownByCanvas = new Map();
+      this.canvasesByMarkdown = new Map();
+    }
+
+    get size() {
+      return this.canvasesByMarkdown.size;
+    }
+
+    /** Record a Canvas-to-Markdown link, replacing any previous target. */
+    link(canvasPath, markdownPath) {
+      if (!canvasPath || !markdownPath) return false;
+      const current = this.markdownByCanvas.get(canvasPath);
+      if (current === markdownPath) return true;
+      let canvases = this.canvasesByMarkdown.get(markdownPath);
+      if (!canvases && this.canvasesByMarkdown.size >= this.limit) {
+        this.dropped++;
+        return false;
+      }
+      this.unlink(canvasPath);
+      if (!canvases) {
+        canvases = new Set();
+        this.canvasesByMarkdown.set(markdownPath, canvases);
+      }
+      canvases.add(canvasPath);
+      this.markdownByCanvas.set(canvasPath, markdownPath);
+      return true;
+    }
+
+    /** Remove one Canvas from both directions, retiring a target with no peers. */
+    unlink(canvasPath) {
+      const markdownPath = this.detach(canvasPath);
+      if (markdownPath === "") return false;
+      const canvases = this.canvasesByMarkdown.get(markdownPath);
+      if (!canvases) return true;
+      canvases.delete(canvasPath);
+      if (canvases.size === 0) this.canvasesByMarkdown.delete(markdownPath);
+      return true;
+    }
+
+    detach(canvasPath) {
+      const markdownPath = this.markdownByCanvas.get(canvasPath) || "";
+      this.markdownByCanvas.delete(canvasPath);
+      return markdownPath;
+    }
+
+    markdownFor(canvasPath) {
+      return this.markdownByCanvas.get(canvasPath) || "";
+    }
+
+    canvasesFor(markdownPath) {
+      return Array.from(this.canvasesByMarkdown.get(markdownPath) || []);
+    }
+
+    /** A renamed Markdown target keeps every Canvas that synced with it. */
+    renameMarkdown(oldPath, newPath) {
+      if (!oldPath || !newPath || oldPath === newPath) return false;
+      const sourceCanvases = this.canvasesByMarkdown.get(oldPath);
+      if (!sourceCanvases) return false;
+      const destinationCanvases = this.canvasesByMarkdown.get(newPath) || new Set();
+      this.canvasesByMarkdown.delete(oldPath);
+      for (const canvasPath of sourceCanvases) {
+        destinationCanvases.add(canvasPath);
+        this.markdownByCanvas.set(canvasPath, newPath);
+      }
+      this.canvasesByMarkdown.set(newPath, destinationCanvases);
+      return true;
+    }
+
+    /** A renamed Canvas keeps its Markdown target under the new name. */
+    renameCanvas(oldPath, newPath) {
+      if (!oldPath || !newPath || oldPath === newPath) return false;
+      const markdownPath = this.markdownByCanvas.get(oldPath);
+      if (!markdownPath) return false;
+      const existingTarget = this.markdownByCanvas.get(newPath);
+      if (existingTarget && existingTarget !== markdownPath) return false;
+      this.markdownByCanvas.delete(oldPath);
+      this.markdownByCanvas.set(newPath, markdownPath);
+      const canvases = this.canvasesByMarkdown.get(markdownPath);
+      if (canvases) {
+        canvases.delete(oldPath);
+        canvases.add(newPath);
+      }
+      return true;
+    }
+
+    clear() {
+      this.markdownByCanvas.clear();
+      this.canvasesByMarkdown.clear();
+    }
+  }
+
+  /**
+   * One scheduler per Markdown target.
+   *
+   * A mind map writes in both directions, from several Canvases, on timers that
+   * a user outpaces. This module owns the resulting state machine so callers
+   * only hand over the newest state: each path has exactly one promise chain,
+   * so writes cannot finish out of order, and one generation, so a detach,
+   * rename, or dispose cannot be undone by work that is already in flight.
+   *
+   * A scheduled entry is a thunk rather than a value, which is what makes
+   * newest-state coalescing exact: a superseded state is never even computed.
+   */
+  class MarkdownSyncCoordinator {
+    constructor({ delay = DEFAULT_DEBOUNCE_MS, maxAttempts = MAX_SYNC_ATTEMPTS } = {}) {
+      this.delay = Number.isFinite(delay) && delay >= 0 ? delay : DEFAULT_DEBOUNCE_MS;
+      this.maxAttempts = Number.isFinite(maxAttempts) && maxAttempts > 0
+        ? Math.floor(maxAttempts)
+        : MAX_SYNC_ATTEMPTS;
+      this.entries = new Map();
+      this.disposing = false;
+      this.disposed = false;
+      this.drainPromise = null;
+      this.disposePromise = null;
+    }
+
+    entryFor(path) {
+      let entry = this.entries.get(path);
+      if (!entry) {
+        entry = {
+          path,
+          generation: 0,
+          chain: Promise.resolve(),
+          activeTask: null,
+          activeGeneration: -1,
+          timer: null,
+          pending: null,
+          last: null,
+          unsaved: false,
+          rejected: false
+        };
+        this.entries.set(path, entry);
+      }
+      return entry;
+    }
+
+    /**
+     * Queue the newest state for a path. Calling it again before the debounce
+     * elapses replaces the pending state rather than adding a second write.
+     */
+    rejectWhileDisposing(path) {
+      const entry = this.entries.get(path);
+      if (entry) {
+        entry.unsaved = true;
+        entry.rejected = true;
+        entry.last = reject(LINK_REASON.DISPOSING);
+      }
+      return Promise.resolve(reject(LINK_REASON.DISPOSING));
+    }
+
+    schedule(path, work) {
+      if (this.disposing || this.disposed)
+        return this.rejectWhileDisposing(path);
+      if (!path || typeof work !== "function") return this.flush(path, work);
+      const entry = this.entryFor(path);
+      entry.pending = work;
+      entry.unsaved = true;
+      entry.rejected = false;
+      this.clearTimer(entry);
+      entry.timer = setTimeout(() => {
+        entry.timer = null;
+        void this.run(entry);
+      }, this.delay);
+      return entry.chain;
+    }
+
+    /** Queue work that must not wait for the debounce window. */
+    apply(path, work) {
+      if (this.disposing || this.disposed)
+        return this.rejectWhileDisposing(path);
+      if (!path || typeof work !== "function")
+        return Promise.resolve(reject(LINK_REASON.NO_PENDING));
+      const entry = this.entryFor(path);
+      entry.unsaved = true;
+      entry.rejected = false;
+      this.clearTimer(entry);
+      return this.run(entry, work);
+    }
+
+    /**
+     * Run a path's pending state now. Returns the typed result of the write so
+     * a caller can present a conflict instead of assuming success.
+     */
+    flush(path, work) {
+      if (this.disposing || this.disposed)
+        return this.rejectWhileDisposing(path);
+      if (!path) return Promise.resolve(reject(LINK_REASON.NO_PENDING));
+      const entry = this.entryFor(path);
+      return this.flushEntry(entry, work);
+    }
+
+    flushEntry(entry, work = null) {
+      this.clearTimer(entry);
+      if (typeof work === "function") {
+        entry.pending = work;
+        entry.unsaved = true;
+        entry.rejected = false;
+      }
+      if (!entry.pending) {
+        entry.last = reject(LINK_REASON.NO_PENDING);
+        return Promise.resolve(entry.last);
+      }
+      return this.run(entry);
+    }
+
+    /**
+     * Run one unit of work on the path's chain, honouring the coalescing,
+     * retry, and generation rules. Never rejects: every outcome is typed, so one
+     * failing link cannot break the fan-out that follows it.
+     */
+    run(entry, work = null) {
+      const task = work || entry.pending;
+      if (task) entry.pending = null;
+      const generation = entry.generation;
+      if (task) {
+        entry.activeTask = task;
+        entry.activeGeneration = generation;
+      }
+      const started = entry.chain.then(() =>
+        this.attempt(entry, task, generation)
+      ).finally(() => {
+        if (task && entry.activeGeneration === generation && entry.activeTask === task) {
+          entry.activeTask = null;
+          entry.activeGeneration = -1;
+        }
+      });
+      // A rejection anywhere must not poison the chain for later writes.
+      entry.chain = started.then(noop, noop);
+      return started;
+    }
+
+    /**
+     * Compare-and-set: a conflict means someone else wrote first, so the same
+     * newest state is recomputed against a fresh read instead of being dropped.
+     */
+    async attempt(entry, task, generation) {
+      if (entry.generation !== generation) return reject(LINK_REASON.DETACHED);
+      if (!task) return reject(LINK_REASON.NO_PENDING);
+      let result = null;
+      for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+        result = await runWork(task, {
+          attempt,
+          generation,
+          path: entry.path,
+          isCurrent: () =>
+            entry.generation === generation &&
+            this.entries.get(entry.path) === entry
+        });
+        if (entry.generation !== generation) return reject(LINK_REASON.DETACHED);
+        // Only a compare-and-set loss is retried. An active edit, an undecodable
+        // document, and a real failure are all decisions the caller must see.
+        if (!result || result.ok || result.reason !== LINK_REASON.CONFLICT) break;
+        if (attempt === this.maxAttempts) break;
+      }
+      // A topic being edited keeps the newest Markdown generation pending, so
+      // leaving the editor applies it instead of losing it.
+      if (result && !result.ok && result.reason === LINK_REASON.EDITING)
+        entry.pending = entry.pending || task;
+      entry.last = result && typeof result === "object"
+        ? result
+        : reject(LINK_REASON.FAILED);
+      if (entry.last.ok) entry.unsaved = false;
+      else if (entry.last.reason !== LINK_REASON.DETACHED &&
+               entry.last.reason !== LINK_REASON.NO_PENDING)
+        entry.unsaved = true;
+      return entry.last;
+    }
+
+    clearTimer(entry) {
+      if (entry.timer === null) return;
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+
+    /** Stop synchronizing a target and drop its queued work. */
+    detach(path) {
+      const entry = this.entries.get(path);
+      if (!entry) return false;
+      this.clearTimer(entry);
+      entry.pending = null;
+      entry.generation++;
+      this.entries.delete(path);
+      return true;
+    }
+
+    /**
+     * Move a target's queued and in-flight work to its new name. The old name is
+     * detached first, so a write still running under the previous generation is
+     * abandoned rather than committed to a path the user just renamed away from.
+     */
+    rename(oldPath, newPath) {
+      if (this.disposing || this.disposed) return false;
+      if (!oldPath || !newPath || oldPath === newPath) return false;
+      const entry = this.entries.get(oldPath);
+      if (!entry) return false;
+      const pending = entry.pending || entry.activeTask;
+      const oldChain = entry.chain;
+      this.detach(oldPath);
+      if (!pending) return true;
+      const moved = this.entryFor(newPath);
+      moved.generation += 1;
+      this.clearTimer(moved);
+      moved.pending = pending;
+      moved.unsaved = true;
+      moved.rejected = false;
+      moved.chain = Promise.all([
+        oldChain.then(noop, noop),
+        moved.chain.then(noop, noop)
+      ]).then(noop);
+      return true;
+    }
+
+    /**
+     * Drain a stable snapshot. A write may enqueue a newer generation while an
+     * older promise is settling, so one pass is not enough. The bound makes a
+     * pathological producer fail visibly instead of spinning forever.
+     */
+    flushAll() {
+      if (this.drainPromise) return this.drainPromise;
+      this.drainPromise = this.drain().finally(() => {
+        this.drainPromise = null;
+      });
+      return this.drainPromise;
+    }
+
+    async drain() {
+      const failures = [];
+      for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
+        const entries = Array.from(this.entries.values());
+        const runs = [];
+        for (const entry of entries) {
+          if (entry.pending) runs.push(this.flushEntry(entry));
+          else runs.push(entry.chain);
+        }
+        const results = await Promise.all(runs);
+        results.forEach((result, index) => {
+          if (result && result.ok === false &&
+              result.reason !== LINK_REASON.NO_PENDING &&
+              result.reason !== LINK_REASON.DETACHED)
+            failures.push({ path: entries[index].path, result });
+        });
+        for (const entry of this.entries.values()) {
+          if (entry.rejected)
+            failures.push({ path: entry.path, result: entry.last || reject(LINK_REASON.DISPOSING) });
+        }
+        // A task can replace entry.chain while it is running. Await the latest
+        // chains as well as the snapshot promises before deciding it is drained.
+        await Promise.all(Array.from(this.entries.values()).map((entry) => entry.chain));
+        const remaining = Array.from(this.entries.values()).filter((entry) =>
+          entry.pending !== null || entry.timer !== null
+        );
+        if (remaining.length === 0) {
+          if (failures.length > 0) {
+            return {
+              ok: false,
+              reason: LINK_REASON.UNSAVED,
+              failures,
+              passes: pass
+            };
+          }
+          return { ok: true, passes: pass };
+        }
+      }
+      const pending = Array.from(this.entries.values())
+        .filter((entry) => entry.pending !== null || entry.timer !== null)
+        .map((entry) => entry.path);
+      return {
+        ok: false,
+        reason: LINK_REASON.DRAIN_LIMIT,
+        pending,
+        failures,
+        passes: MAX_DRAIN_PASSES
+      };
+    }
+
+    /** Dispose is idempotent; a failed drain keeps the unsaved entry visible. */
+    dispose() {
+      if (this.disposed) return Promise.resolve({ ok: true, alreadyDisposed: true });
+      if (this.disposePromise) return this.disposePromise;
+      this.disposing = true;
+      this.disposePromise = this.disposeInternal().finally(() => {
+        this.disposePromise = null;
+      });
+      return this.disposePromise;
+    }
+
+    async disposeInternal() {
+      const result = await this.flushAll();
+      if (!result.ok) {
+        // Permit an explicit recovery attempt after the caller has dealt with
+        // the surfaced generation; the failed entry is deliberately retained.
+        this.disposing = false;
+        return result;
+      }
+      for (const entry of Array.from(this.entries.values())) {
+        this.clearTimer(entry);
+        entry.pending = null;
+        entry.generation++;
+      }
+      this.entries.clear();
+      this.disposed = true;
+      this.disposing = false;
+      return result;
+    }
+  }
+
+  /** Run one attempt of a scheduled unit of work as a typed result. */
+  async function runWork(task, context) {
+    try {
+      const result = await task(context);
+      return result && typeof result === "object"
+        ? result
+        : reject(LINK_REASON.FAILED);
+    } catch (error) {
+      return { ok: false, reason: LINK_REASON.FAILED, error };
+    }
+  }
+
+  function noop() {}
+
+  module.exports = {
+    LINK_REASON,
+    DEFAULT_INDEX_LIMIT,
+    DEFAULT_DEBOUNCE_MS,
+    MARKDOWN_EXTENSION,
+    CANVAS_EXTENSION,
+    OWNERSHIP_SCHEMA,
+    OWNERSHIP_VERSION,
+    OWNERSHIP_KIND,
+    OWNERSHIP_BLOCK_KEY,
+    OWNERSHIP_FIELD_KEY,
+    CARD_SYNC_KEY,
+    createSyncId,
+    createMarkdownSyncOwnership,
+    loadMarkdownSyncOwnership,
+    MarkdownSyncOwnership,
+    OwnershipRegistry,
+    isCanonicalVaultPath,
+    parseFrontmatterOwnership,
+    decodeSyncIdScalar,
+    encodeSyncIdScalar,
+    syncIdFrontmatterLines,
+    patchSyncIdOwnership,
+    resolveMarkdownSyncLink,
+    resolveParentLink,
+    adoptMarkdownSyncLink,
+    adoptParentLink,
+    MarkdownSyncIndex,
+    MarkdownSyncCoordinator
+  };
+  return module.exports;
+})();
+// </tomindmap:module markdown-sync>
+// <tomindmap:module path-safety>
+var {
+  MAX_FILENAME_BYTES,
+  allocateFilePath,
+  portableFilenameStem
+} = (() => {
+  "use strict";
+  const module = { exports: {} };
+  const exports = module.exports;
+
+  const MAX_FILENAME_BYTES = 255;
+  const UTF8_ENCODER = new TextEncoder();
+  const WINDOWS_RESERVED_STEM =
+    /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]|CONIN\$|CONOUT\$)$/i;
+
+  function textGraphemes(value) {
+    if (
+      typeof Intl !== "undefined" &&
+      typeof Intl.Segmenter === "function"
+    ) {
+      const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+      return Array.from(segmenter.segment(value), (part) => part.segment);
+    }
+    return Array.from(value);
+  }
+
+  function trimTrailingFilenameCharacters(value) {
+    return value.replace(/[. ]+$/g, "");
+  }
+
+  function fitGraphemeBudget(value, maximumBytes) {
+    const budget = Math.max(0, Math.floor(maximumBytes));
+    let result = "";
+    let usedBytes = 0;
+    for (const grapheme of textGraphemes(value)) {
+      const bytes = UTF8_ENCODER.encode(grapheme).length;
+      if (usedBytes + bytes > budget) break;
+      result += grapheme;
+      usedBytes += bytes;
+    }
+    return trimTrailingFilenameCharacters(result);
+  }
+
+  function portableFilenameStem(title, maximumBytes = MAX_FILENAME_BYTES) {
+    const sanitized = trimTrailingFilenameCharacters(
+      String(title || "Untitled")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .replace(/[\\/:*?"<>|]/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
+    let stem = fitGraphemeBudget(sanitized || "Untitled", maximumBytes);
+    if (!stem) {
+      const budget = Math.floor(Number(maximumBytes));
+      if (!Number.isFinite(budget) || budget < 1)
+        throw new RangeError("Filename byte budget must be at least one");
+      stem = fitGraphemeBudget("x".repeat(budget), budget);
+    }
+    const reservedStem = trimTrailingFilenameCharacters(stem.split(".", 1)[0]);
+    if (WINDOWS_RESERVED_STEM.test(reservedStem)) {
+      stem = fitGraphemeBudget(`_${stem}`, maximumBytes) || "_";
+    }
+    return stem || "Untitled";
+  }
+
+  function portableExtension(value) {
+    const extension = fitGraphemeBudget(
+      String(value || "bin")
+        .replace(/^\.+/, "")
+        .replace(/[^A-Za-z0-9+.-]/g, "")
+        .slice(0, 32),
+      32
+    );
+    return extension || "bin";
+  }
+
+  function allocateFilePath(
+    folderPath,
+    title,
+    extension = "md",
+    pathExists = () => false
+  ) {
+    const folderSource = String(folderPath || "").replace(/\\/g, "/");
+    if (
+      /[\u0000-\u001f\u007f]/.test(folderSource) ||
+      folderSource.startsWith("/") ||
+      folderSource.split("/").some((segment) => segment === "." || segment === "..")
+    ) {
+      throw new TypeError("Filename folder must be a canonical relative vault path");
+    }
+    const folder = folderSource.replace(/^\/+|\/+$/g, "");
+    const suffixExtension = portableExtension(extension);
+    const extensionBudget = UTF8_ENCODER.encode(`.${suffixExtension}`).length;
+    const exists = typeof pathExists === "function" ? pathExists : () => false;
+    let index = 0;
+
+    while (true) {
+      const suffix = index === 0 ? "" : ` ${index}`;
+      const stemBudget = MAX_FILENAME_BYTES - extensionBudget - byteLength(suffix);
+      const stem = portableFilenameStem(title, stemBudget);
+      const basename = `${stem}${suffix}.${suffixExtension}`;
+      const candidate = folder ? `${folder}/${basename}` : basename;
+      if (!exists(candidate)) return candidate;
+      index++;
+    }
+  }
+
+  function byteLength(value) {
+    return UTF8_ENCODER.encode(value).length;
+  }
+
+  module.exports = {
+    MAX_FILENAME_BYTES,
+    allocateFilePath,
+    portableFilenameStem
+  };
+  return module.exports;
+})();
+// </tomindmap:module path-safety>
 
 /** Canvas palette color reserved for the automatic central topic. */
 var ROOT_TOPIC_COLOR = '6';
@@ -39290,13 +45669,42 @@ var {
   propagateDirection,
   countChildrenPerSide
 } = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
+  function validCanvasNodeId(value) {
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
+
+  function isGroupRecord(record) {
+    if (!record || typeof record !== "object")
+      return false;
+    const data = getCanvasNodeData(record);
+    return (record.type ?? data.type) === "group" || record.label !== undefined;
+  }
+
   function getGroupIds(canvas) {
     const ids = new Set();
-    for (const node of canvas.getData().nodes || []) {
-      if (node.type === "group")
-        ids.add(node.id);
+    let data = null;
+    try {
+      data = typeof canvas?.getData === "function" ? canvas.getData() : null;
+    } catch (_) {
+      data = null;
+    }
+    if (data && typeof data === "object" && Array.isArray(data.nodes)) {
+      for (const record of data.nodes) {
+        const id = validCanvasNodeId(record?.id);
+        if (id && isGroupRecord(record))
+          ids.add(id);
+      }
+    }
+    if (typeof canvas?.nodes?.values === "function") {
+      for (const node of canvas.nodes.values()) {
+        const id = validCanvasNodeId(node?.id);
+        if (id && isGroupRecord(node))
+          ids.add(id);
+      }
     }
     return ids;
   }
@@ -39340,16 +45748,40 @@ var {
     );
   }
 
+  function canvasDataRecord(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  }
+
+  function getCanvasNodeData(node) {
+    let data = null;
+    try {
+      data = typeof node?.getData === "function" ? node.getData() : null;
+    } catch (_) {
+      data = null;
+    }
+    const record = canvasDataRecord(data);
+    if (record)
+      return record;
+    try {
+      return canvasDataRecord(node?.unknownData) || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function isPersistedCollapsedNode(node) {
+    return getCanvasNodeData(node).collapsed === true;
+  }
+
   function buildForest(canvas, options = {}) {
     const includeHidden = options.includeHidden !== false;
     const groupIds = getGroupIds(canvas);
     const nodeMap = new Map();
-    for (const canvasNode of canvas.nodes.values()) {
-      if (groupIds.has(canvasNode.id))
+    for (const canvasNode of canvas?.nodes?.values?.() || []) {
+      const id = validCanvasNodeId(canvasNode?.id);
+      if (!id || groupIds.has(id))
         continue;
-      if (!includeHidden && isCollapsedCanvasNodeHidden(canvasNode))
-        continue;
-      nodeMap.set(canvasNode.id, {
+      nodeMap.set(id, {
         id: canvasNode.id,
         canvasNode,
         parent: null,
@@ -39381,11 +45813,11 @@ var {
       return true;
     };
 
-    for (const edge of canvas.edges.values()) {
-      if (edge?.__mindMapPreview)
+    for (const edge of canvas?.edges?.values?.() || []) {
+      if (!edge || edge.__mindMapPreview)
         continue;
-      const parent = nodeMap.get(edge.from?.node?.id);
-      const child = nodeMap.get(edge.to?.node?.id);
+      const parent = nodeMap.get(validCanvasNodeId(edge.from?.node?.id));
+      const child = nodeMap.get(validCanvasNodeId(edge.to?.node?.id));
       if (!parent || !child || parent === child || child.parent)
         continue;
       if (!joinComponents(parent.canvasNode.id, child.canvasNode.id))
@@ -39410,12 +45842,56 @@ var {
       setDepths(root, 0);
       assignDirections(root);
     }
+    const reachableCounts = new Map();
+    for (const root of roots) {
+      let count = 0;
+      const pending = [root];
+      const visited = new Set();
+      while (pending.length > 0) {
+        const current = pending.pop();
+        if (!current || visited.has(current)) continue;
+        visited.add(current);
+        count += 1;
+        for (let index = current.children.length - 1; index >= 0; index--)
+          pending.push(current.children[index]);
+      }
+      reachableCounts.set(root, count);
+    }
     roots.sort((left, right) =>
-      countReachable(right) - countReachable(left)
+      reachableCounts.get(right) - reachableCounts.get(left)
       || (Number(left.canvasNode.y) || 0) - (Number(right.canvasNode.y) || 0)
       || (Number(left.canvasNode.x) || 0) - (Number(right.canvasNode.x) || 0)
       || String(left.canvasNode.id).localeCompare(String(right.canvasNode.id))
     );
+    if (!includeHidden) {
+      const hiddenIds = new Set();
+      const pending = [...roots]
+        .reverse()
+        .map((node) => ({ node, hidden: false }));
+      while (pending.length > 0) {
+        const current = pending.pop();
+        if (!current?.node) continue;
+        const node = current.node;
+        if (current.hidden || isCollapsedCanvasNodeHidden(node.canvasNode)) {
+          hiddenIds.add(node.id);
+          for (let index = node.children.length - 1; index >= 0; index--)
+            pending.push({ node: node.children[index], hidden: true });
+          continue;
+        }
+        const childHidden = isPersistedCollapsedNode(node.canvasNode);
+        for (let index = node.children.length - 1; index >= 0; index--)
+          pending.push({ node: node.children[index], hidden: childHidden });
+      }
+      for (const id of hiddenIds) {
+        const hiddenNode = nodeMap.get(id);
+        const parent = hiddenNode?.parent;
+        if (!parent) continue;
+        const index = parent.children.indexOf(hiddenNode);
+        if (index >= 0) parent.children.splice(index, 1);
+        hiddenNode.parent = null;
+      }
+      return roots.filter((root) => !hiddenIds.has(root.id));
+    }
     return roots;
   }
 
@@ -39481,7 +45957,9 @@ var {
   }
 
   function propagateDirection(root, direction) {
-    const stack = [...root.children];
+    const stack = [];
+    for (let index = root.children.length - 1; index >= 0; index--)
+      stack.push(root.children[index]);
     const visited = new Set([root]);
     while (stack.length > 0) {
       const node = stack.pop();
@@ -39489,7 +45967,8 @@ var {
         continue;
       visited.add(node);
       node.direction = direction;
-      stack.push(...node.children);
+      for (let index = node.children.length - 1; index >= 0; index--)
+        stack.push(node.children[index]);
     }
   }
 
@@ -39577,15 +46056,31 @@ var {
 // </tomindmap:module tree-model>
 
 // <tomindmap:module node-operations>
-var { NodeOperations } = (() => {
+var {
+  NodeOperations
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
 
   var NodeOperations = class {
     constructor(canvasApi, config) {
       this.canvasApi = canvasApi;
       this.config = config;
     }
+    edgeTransferOptions(edge, includeId = true) {
+      return {
+        ...(includeId && edge?.id ? { id: edge.id } : {}),
+        ...(edge?.label !== undefined ? { label: edge.label } : {}),
+        ...(edge?.lineType !== undefined ? { lineType: edge.lineType } : {}),
+        ...(edge?.curve !== undefined ? { curve: edge.curve } : {}),
+        ...(edge?.curvature !== undefined ? { curvature: edge.curvature } : {}),
+        fromEnd: edge?.from?.end || "none",
+        toEnd: edge?.to?.end || "arrow"
+      };
+    }
+
     /**
      * Add a child node to the selected node.
      * If parent is root, places on the side with fewer children (ties go right).
@@ -39598,12 +46093,8 @@ var { NodeOperations } = (() => {
       const isRoot = parentTreeNode && !parentTreeNode.parent;
       let direction;
       if (isRoot && parentTreeNode) {
-        if (typeof this.config.isAutoAdjust === "function" && this.config.isAutoAdjust(canvas)) {
-          direction = parentTreeNode.children.length === 0 ? "right" : "left";
-        } else {
-          const counts = countChildrenPerSide(parentTreeNode);
-          direction = counts.left < counts.right ? "left" : "right";
-        }
+        const counts = countChildrenPerSide(parentTreeNode);
+        direction = counts.left < counts.right ? "left" : "right";
       } else {
         direction = this.detectDirection(canvas, parentNode);
       }
@@ -39630,14 +46121,17 @@ var { NodeOperations } = (() => {
       } else {
         y = parentNode.y + (parentNode.height - this.config.nodeHeight) / 2;
       }
-      ({ x, y } = this.findAvailablePosition(
+      const position = this.findAvailablePosition(
         canvas,
         x,
         y,
         this.config.nodeWidth,
         this.config.nodeHeight,
         "down"
-      ));
+      );
+      if (!position)
+        throw new Error("No free position is available for the new topic");
+      ({ x, y } = position);
       const newNode = this.canvasApi.createTextNode(
         canvas,
         x,
@@ -39646,12 +46140,20 @@ var { NodeOperations } = (() => {
         this.config.nodeWidth,
         this.config.nodeHeight
       );
+      if (!newNode) return null;
       if (parentNode.color)
         newNode.setColor(parentNode.color);
-      if (direction === "right") {
-        this.canvasApi.createEdge(canvas, parentNode, newNode, "right", "left", parentNode.color || void 0);
-      } else {
-        this.canvasApi.createEdge(canvas, parentNode, newNode, "left", "right", parentNode.color || void 0);
+      let edge = null;
+      try {
+        edge = direction === "right"
+          ? this.canvasApi.createEdge(canvas, parentNode, newNode, "right", "left", parentNode.color || void 0)
+          : this.canvasApi.createEdge(canvas, parentNode, newNode, "left", "right", parentNode.color || void 0);
+      } catch (_) {
+        edge = null;
+      }
+      if (!edge) {
+        this.canvasApi.removeNode(canvas, newNode);
+        return null;
       }
       canvas.requestSave();
       return newNode;
@@ -39683,14 +46185,18 @@ var { NodeOperations } = (() => {
         y = (currentNode.y + adjacent.y) / 2;
       } else {
         y = before ? currentNode.y - this.config.nodeHeight - this.config.verticalGap : currentNode.y + currentNode.height + this.config.verticalGap;
-        ({ x, y } = this.findAvailablePosition(
+        const position = this.findAvailablePosition(
           canvas,
           x,
           y,
           this.config.nodeWidth,
           this.config.nodeHeight,
           before ? "up" : "down"
-        ));
+        );
+        if (!position)
+          throw new Error("No free position is available for the new topic");
+        x = position.x;
+        y = position.y;
       }
       const newNode = this.canvasApi.createTextNode(
         canvas,
@@ -39700,12 +46206,20 @@ var { NodeOperations } = (() => {
         this.config.nodeWidth,
         this.config.nodeHeight
       );
+      if (!newNode) return null;
       if (currentNode.color)
         newNode.setColor(currentNode.color);
-      if (direction === "right") {
-        this.canvasApi.createEdge(canvas, parent, newNode, "right", "left", currentNode.color || void 0);
-      } else {
-        this.canvasApi.createEdge(canvas, parent, newNode, "left", "right", currentNode.color || void 0);
+      let edge = null;
+      try {
+        edge = direction === "right"
+          ? this.canvasApi.createEdge(canvas, parent, newNode, "right", "left", currentNode.color || void 0)
+          : this.canvasApi.createEdge(canvas, parent, newNode, "left", "right", currentNode.color || void 0);
+      } catch (_) {
+        edge = null;
+      }
+      if (!edge) {
+        this.canvasApi.removeNode(canvas, newNode);
+        return null;
       }
       canvas.requestSave();
       return newNode;
@@ -39719,14 +46233,17 @@ var { NodeOperations } = (() => {
       const direction = parent ? this.detectDirection(canvas, currentNode) : "right";
       let x = parent ? (parent.x + parent.width / 2 + currentNode.x + currentNode.width / 2) / 2 - this.config.nodeWidth / 2 : currentNode.x - this.config.nodeWidth - this.config.horizontalGap;
       let y = currentNode.y + (currentNode.height - this.config.nodeHeight) / 2;
-      ({ x, y } = this.findAvailablePosition(
+      const position = this.findAvailablePosition(
         canvas,
         x,
         y,
         this.config.nodeWidth,
         this.config.nodeHeight,
         "nearest"
-      ));
+      );
+      if (!position)
+        throw new Error("No free position is available for the new topic");
+      ({ x, y } = position);
       const newNode = this.canvasApi.createTextNode(
         canvas,
         x,
@@ -39735,25 +46252,75 @@ var { NodeOperations } = (() => {
         this.config.nodeWidth,
         this.config.nodeHeight
       );
+      if (!newNode) return null;
       if (currentNode.color)
         newNode.setColor(currentNode.color);
       if (parent) {
-        const edge = this.canvasApi.getOutgoingEdges(canvas, parent.id).find(
-          (candidate) => candidate.to.node.id === currentNode.id
-        );
-        if (edge) {
-          const fromSide = edge.from.side;
-          const toSide = edge.to.side;
-          canvas.removeEdge(edge);
-          this.canvasApi.invalidateEdgeIndex();
-          this.canvasApi.createEdge(canvas, parent, newNode, fromSide, toSide, currentNode.color || void 0);
-          this.canvasApi.createEdge(canvas, newNode, currentNode, fromSide, toSide, currentNode.color || void 0);
-        } else {
+        const edge = this.canvasApi.getParentEdge(canvas, currentNode);
+        if (!edge) {
+          this.canvasApi.removeNode(canvas, newNode);
+          return null;
+        }
+        const fromSide = edge.from.side || "right";
+        const toSide = edge.to.side || "left";
+        const color = edge.color || currentNode.color || void 0;
+        let firstEdge = null;
+        let secondEdge = null;
+        try {
+          firstEdge = this.canvasApi.createEdge(
+            canvas,
+            parent,
+            newNode,
+            fromSide,
+            toSide,
+            color,
+            this.edgeTransferOptions(edge, false)
+          );
+          if (!firstEdge) throw new Error("Canvas could not create the first replacement edge");
+          secondEdge = this.canvasApi.replaceEdge
+            ? this.canvasApi.replaceEdge(
+                canvas,
+                edge,
+                newNode,
+                currentNode,
+                fromSide,
+                toSide,
+                color,
+                this.edgeTransferOptions(edge, true)
+              )
+            : this.canvasApi.createEdge(
+                canvas,
+                newNode,
+                currentNode,
+                fromSide,
+                toSide,
+                color,
+                this.edgeTransferOptions(edge, true)
+              );
+          if (!secondEdge) throw new Error("Canvas could not create the second replacement edge");
+          if (!this.canvasApi.replaceEdge) {
+            for (const incoming of this.canvasApi.getIncomingEdges?.(canvas, currentNode) || []) {
+              if (incoming !== secondEdge) this.canvasApi.removeEdge?.(canvas, incoming);
+            }
+          }
+        } catch (_) {
+          if (firstEdge) this.canvasApi.removeEdge?.(canvas, firstEdge);
           this.canvasApi.removeNode(canvas, newNode);
           return null;
         }
       } else {
-        this.canvasApi.createEdge(canvas, newNode, currentNode, "right", "left", currentNode.color || void 0);
+        const edge = this.canvasApi.createEdge(
+          canvas,
+          newNode,
+          currentNode,
+          "right",
+          "left",
+          currentNode.color || void 0
+        );
+        if (!edge) {
+          this.canvasApi.removeNode(canvas, newNode);
+          return null;
+        }
       }
       canvas.requestSave();
       return newNode;
@@ -39780,7 +46347,7 @@ var { NodeOperations } = (() => {
             return { x, y: candidateY };
         }
       }
-      return { x, y };
+      return null;
     }
     /**
      * Delete a topic and its complete branch, returning its parent for focus.
@@ -39788,20 +46355,7 @@ var { NodeOperations } = (() => {
      */
     deleteSubtree(canvas, currentNode) {
       const parent = this.canvasApi.getParentNode(canvas, currentNode);
-      const descendants = [];
-      const visited = /* @__PURE__ */ new Set([currentNode.id]);
-      const queue = [currentNode.id];
-      for (let cursor = 0; cursor < queue.length; cursor++) {
-        const id = queue[cursor];
-        for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
-          const child = edge.to.node;
-          if (!visited.has(child.id)) {
-            visited.add(child.id);
-            descendants.push(child);
-            queue.push(child.id);
-          }
-        }
-      }
+      const descendants = this.canvasApi.getDescendantNodes(canvas, currentNode);
       for (let i = descendants.length - 1; i >= 0; i--) {
         this.canvasApi.removeNode(canvas, descendants[i]);
       }
@@ -39817,14 +46371,62 @@ var { NodeOperations } = (() => {
      */
     deleteAndFocusParent(canvas, currentNode) {
       const parent = this.canvasApi.getParentNode(canvas, currentNode);
-      const direction = this.detectDirection(canvas, currentNode);
       const orphans = this.canvasApi.getChildNodes(canvas, currentNode);
       if (parent) {
+        const completed = [];
         for (const orphan of orphans) {
-          if (direction === "right") {
-            this.canvasApi.createEdge(canvas, parent, orphan, "right", "left");
-          } else {
-            this.canvasApi.createEdge(canvas, parent, orphan, "left", "right");
+          const original = this.canvasApi.getParentEdge(canvas, orphan);
+          if (!original) return currentNode;
+          const fromSide = original.from?.side || "right";
+          const toSide = original.to?.side || "left";
+          const color = original.color || void 0;
+          let replacement = null;
+          try {
+            replacement = this.canvasApi.replaceEdge
+              ? this.canvasApi.replaceEdge(
+                  canvas,
+                  original,
+                  parent,
+                  orphan,
+                  fromSide,
+                  toSide,
+                  color,
+                  this.edgeTransferOptions(original, true)
+                )
+              : this.canvasApi.createEdge(
+                  canvas,
+                  parent,
+                  orphan,
+                  fromSide,
+                  toSide,
+                  color,
+                  this.edgeTransferOptions(original, false)
+                );
+            if (!replacement) throw new Error("Canvas could not reconnect the topic branch");
+            completed.push({ orphan, original, replacement });
+          } catch (_) {
+            for (const item of completed.reverse()) {
+              if (this.canvasApi.replaceEdge) {
+                this.canvasApi.replaceEdge(
+                  canvas,
+                  item.replacement,
+                  currentNode,
+                  item.orphan,
+                  item.original.from?.side || "right",
+                  item.original.to?.side || "left",
+                  item.original.color || void 0,
+                  this.edgeTransferOptions(item.original, true)
+                );
+              } else {
+                this.canvasApi.removeEdge(canvas, item.replacement);
+              }
+            }
+            return currentNode;
+          }
+        }
+        for (const item of completed) {
+          for (const edge of this.canvasApi.getIncomingEdges(canvas, item.orphan)) {
+            if (edge !== item.replacement) this.canvasApi.removeEdge(canvas, edge);
           }
         }
       }
@@ -39844,20 +46446,7 @@ var { NodeOperations } = (() => {
       if (!parent)
         return null;
       const parentCx = parent.x + parent.width / 2;
-      const allNodes = [node];
-      const visited = /* @__PURE__ */ new Set([node.id]);
-      const queue = [node.id];
-      for (let cursor = 0; cursor < queue.length; cursor++) {
-        const id = queue[cursor];
-        for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
-          const childId = edge.to.node.id;
-          if (!visited.has(childId)) {
-            visited.add(childId);
-            allNodes.push(edge.to.node);
-            queue.push(childId);
-          }
-        }
-      }
+      const allNodes = [node, ...this.canvasApi.getDescendantNodes(canvas, node)];
       for (const n of allNodes) {
         const newX = 2 * parentCx - n.x - n.width;
         n.moveTo({ x: newX, y: n.y });
@@ -39890,9 +46479,14 @@ var { NodeOperations } = (() => {
 // </tomindmap:module node-operations>
 
 // <tomindmap:module layout>
-var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, updateAllEdgeSides } = (() => {
+var {
+  LayoutEngine,
+  BranchColors
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
 
   function getCenter(node) {
     return {
@@ -39915,8 +46509,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
     for (const edge of canvas.edges.values()) {
       if (edge.__mindMapPreview)
         continue;
-      const fromNode = edge.from.node;
-      const toNode = edge.to.node;
+      const fromNode = edge?.from?.node;
+      const toNode = edge?.to?.node;
       if (!fromNode || !toNode)
         continue;
       const { fromSide, toSide } = computeEdgeSides(fromNode, toNode);
@@ -39981,13 +46575,29 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
     updateEdgeSides(canvas, options = {}) {
       updateAllEdgeSides(canvas, options.persist !== false);
     }
+    withHeightCache(callback) {
+      const previous = this._heightCache;
+      this._heightCache = new Map();
+      try {
+        return callback();
+      } finally {
+        this._heightCache = previous;
+      }
+    }
+
     layout(canvas, options = {}) {
+      return this.withHeightCache(() => this.layoutWithHeightCache(canvas, options));
+    }
+
+    layoutWithHeightCache(canvas, options = {}) {
       const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
       const nestedDirections = new Map();
       for (const root of forest) {
-        const stack = [...root.children];
+        const stack = [];
+        for (let index = root.children.length - 1; index >= 0; index--)
+          stack.push(root.children[index]);
         while (stack.length > 0) {
           const node = stack.pop();
           if (node.parent?.parent) {
@@ -39995,7 +46605,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
             const parentCenter = node.parent.canvasNode.x + node.parent.canvasNode.width / 2;
             nestedDirections.set(node.canvasNode.id, nodeCenter >= parentCenter ? "right" : "left");
           }
-          stack.push(...node.children);
+          for (let index = node.children.length - 1; index >= 0; index--)
+            stack.push(node.children[index]);
         }
       }
       const positions = /* @__PURE__ */ new Map();
@@ -40019,10 +46630,10 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         this.layoutGroup(root, rightChildren, "right", rootX, rootY, positions, layoutOptions);
         this.layoutGroup(root, leftChildren, "left", rootX, rootY, positions, layoutOptions);
       }
-      this.applyPositions(canvas, positions);
+      this.applyPositions(canvas, positions, options);
       if (options.persist !== false && options.displaceFloating !== false)
         this.displaceFloatingNodes(canvas, options);
-      updateAllEdgeSides(canvas);
+      updateAllEdgeSides(canvas, options.persist !== false);
       const override = options.branchDirectionOverride;
       if (override?.nodeId && override.direction) {
         const branch = findTreeForNode(forest, override.nodeId);
@@ -40036,10 +46647,16 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * outside this parent's subtree is untouched.
      */
     layoutChildren(canvas, parentNodeId, directionOverride = null, options = {}) {
-      const forest = buildForest(canvas, { includeHidden: false });
-      if (forest.length === 0)
-        return;
-      const parentTreeNode = findTreeForNode(forest, parentNodeId);
+      return this.withHeightCache(() => {
+        const forest = buildForest(canvas, { includeHidden: false });
+        if (forest.length === 0)
+          return;
+        const parentTreeNode = findTreeForNode(forest, parentNodeId);
+        this.layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride, options);
+      });
+    }
+    /** Layout one already-resolved topic from the shared visible forest. */
+    layoutTreeNodeChildren(canvas, parentTreeNode, directionOverride = null, options = {}) {
       if (!parentTreeNode || parentTreeNode.children.length === 0)
         return;
       const positions = /* @__PURE__ */ new Map();
@@ -40109,6 +46726,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * the same visual height as several short ones.
      */
     balanceRootChildren(root, preserveExistingSides = false, branchDirectionOverride = null) {
+      const heightCache = this._heightCache || new Map();
       const rootCx = root.canvasNode.x + root.canvasNode.width / 2;
       const byPosition = (a, b) => a.canvasNode.y - b.canvasNode.y || a.canvasNode.x - b.canvasNode.x || String(a.canvasNode.id).localeCompare(String(b.canvasNode.id));
       const right = root.children.filter((child) => child.canvasNode.x + child.canvasNode.width / 2 >= rootCx).sort(byPosition);
@@ -40142,7 +46760,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       let leftCount = 0;
       const addHeight = (total, count, height) => total + height + (count > 0 ? this.config.verticalGap : 0);
       if (pinnedChild && pinnedDirection) {
-        const height = this.measureSubtreeHeight(pinnedChild);
+        const height = this.measureSubtreeHeight(pinnedChild, heightCache);
         assignments.set(pinnedChild, pinnedDirection);
         if (pinnedDirection === "right") {
           rightHeight = height;
@@ -40153,7 +46771,7 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         }
       }
       const candidates = ordered
-        .map((child, index) => ({ child, index, height: this.measureSubtreeHeight(child) }))
+        .map((child, index) => ({ child, index, height: this.measureSubtreeHeight(child, heightCache) }))
         .filter(({ child }) => child !== pinnedChild)
         .sort((a, b) => b.height - a.height || a.index - b.index);
       for (const { child, height } of candidates) {
@@ -40179,12 +46797,17 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       }
       return { rightChildren, leftChildren };
     }
-    measureSubtreeHeight(node) {
-      const heights = /* @__PURE__ */ new Map();
+    measureSubtreeHeight(node, heights = this._heightCache || new Map()) {
+      if (!node) return this.config.nodeHeight;
+      if (heights.has(node)) return heights.get(node);
       const stack = [{ node, expanded: false }];
+      const visiting = new Set();
       while (stack.length > 0) {
         const current = stack.pop();
+        if (!current || heights.has(current.node)) continue;
         if (!current.expanded) {
+          if (visiting.has(current.node)) continue;
+          visiting.add(current.node);
           stack.push({ node: current.node, expanded: true });
           for (let index = current.node.children.length - 1; index >= 0; index--)
             stack.push({ node: current.node.children[index], expanded: false });
@@ -40193,11 +46816,11 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         const ownHeight = current.node.canvasNode.height || this.config.nodeHeight;
         let childHeight = 0;
         for (let index = 0; index < current.node.children.length; index++) {
-          if (index > 0)
-            childHeight += this.config.verticalGap;
+          if (index > 0) childHeight += this.config.verticalGap;
           childHeight += heights.get(current.node.children[index]) || 0;
         }
         heights.set(current.node, Math.max(ownHeight, childHeight));
+        visiting.delete(current.node);
       }
       return heights.get(node) || this.config.nodeHeight;
     }
@@ -40235,9 +46858,12 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       }
       const foldSign = direction === "left" ? -1 : 1;
       const { xOffsets, yOffsets, combinedContour } = this.foldPack(subtrees, subtrees.map(() => foldSign));
-      const contourExtents = Array.from(combinedContour.values());
-      const blockTop = Math.min(...contourExtents.map((extent) => extent.top));
-      const blockBottom = Math.max(...contourExtents.map((extent) => extent.bottom));
+      let blockTop = Number.POSITIVE_INFINITY;
+      let blockBottom = Number.NEGATIVE_INFINITY;
+      for (const extent of combinedContour.values()) {
+        blockTop = Math.min(blockTop, extent.top);
+        blockBottom = Math.max(blockBottom, extent.bottom);
+      }
       const globalShift = rootCenterY - (blockTop + blockBottom) / 2;
       for (let i = 0; i < subtrees.length; i++) {
         const xShift = xOffsets[i];
@@ -40248,74 +46874,162 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       }
     }
     /**
-     * Recursively lay out a node and all its descendants.
-     * Returns the contour (vertical extent per depth column).
+     * Lay out a node and all its descendants with one iterative postorder pass.
+     * A shared position map keeps the traversal stack-safe without copying every
+     * ancestor's subtree into a new map.
      */
     layoutSubtree(node, nodeX, nodeY, depth, direction, positions, options = {}, forcedDirection = false) {
-      const nodeH = node.canvasNode.height || this.config.nodeHeight;
-      const nodeW = node.canvasNode.width || this.config.nodeWidth;
-      positions.set(node.canvasNode.id, { x: nodeX, y: nodeY });
+      const entries = [];
+      const pending = [{
+        node,
+        depth,
+        direction,
+        forcedDirection,
+        originX: nodeX,
+        originY: nodeY,
+        parent: null,
+        children: []
+      }];
+      while (pending.length > 0) {
+        const current = pending.pop();
+        const nodeW = current.node.canvasNode.width || this.config.nodeWidth;
+        const nodeH = current.node.canvasNode.height || this.config.nodeHeight;
+        const entry = {
+          node: current.node,
+          depth: current.depth,
+          direction: current.direction,
+          children: current.children,
+          minX: current.originX,
+          maxX: current.originX + nodeW,
+          minY: current.originY,
+          maxY: current.originY + nodeH
+        };
+        positions.set(current.node.canvasNode.id, {
+          x: current.originX,
+          y: current.originY
+        });
+        if (current.parent)
+          current.parent.children.push(entry);
+        entries.push(entry);
+        for (let index = current.node.children.length - 1; index >= 0; index--) {
+          const child = current.node.children[index];
+          const isDirectionOverride = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
+          const childDirection = current.forcedDirection
+            ? current.direction
+            : isDirectionOverride
+              ? options.branchDirectionOverride.direction
+              : options.nestedDirections?.get(child.canvasNode.id) || current.direction;
+          const childW = child.canvasNode.width || this.config.nodeWidth;
+          const childX = childDirection === "right"
+            ? current.originX + nodeW + this.config.horizontalGap
+            : current.originX - childW - this.config.horizontalGap;
+          pending.push({
+            node: child,
+            depth: current.depth + 1,
+            direction: childDirection,
+            forcedDirection: current.forcedDirection || isDirectionOverride,
+            originX: childX,
+            originY: 0,
+            parent: entry,
+            children: []
+          });
+        }
+      }
+      const collectRectangles = (root) => {
+        const rectangles = [];
+        const stack = [root];
+        while (stack.length > 0) {
+          const current = stack.pop();
+          const position = positions.get(current.node.canvasNode.id);
+          if (position) {
+            rectangles.push({
+              left: position.x,
+              right: position.x + (current.node.canvasNode.width || this.config.nodeWidth),
+              top: position.y,
+              bottom: position.y + (current.node.canvasNode.height || this.config.nodeHeight)
+            });
+          }
+          for (let index = current.children.length - 1; index >= 0; index--)
+            stack.push(current.children[index]);
+        }
+        return rectangles;
+      };
+      const shiftSubtree = (root, dx, dy) => {
+        if (dx === 0 && dy === 0)
+          return;
+        const stack = [root];
+        while (stack.length > 0) {
+          const current = stack.pop();
+          const position = positions.get(current.node.canvasNode.id);
+          if (position) {
+            positions.set(current.node.canvasNode.id, {
+              x: position.x + dx,
+              y: position.y + dy
+            });
+          }
+          current.minX += dx;
+          current.maxX += dx;
+          current.minY += dy;
+          current.maxY += dy;
+          for (let index = current.children.length - 1; index >= 0; index--)
+            stack.push(current.children[index]);
+        }
+      };
+      for (let index = entries.length - 1; index >= 0; index--) {
+        const entry = entries[index];
+        if (entry.children.length === 0)
+          continue;
+        let xOffsets = [0];
+        let yOffsets = [0];
+        if (entry.children.length > 1) {
+          const childSubtrees = entry.children.map((child) => ({
+            contour: /* @__PURE__ */ new Map(),
+            rectangles: collectRectangles(child)
+          }));
+          const packed = this.foldPack(
+            childSubtrees,
+            entry.children.map((child) => child.direction === "left" ? -1 : 1)
+          );
+          xOffsets = packed.xOffsets;
+          yOffsets = packed.yOffsets;
+        }
+        let blockTop = Infinity;
+        let blockBottom = -Infinity;
+        for (let childIndex = 0; childIndex < entry.children.length; childIndex++) {
+          const child = entry.children[childIndex];
+          blockTop = Math.min(blockTop, child.minY + yOffsets[childIndex]);
+          blockBottom = Math.max(blockBottom, child.maxY + yOffsets[childIndex]);
+        }
+        const position = positions.get(entry.node.canvasNode.id);
+        const nodeH = entry.node.canvasNode.height || this.config.nodeHeight;
+        const centerShift = position.y + nodeH / 2 - (blockTop + blockBottom) / 2;
+        for (let childIndex = 0; childIndex < entry.children.length; childIndex++)
+          shiftSubtree(entry.children[childIndex], xOffsets[childIndex], yOffsets[childIndex] + centerShift);
+        for (const child of entry.children) {
+          entry.minX = Math.min(entry.minX, child.minX);
+          entry.maxX = Math.max(entry.maxX, child.maxX);
+          entry.minY = Math.min(entry.minY, child.minY);
+          entry.maxY = Math.max(entry.maxY, child.maxY);
+        }
+      }
       const contour = /* @__PURE__ */ new Map();
-      contour.set(depth, { top: nodeY, bottom: nodeY + nodeH });
-      const ownRectangle = { left: nodeX, right: nodeX + nodeW, top: nodeY, bottom: nodeY + nodeH };
-      if (node.children.length === 0)
-        return { contour, rectangles: [ownRectangle] };
-      const childSubtrees = [];
-      const childSigns = [];
-      for (const child of node.children) {
-        const isDirectionOverride = options.branchDirectionOverride?.nodeId === child.canvasNode.id;
-        const childDirection = forcedDirection
-          ? direction
-          : isDirectionOverride
-            ? options.branchDirectionOverride.direction
-            : options.nestedDirections?.get(child.canvasNode.id) || direction;
-        const childW = child.canvasNode.width || this.config.nodeWidth;
-        const childX = childDirection === "right" ? nodeX + nodeW + this.config.horizontalGap : nodeX - childW - this.config.horizontalGap;
-        const tempPositions = /* @__PURE__ */ new Map();
-        const childLayout = this.layoutSubtree(
-          child,
-          childX,
-          0,
-          depth + 1,
-          childDirection,
-          tempPositions,
-          options,
-          forcedDirection || isDirectionOverride
-        );
-        childSubtrees.push({ positions: tempPositions, contour: childLayout.contour, rectangles: childLayout.rectangles });
-        childSigns.push(childDirection === "left" ? -1 : 1);
-      }
-      const { xOffsets, yOffsets, combinedContour, combinedRectangles } = this.foldPack(childSubtrees, childSigns);
-      const contourExtents = Array.from(combinedContour.values());
-      const blockTop = Math.min(...contourExtents.map((extent) => extent.top));
-      const blockBottom = Math.max(...contourExtents.map((extent) => extent.bottom));
-      const centerShift = nodeY + nodeH / 2 - (blockTop + blockBottom) / 2;
-      for (let i = 0; i < childSubtrees.length; i++) {
-        const xShift = xOffsets[i];
-        const yShift = yOffsets[i] + centerShift;
-        for (const [id, pos] of childSubtrees[i].positions) {
-          positions.set(id, { x: pos.x + xShift, y: pos.y + yShift });
-        }
-      }
-      for (const [d, ext] of combinedContour) {
-        const shifted = { top: ext.top + centerShift, bottom: ext.bottom + centerShift };
-        const existing = contour.get(d);
-        if (existing) {
-          if (shifted.top < existing.top)
-            existing.top = shifted.top;
-          if (shifted.bottom > existing.bottom)
-            existing.bottom = shifted.bottom;
+      const rectangles = [];
+      for (const entry of entries) {
+        const position = positions.get(entry.node.canvasNode.id);
+        const height = entry.node.canvasNode.height || this.config.nodeHeight;
+        const width = entry.node.canvasNode.width || this.config.nodeWidth;
+        const extent = contour.get(entry.depth);
+        if (extent) {
+          extent.top = Math.min(extent.top, position.y);
+          extent.bottom = Math.max(extent.bottom, position.y + height);
         } else {
-          contour.set(d, { ...shifted });
+          contour.set(entry.depth, { top: position.y, bottom: position.y + height });
         }
-      }
-      const rectangles = [ownRectangle];
-      for (const rectangle of combinedRectangles) {
         rectangles.push({
-          left: rectangle.left,
-          right: rectangle.right,
-          top: rectangle.top + centerShift,
-          bottom: rectangle.bottom + centerShift
+          left: position.x,
+          right: position.x + width,
+          top: position.y,
+          bottom: position.y + height
         });
       }
       return { contour, rectangles };
@@ -40336,10 +47050,11 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      */
     getAdaptiveHorizontalGap(branches) {
       const list = branches || [];
+      const heightCache = this._heightCache || new Map();
       let height = 0;
       let maxDepth = 1;
       for (let index = 0; index < list.length; index++) {
-        height += this.measureSubtreeHeight(list[index]);
+        height += this.measureSubtreeHeight(list[index], heightCache);
         if (index > 0)
           height += this.compactVerticalGap();
         let depth = 0;
@@ -40392,7 +47107,9 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         }
         return { top, bottom, height: bottom - top, width: right - left };
       });
-      const pitch = Math.max(...extents.map((extent) => extent.width)) + this.config.horizontalGap;
+      let maximumExtent = 0;
+      for (const extent of extents) maximumExtent = Math.max(maximumExtent, extent.width);
+      const pitch = maximumExtent + this.config.horizontalGap;
       const xOffsets = [];
       const bands = /* @__PURE__ */ new Map();
       for (let i = 0; i < subtrees.length; i++) {
@@ -40485,7 +47202,9 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      */
     compactHorizontalSprings(canvas, roots, positions) {
       const gap = this.getAdaptiveHorizontalGap(roots);
-      const queue = [...(roots || [])];
+      const queue = [];
+      for (let index = (roots || []).length - 1; index >= 0; index--)
+        queue.push(roots[index]);
       while (queue.length > 0) {
         const node = queue.shift();
         const parentPos = positions.get(node.canvasNode.id);
@@ -40507,7 +47226,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
                 const movedPos = positions.get(moved.canvasNode.id);
                 if (movedPos)
                   positions.set(moved.canvasNode.id, { x: movedPos.x + delta, y: movedPos.y });
-                stack.push(...moved.children);
+                for (let index = moved.children.length - 1; index >= 0; index--)
+                   stack.push(moved.children[index]);
               }
             }
           }
@@ -40528,13 +47248,25 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       const forest = buildForest(canvas, { includeHidden: false });
       if (forest.length === 0)
         return;
+      // Resolve every grouped topic from this one forest instead of rebuilding it
+      // once per root.
+      const treeIndex = new Map();
+      const pending = [];
+      for (let index = forest.length - 1; index >= 0; index--)
+        pending.push(forest[index]);
+      while (pending.length > 0) {
+        const root = pending.pop();
+        treeIndex.set(root.canvasNode.id, root);
+        for (let index = root.children.length - 1; index >= 0; index--)
+          pending.push(root.children[index]);
+      }
       const roots = forest.filter((root) => {
         const cx = root.canvasNode.x + root.canvasNode.width / 2;
         const cy = root.canvasNode.y + root.canvasNode.height / 2;
         return cx >= group.x && cx <= group.x + group.width && cy >= group.y && cy <= group.y + group.height;
       });
       for (const root of roots) {
-        this.layoutChildren(canvas, root.canvasNode.id);
+        this.layoutTreeNodeChildren(canvas, treeIndex.get(root.canvasNode.id));
       }
       if (roots.length <= 1)
         return;
@@ -40579,7 +47311,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
       let cursorY = originY;
       const positions = /* @__PURE__ */ new Map();
       for (const row of rows) {
-        const rowHeight = Math.max(...row.map((i) => treeSizes[i].h));
+        let rowHeight = 0;
+        for (const index of row) rowHeight = Math.max(rowHeight, treeSizes[index].h);
         let cursorX = originX;
         for (const i of row) {
           const t = treeBboxes[i];
@@ -40801,7 +47534,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
      * Apply auto-coloring to all branches.
      */
     applyColors(canvas) {
-      const forest = buildForest(canvas, { includeHidden: false });
+      // Colors persist with the saved hierarchy, including a collapsed subtree.
+      const forest = buildForest(canvas);
       if (forest.length === 0)
         return;
       for (const root of forest) {
@@ -40824,7 +47558,8 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
         const incomingEdge = this.findIncomingEdge(canvas, current.canvasNode);
         if (incomingEdge)
           incomingEdge.setColor(color);
-        stack.push(...current.children);
+        for (let index = current.children.length - 1; index >= 0; index--)
+          stack.push(current.children[index]);
       }
     }
     /**
@@ -40843,9 +47578,14 @@ var { LayoutEngine, BranchColors, computeEdgeSides, registerDragEndHandler, upda
 // </tomindmap:module layout>
 
 // <tomindmap:module keyboard-navigation>
-var { KeyboardHandler, Navigation } = (() => {
+var {
+  KeyboardHandler,
+  Navigation
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
 
   function pointInRect(point, rect) {
   	return (
@@ -40956,7 +47696,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			name: 'Edit selected node',
   			checkCallback: (checking) => {
   				const canvas = this.canvasApi.getActiveCanvas();
-  				if (!canvas) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
   				const activeEl = document.activeElement;
   				if (activeEl && !canvas.wrapperEl.contains(activeEl))
   					return false;
@@ -40973,7 +47713,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			checkCallback: (checking) => {
   				var _a;
   				const canvas = this.canvasApi.getActiveCanvas();
-  				if (!canvas) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
   				const node = this.canvasApi.getSelectedNode(canvas);
   				if (!node) return false;
   				if (!node.isEditing) return false;
@@ -40987,7 +47727,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			checkCallback: (checking) => {
   				var _a;
   				const canvas = this.canvasApi.getActiveCanvas();
-  				if (!canvas) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
   				const node = this.canvasApi.getSelectedNode(canvas);
   				if (!node) return false;
   				if (checking) return true;
@@ -41000,7 +47740,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			checkCallback: (checking) => {
   				var _a;
   				const canvas = this.canvasApi.getActiveCanvas();
-  				if (!canvas) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
   				const node = this.canvasApi.getSelectedNode(canvas);
   				if (!node) return false;
   				if (checking) return true;
@@ -41012,10 +47752,9 @@ var { KeyboardHandler, Navigation } = (() => {
   			name: 'Add sibling topic before',
   			checkCallback: (checking) => {
   				const canvas = this.canvasApi.getActiveCanvas();
-  				const node = canvas
-  					? this.canvasApi.getSelectedNode(canvas)
-  					: null;
-  				if (!canvas || !node) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
   				if (checking) return true;
   				this.addSibling(canvas, node, true);
   			}
@@ -41025,10 +47764,9 @@ var { KeyboardHandler, Navigation } = (() => {
   			name: 'Add parent topic',
   			checkCallback: (checking) => {
   				const canvas = this.canvasApi.getActiveCanvas();
-  				const node = canvas
-  					? this.canvasApi.getSelectedNode(canvas)
-  					: null;
-  				if (!canvas || !node) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
   				if (checking) return true;
   				this.addParent(canvas, node);
   			}
@@ -41038,10 +47776,9 @@ var { KeyboardHandler, Navigation } = (() => {
   			name: 'Delete topic and branch',
   			checkCallback: (checking) => {
   				const canvas = this.canvasApi.getActiveCanvas();
-  				const node = canvas
-  					? this.canvasApi.getSelectedNode(canvas)
-  					: null;
-  				if (!canvas || !node) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
+  				const node = this.canvasApi.getSelectedNode(canvas);
+  				if (!node) return false;
   				if (checking) return true;
   				this.deleteBranch(canvas, node);
   			}
@@ -41052,7 +47789,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			checkCallback: (checking) => {
   				var _a;
   				const canvas = this.canvasApi.getActiveCanvas();
-  				if (!canvas) return false;
+  				if (!canvas || !this.isMindmapEnabled(canvas)) return false;
   				const node = this.canvasApi.getSelectedNode(canvas);
   				if (!node) return false;
   				if (checking) return true;
@@ -41794,7 +48531,7 @@ var { KeyboardHandler, Navigation } = (() => {
   			return;
   		// Deletion changes ancestor subtree heights. A partial child layout
   		// leaves those ancestors at stale coordinates until the next gesture.
-  		this.layoutEngine.layout(canvas);
+          this.layoutEngine.layout(canvas, { preserveRootSides: true });
   	}
   	navigate(canvas, node, direction) {
   		const target = this.findSpatialTarget(canvas, node, direction);
@@ -41816,10 +48553,19 @@ var { KeyboardHandler, Navigation } = (() => {
   		return true;
   	}
   	findSpatialTarget(canvas, current, direction) {
-  		const groupIds = getGroupIds(canvas);
-  		const all = Array.from(canvas.nodes.values()).filter(
-  			(node) => node.id !== current.id && !groupIds.has(node.id)
-  		);
+  		// Spatial navigation shares layout's visible projection; floating topics
+  		// remain roots in that forest and stay eligible.
+  		const all = [];
+  		const visibleForest = buildForest(canvas, { includeHidden: false });
+  		for (const root of visibleForest) {
+  			const stack = [root];
+  			while (stack.length > 0) {
+  				const node = stack.pop();
+  				if (node.canvasNode.id !== current.id) all.push(node.canvasNode);
+  				for (let index = node.children.length - 1; index >= 0; index--)
+  					stack.push(node.children[index]);
+  			}
+  		}
   		const buffer = Math.max(
   			0,
   			Number(this.plugin.settings.navigationCrossAxisBuffer) || 0
@@ -41946,18 +48692,22 @@ var { KeyboardHandler, Navigation } = (() => {
   			const bandB = Math.floor(b.alignment / 0.12);
   			return bandA - bandB || byDistance(a, b);
   		};
-  		const strictCorridor = ranked
-  			.filter((candidate) => candidate.inStrictCorridor)
-  			.sort(byDistance);
-  		if (strictCorridor.length > 0) return strictCorridor[0].node;
-  		const corridor = ranked
-  			.filter((candidate) => candidate.inCorridor)
-  			.sort(byAlignmentThenDistance);
-  		if (corridor.length > 0) return corridor[0].node;
-  		const wedge = ranked
-  			.filter((candidate) => candidate.inMapWedge)
-  			.sort(byAlignmentThenDistance);
-  		if (wedge.length > 0) return wedge[0].node;
+  		const topOne = (best, candidate, compare) =>
+  			!best || compare(candidate, best) < 0 ? candidate : best;
+  		let strictBest = null;
+  		let corridorBest = null;
+  		let wedgeBest = null;
+  		for (const candidate of ranked) {
+  			if (candidate.inStrictCorridor)
+  				strictBest = topOne(strictBest, candidate, byDistance);
+  			if (candidate.inCorridor)
+  				corridorBest = topOne(corridorBest, candidate, byAlignmentThenDistance);
+  			if (candidate.inMapWedge)
+  				wedgeBest = topOne(wedgeBest, candidate, byAlignmentThenDistance);
+  		}
+  		if (strictBest) return strictBest.node;
+  		if (corridorBest) return corridorBest.node;
+  		if (wedgeBest) return wedgeBest.node;
   		if (!this.plugin.settings.wrapArrowNavigation) return null;
   		const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   		const wrapOrigin =
@@ -42023,7 +48773,8 @@ var { KeyboardHandler, Navigation } = (() => {
   		// the apex of a fresh cone whose base is the two far-side map corners.
   		// A card touching the apex is inside the cone even though its directional
   		// delta is zero.
-  		const wrapRanked = ranked.map((candidate) => {
+  		let wrapBest = null;
+  		for (const candidate of ranked) {
   			const point = pointFacingOrigin(candidate.rect);
   			const dx = point.x - wrapOrigin.x;
   			const dy = point.y - wrapOrigin.y;
@@ -42051,7 +48802,7 @@ var { KeyboardHandler, Navigation } = (() => {
   						candidate.rect.bottom >= wrapOrigin.y - buffer
   					: candidate.rect.left <= wrapOrigin.x + buffer &&
   						candidate.rect.right >= wrapOrigin.x - buffer;
-  			return {
+  			const wrapCandidate = {
   				node: candidate.node,
   				primary,
   				cross,
@@ -42061,11 +48812,10 @@ var { KeyboardHandler, Navigation } = (() => {
   				inCorridor: primary > 1 && straight,
   				inMapWedge: rectIntersectsTriangle(candidate.rect, wrapTriangle)
   			};
-  		});
-  		const wrapWedge = wrapRanked
-  			.filter((candidate) => candidate.inMapWedge)
-  			.sort(byDistance);
-  		if (wrapWedge.length > 0) return wrapWedge[0].node;
+  			if (wrapCandidate.inMapWedge)
+  				wrapBest = topOne(wrapBest, wrapCandidate, byDistance);
+  		}
+  		if (wrapBest) return wrapBest.node;
   		return null;
   	}
   	collectBranchIds(canvas, node) {
@@ -42087,29 +48837,26 @@ var { KeyboardHandler, Navigation } = (() => {
   		const groupIds = getGroupIds(canvas);
   		const cx = current.x + current.width / 2;
   		const cy = current.y + current.height / 2;
-  		return (
-  			Array.from(canvas.nodes.values())
-  				.filter(
-  					(node) =>
-  						!excludedIds.has(node.id) && !groupIds.has(node.id)
-  				)
-  				.sort((a, b) => {
-  					const ad = Math.hypot(
-  						a.x + a.width / 2 - cx,
-  						a.y + a.height / 2 - cy
-  					);
-  					const bd = Math.hypot(
-  						b.x + b.width / 2 - cx,
-  						b.y + b.height / 2 - cy
-  					);
-  					return (
-  						ad - bd ||
-  						a.y - b.y ||
-  						a.x - b.x ||
-  						String(a.id).localeCompare(String(b.id))
-  					);
-  				})[0] || null
-  		);
+  		let best = null;
+  		let bestDistance = Infinity;
+  		for (const node of canvas.nodes.values()) {
+  			if (excludedIds.has(node.id) || groupIds.has(node.id)) continue;
+  			const distance = Math.hypot(
+  				node.x + node.width / 2 - cx,
+  				node.y + node.height / 2 - cy
+  			);
+  			if (best) {
+  				const comparison =
+  					distance - bestDistance ||
+  					node.y - best.y ||
+  					node.x - best.x ||
+  					String(node.id).localeCompare(String(best.id));
+  				if (comparison >= 0) continue;
+  			}
+  			best = node;
+  			bestDistance = distance;
+  		}
+  		return best;
   	}
   	clearSelection(canvas) {
   		if (typeof canvas.deselectAll === 'function') canvas.deselectAll();
@@ -42376,9 +49123,13 @@ var { KeyboardHandler, Navigation } = (() => {
 // </tomindmap:module keyboard-navigation>
 
 // <tomindmap:module touch-controls>
-var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (() => {
+var {
+  TouchControlsController
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   /**
    * Touch-first controls for mindmap canvases (XMind-style): tap selects (canvas
    * native), double-tap edits, long-press opens the full node menu, drag moves
@@ -42388,6 +49139,8 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
    * The gesture tracker is a pure state machine (no DOM) so tests can feed it
    * synthetic points and clocks.
    */
+
+  const LEGACY_POINTER_ID = '__legacy_pointer__';
 
   function createGestureTracker(options = {}) {
   	const longPressMs = typeof options.longPressMs === 'number' ? options.longPressMs : 450;
@@ -42399,6 +49152,7 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   	const onDragStart = options.onDragStart || (() => {});
 
   	let active = false;
+  	let activePointerId = null;
   	let target = null;
   	let startX = 0;
   	let startY = 0;
@@ -42414,10 +49168,22 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			timer = null;
   		}
   	};
+  	const clearDoubleTap = () => {
+  		lastTapTime = 0;
+  		lastTapTarget = null;
+  	};
 
   	return {
-  		pointerDown(targetId, x, y) {
+  		pointerDown(...args) {
+  			const hasPointerId = args.length >= 4;
+  			const pointerId = hasPointerId ? args[0] : LEGACY_POINTER_ID;
+  			const targetId = hasPointerId ? args[1] : args[0];
+  			const x = hasPointerId ? args[2] : args[1];
+  			const y = hasPointerId ? args[3] : args[2];
+  			if (active)
+  				return false;
   			active = true;
+  			activePointerId = pointerId;
   			target = targetId;
   			startX = x;
   			startY = y;
@@ -42426,34 +49192,48 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			clearTimer();
   			timer = setTimeout(() => {
   				timer = null;
-  				if (!active || moved) return;
+  				if (!active || activePointerId !== pointerId || moved) return;
   				longFired = true;
   				onLongPress({ target, x: startX, y: startY });
   			}, longPressMs);
+  			return true;
   		},
-  		pointerMove(x, y) {
-  			if (!active || moved) return;
+  		pointerMove(...args) {
+  			const hasPointerId = args.length >= 3;
+  			const pointerId = hasPointerId ? args[0] : activePointerId;
+  			const x = hasPointerId ? args[1] : args[0];
+  			const y = hasPointerId ? args[2] : args[1];
+  			if (!active || pointerId !== activePointerId || moved) return false;
   			if (Math.hypot(x - startX, y - startY) > moveTolerance) {
   				moved = true;
   				clearTimer();
   				// A drag breaks the double-tap window: whatever comes next is
   				// a fresh gesture.
-  				lastTapTime = 0;
-  				lastTapTarget = null;
+  				clearDoubleTap();
   				onDragStart({ target });
   			}
+  			return true;
   		},
-  		pointerUp(now = Date.now()) {
-  			if (!active) return null;
+  		pointerUp(...args) {
+  			const hasPointerId = args.length >= 2
+  				|| (args.length === 1 && active && args[0] === activePointerId);
+  			const pointerId = hasPointerId ? args[0] : activePointerId;
+  			const now = hasPointerId
+  				? (args.length > 1 ? args[1] : Date.now())
+  				: (args.length > 0 ? args[0] : Date.now());
+  			if (!active || pointerId !== activePointerId) return null;
   			active = false;
+  			activePointerId = null;
   			clearTimer();
   			if (moved) return 'drag';
-  			if (longFired) return 'longpress';
+  			if (longFired) {
+  				clearDoubleTap();
+  				return 'longpress';
+  			}
   			const isDouble =
   				lastTapTarget === target && now - lastTapTime <= doubleTapMs;
   			if (isDouble) {
-  				lastTapTime = 0;
-  				lastTapTarget = null;
+  				clearDoubleTap();
   				onDoubleTap({ target });
   				return 'doubletap';
   			}
@@ -42462,9 +49242,13 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			onTap({ target });
   			return 'tap';
   		},
-  		cancel() {
+  		cancel(pointerId = activePointerId) {
+  			if (active && pointerId !== activePointerId) return null;
   			active = false;
+  			activePointerId = null;
   			clearTimer();
+  			clearDoubleTap();
+  			return 'cancelled';
   		}
   	};
   }
@@ -42572,7 +49356,6 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			((node) => !!node && !!node.nodeEl && typeof node.setText === 'function');
   		this.selectedNode = null;
   		this.toolbarEl = null;
-  		this.lastPointerType = null;
   		this.longPressOpenedAt = 0;
   		this.tracker = createGestureTracker({
   			onDoubleTap: ({ target }) => {
@@ -42632,7 +49415,6 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   		const onPointerDown = (event) => {
   			if (!this.isEnabled()) return;
   			if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
-  			this.lastPointerType = event.pointerType;
   			const target = event.target;
   			if (
   				target?.closest?.(
@@ -42642,14 +49424,18 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   				return;
   			const node = this.getNodeAtEvent(event);
   			if (!node || !this.isTopicNode(node)) return;
-  			this.tracker.pointerDown(node.id, event.clientX, event.clientY);
+  			this.tracker.pointerDown(event.pointerId, node.id, event.clientX, event.clientY);
   		};
   		const onPointerMove = (event) => {
-  			this.tracker.pointerMove(event.clientX, event.clientY);
+  			this.tracker.pointerMove(event.pointerId, event.clientX, event.clientY);
   		};
-  		const onPointerUp = () => {
-  			this.tracker.pointerUp();
+  		const onPointerUp = (event) => {
+  			this.tracker.pointerUp(event.pointerId, Date.now());
   			// Let the canvas settle its own selection first.
+  			setTimeout(() => this.refresh(), 0);
+  		};
+  		const onPointerCancel = (event) => {
+  			this.tracker.cancel(event.pointerId);
   			setTimeout(() => this.refresh(), 0);
   		};
   		const onContextMenu = (event) => {
@@ -42664,7 +49450,7 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   		wrapper.addEventListener('pointerdown', onPointerDown, true);
   		wrapper.addEventListener('pointermove', onPointerMove, true);
   		wrapper.addEventListener('pointerup', onPointerUp, true);
-  		wrapper.addEventListener('pointercancel', onPointerUp, true);
+  		wrapper.addEventListener('pointercancel', onPointerCancel, true);
   		wrapper.addEventListener('contextmenu', onContextMenu, true);
   		this.refresh();
 
@@ -42672,7 +49458,7 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
   			wrapper.removeEventListener('pointerdown', onPointerDown, true);
   			wrapper.removeEventListener('pointermove', onPointerMove, true);
   			wrapper.removeEventListener('pointerup', onPointerUp, true);
-  			wrapper.removeEventListener('pointercancel', onPointerUp, true);
+  			wrapper.removeEventListener('pointercancel', onPointerCancel, true);
   			wrapper.removeEventListener('contextmenu', onContextMenu, true);
   			this.tracker.cancel();
   			toolbar.remove();
@@ -42748,45 +49534,69 @@ var { TouchControlsController, createGestureTracker, dispatchTouchAction } = (()
 // src/settings.ts
 var import_obsidian3 = require('obsidian');
 // <tomindmap:module settings>
-var { DEFAULT_SETTINGS, normalizeSettings } = (() => {
+var {
+  DEFAULT_SETTINGS,
+  SETTINGS_FIELDS,
+  normalizeSettings
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
-  const DEFAULT_SETTINGS = Object.freeze({
-    autoColor: true,
-    horizontalGap: 80,
-    verticalGap: 20,
-    minNodeWidth: 80,
-    maxNodeWidth: 1200,
-    defaultNodeWidth: 300,
-    defaultNodeHeight: 60,
-    maxNodeHeight: 2400,
-    defaultMindmapMode: true,
-    autoCreateRootTopic: true,
-    renameCanvasFromRootTopic: true,
-    wrapArrowNavigation: true,
-    navigationCrossAxisBuffer: 40,
-    navigationZoomPadding: 200,
-    mouseNavigation: false,
-    exportMarkmapFrontmatter: true,
-    markmapColorFreezeLevel: 2,
-    touchControls: 'auto'
-  });
 
-  const NUMBER_RULES = {
-    horizontalGap: [1, 2000],
-    verticalGap: [1, 2000],
-    minNodeWidth: [80, 12000],
-    maxNodeWidth: [80, 12000],
-    defaultNodeWidth: [80, 12000],
-    defaultNodeHeight: [20, 24000],
-    maxNodeHeight: [20, 24000],
-    navigationCrossAxisBuffer: [0, 2000],
-    navigationZoomPadding: [0, 10000],
-    markmapColorFreezeLevel: [0, 10]
-  };
+  const SETTINGS_FIELDS = Object.freeze([
+    Object.freeze({ key: "autoColor", type: "boolean", default: true }),
+    Object.freeze({ key: "horizontalGap", type: "number", default: 80, minimum: 1, maximum: 2000 }),
+    Object.freeze({ key: "verticalGap", type: "number", default: 20, minimum: 1, maximum: 2000 }),
+    Object.freeze({ key: "minNodeWidth", type: "number", default: 80, minimum: 80, maximum: 12000 }),
+    Object.freeze({
+      key: "maxNodeWidth",
+      type: "number",
+      default: 1200,
+      minimum: 80,
+      maximum: 12000,
+      legacy: Object.freeze({ value: 420 })
+    }),
+    Object.freeze({ key: "defaultNodeWidth", type: "number", default: 300, minimum: 80, maximum: 12000 }),
+    Object.freeze({ key: "defaultNodeHeight", type: "number", default: 60, minimum: 20, maximum: 24000 }),
+    Object.freeze({
+      key: "maxNodeHeight",
+      type: "number",
+      default: 2400,
+      minimum: 20,
+      maximum: 24000,
+      legacy: Object.freeze({ value: 300 })
+    }),
+    Object.freeze({ key: "defaultMindmapMode", type: "boolean", default: true }),
+    Object.freeze({ key: "autoCreateRootTopic", type: "boolean", default: true }),
+    Object.freeze({ key: "renameCanvasFromRootTopic", type: "boolean", default: true }),
+    Object.freeze({ key: "wrapArrowNavigation", type: "boolean", default: true }),
+    Object.freeze({ key: "navigationCrossAxisBuffer", type: "number", default: 40, minimum: 0, maximum: 2000 }),
+    Object.freeze({ key: "navigationZoomPadding", type: "number", default: 200, minimum: 0, maximum: 10000 }),
+    Object.freeze({ key: "mouseNavigation", type: "boolean", default: false }),
+    Object.freeze({ key: "exportMarkmapFrontmatter", type: "boolean", default: true }),
+    Object.freeze({ key: "markmapColorFreezeLevel", type: "number", default: 2, minimum: 0, maximum: 10 }),
+    Object.freeze({
+      key: "touchControls",
+      type: "enum",
+      default: "auto",
+      values: Object.freeze(["auto", "on", "off"])
+    })
+  ]);
+
+  const DEFAULT_SETTINGS = Object.freeze(
+    Object.fromEntries(SETTINGS_FIELDS.map((field) => [field.key, field.default]))
+  );
+
+  const NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
 
   function finiteInteger(value, fallback, minimum, maximum) {
-    const number = typeof value === "number" ? value : Number.parseFloat(String(value));
+    let number = value;
+    if (typeof value === "string") {
+      const candidate = value.trim();
+      number = NUMBER_PATTERN.test(candidate) ? Number(candidate) : Number.NaN;
+    } else if (typeof value !== "number") {
+      number = Number.NaN;
+    }
     if (!Number.isFinite(number))
       return fallback;
     return Math.min(maximum, Math.max(minimum, Math.round(number)));
@@ -42796,27 +49606,29 @@ var { DEFAULT_SETTINGS, normalizeSettings } = (() => {
     const source = stored && typeof stored === "object" ? stored : {};
     const result = { ...DEFAULT_SETTINGS };
 
-    for (const key of [
-      "autoColor",
-      "defaultMindmapMode",
-      "autoCreateRootTopic",
-      "renameCanvasFromRootTopic",
-      "wrapArrowNavigation",
-      "mouseNavigation",
-      "exportMarkmapFrontmatter"
-    ]) {
-      if (typeof source[key] === "boolean")
-        result[key] = source[key];
+    for (const field of SETTINGS_FIELDS) {
+      const value = source[field.key];
+      if (field.type === "boolean") {
+        if (typeof value === "boolean") result[field.key] = value;
+      } else if (field.type === "number") {
+        result[field.key] = finiteInteger(
+          value,
+          field.default,
+          field.minimum,
+          field.maximum
+        );
+      } else if (field.type === "enum" && field.values.includes(value)) {
+        result[field.key] = value;
+      }
     }
 
-    for (const [key, [minimum, maximum]] of Object.entries(NUMBER_RULES)) {
-      result[key] = finiteInteger(source[key], DEFAULT_SETTINGS[key], minimum, maximum);
+    // Legacy releases persisted these former safety ceilings. Apply migration
+    // only after every stored representation has gone through the descriptor.
+    for (const field of SETTINGS_FIELDS) {
+      if (field.legacy && result[field.key] === field.legacy.value) {
+        result[field.key] = field.default;
+      }
     }
-
-    result.touchControls =
-      source.touchControls === 'on' || source.touchControls === 'off'
-        ? source.touchControls
-        : 'auto';
 
     // Keep the three width settings internally coherent even when data.json was
     // hand-edited or came from an older version.
@@ -42829,14 +49641,25 @@ var { DEFAULT_SETTINGS, normalizeSettings } = (() => {
     return result;
   }
 
-  module.exports = { DEFAULT_SETTINGS, normalizeSettings };
+  module.exports = { DEFAULT_SETTINGS, SETTINGS_FIELDS, normalizeSettings };
   return module.exports;
 })();
 // </tomindmap:module settings>
 // <tomindmap:module media-drop>
-var MediaDrop = (() => {
+var {
+  createFileNodeSpec,
+  createLinkNodeSpec,
+  decodeMediaResource,
+  droppedUrl,
+  hasSupportedDrop,
+  linkLabel,
+  mediaKind,
+  mediaNodeSize
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
   const VIDEO_EXTENSIONS = new Set(["m4v", "mov", "mp4", "ogv", "webm"]);
   const AUDIO_EXTENSIONS = new Set(["flac", "m4a", "mp3", "oga", "ogg", "wav"]);
@@ -42883,11 +49706,14 @@ var MediaDrop = (() => {
   }
 
   function createFileNodeSpec(filePath, mimeType, position, settings = {}, id = "") {
-    const size = mediaNodeSize(filePath, mimeType, settings);
+    const resource = decodeMediaResource(filePath);
+    if (!resource.ok || resource.type !== "vault-file" || resource.protocol)
+      return null;
+    const size = mediaNodeSize(resource.path, mimeType, settings);
     return {
       id,
       type: "file",
-      file: filePath,
+      file: resource.path,
       x: Number(position?.x) || 0,
       y: Number(position?.y) || 0,
       width: size.width,
@@ -42895,68 +49721,209 @@ var MediaDrop = (() => {
     };
   }
 
-  function extractFilePathFromUrl(url) {
-    if (!url) return null;
-    let str = String(url).trim();
+  const SUPPORTED_MEDIA_PROTOCOLS = Object.freeze([
+    "app:",
+    "file:",
+    "http:",
+    "https:",
+    "obsidian:"
+  ]);
+  const SUPPORTED_MEDIA_PROTOCOL_SET = new Set(SUPPORTED_MEDIA_PROTOCOLS);
 
-    // 1. Wikilink [[Path/To/Note]] or embed ![[Path/To/Note|Alias]]
-    if ((str.startsWith("[[") || str.startsWith("![[")) && str.endsWith("]]")) {
-      const offset = str.startsWith("![[") ? 3 : 2;
-      let inner = str.slice(offset, -2).split("|")[0].trim();
-      if (!inner.includes(".")) inner += ".md";
-      return inner;
-    }
+  function resourceSourceDirectory(sourcePath) {
+    const normalized = String(sourcePath || "")
+      .replace(/\\/g, "/")
+      .replace(/\/+$/g, "");
+    const separator = normalized.lastIndexOf("/");
+    return separator >= 0 ? normalized.slice(0, separator) : "";
+  }
 
-    // 2. Markdown link [Text](path)
-    const mdMatch = str.match(/^!?\[.*?\]\((.*?)\)$/);
-    if (mdMatch) {
-      str = mdMatch[1].trim();
-      if (str.startsWith("<") && str.endsWith(">"))
-        str = str.slice(1, -1).trim();
-    }
-
-    // 3. obsidian:// URIs (e.g. obsidian://open?vault=...&file=...)
-    if (str.startsWith("obsidian:")) {
-      try {
-        const u = new URL(str);
-        if (u.searchParams.has("file")) {
-          return u.searchParams.get("file");
-        }
-      } catch (_) {}
-    }
-
-    // 4. app://... (Obsidian internal resource URLs)
-    if (str.startsWith("app://")) {
-      try {
-        const parsed = new URL(str);
-        return decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
-      } catch (_) {}
-    }
-
-    // 5. file:// URIs
-    if (str.startsWith("file://")) {
-      try {
-        return decodeURIComponent(new URL(str).pathname);
-      } catch (_) {}
-    }
-
-    // 6. Direct vault paths. Keep this extension-agnostic so audio, video,
-    // office documents, and plugin-defined file types are supported too.
-    // Remote resources must remain link nodes. A URL ending in ".pdf" is not a
-    // vault path and Canvas cannot render it as a native file card.
-    if (/^[a-z][a-z0-9+.-]*:/i.test(str)) {
+  function decodedResourcePart(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
       return null;
     }
-    const cleanStr = str.replace(/[?#].*$/, "");
-    if (/(?:^|\/)[^/]+\.[a-z0-9][a-z0-9._-]{0,20}$/i.test(cleanStr)) {
-      try {
-        return decodeURIComponent(cleanStr);
-      } catch (_) {
-        return cleanStr;
+  }
+
+  function normalizedVaultPath(value, { allowAbsolute = false } = {}) {
+    const decoded = decodedResourcePart(value);
+    if (decoded === null) return null;
+    if (/[\u0000-\u001f\u007f]/.test(decoded)) return null;
+    const normalized = decoded.replace(/\\/g, "/");
+    const absolute = allowAbsolute && normalized.startsWith("/");
+    const path = absolute || !allowAbsolute
+      ? normalized.replace(/^\/+/, "")
+      : normalized;
+    const segments = path.split("/");
+    if (segments.some((segment) => segment === "." || segment === "..")) return null;
+    if (!path || (!absolute && path.startsWith("/"))) return null;
+    return absolute ? `/${path.replace(/^\/+/, "")}` : path;
+  }
+
+  function splitResourceReference(value) {
+    const source = String(value || "");
+    const hash = source.indexOf("#");
+    const fragmentSource = hash >= 0 ? source.slice(hash + 1) : "";
+    const withoutFragment = hash >= 0 ? source.slice(0, hash) : source;
+    const query = withoutFragment.indexOf("?");
+    return {
+      pathSource: query >= 0 ? withoutFragment.slice(0, query) : withoutFragment,
+      fragmentSource
+    };
+  }
+
+  function decodedMediaResult(type, value, sourceDirectory, options = {}) {
+    return {
+      ok: true,
+      type,
+      value,
+      path: type === "vault-file" ? value : null,
+      fragment: options.fragment ?? null,
+      protocol: options.protocol ?? null,
+      sourceDirectory,
+      input: String(options.input || "")
+    };
+  }
+
+  function failedMediaResult(reason, sourceDirectory, input, protocol = null) {
+    return {
+      ok: false,
+      reason,
+      protocol,
+      sourceDirectory,
+      input: String(input || "")
+    };
+  }
+
+  function invalidVaultPathResult(pathSource, sourceDirectory, input, protocol = null) {
+    const reason =
+      pathSource.includes("%") && decodedResourcePart(pathSource) === null
+        ? "invalid-encoding"
+        : "invalid-resource";
+    return failedMediaResult(reason, sourceDirectory, input, protocol);
+  }
+
+  function hasFileExtension(path) {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const dot = name.lastIndexOf(".");
+    return dot > 0 && dot < name.length - 1;
+  }
+
+  /** Decode one dropped/persisted resource into a validated discriminated result. */
+  function decodeMediaResource(value, sourcePath = "") {
+    const sourceDirectory = resourceSourceDirectory(sourcePath);
+    const input = String(value || "").trim();
+    const malformedWikiLink =
+      (input.startsWith("[[") || input.startsWith("![[")) &&
+      !input.endsWith("]]");
+    const malformedMarkdownLink =
+      ((input.startsWith("![") && input.includes("](")) ||
+        /^\[[^\]]*\]\(/.test(input)) &&
+      !/^!?\[[^\]]*\]\(.*\)$/.test(input);
+    if (!input || input.startsWith("//") || malformedWikiLink || malformedMarkdownLink) {
+      return failedMediaResult("invalid-resource", sourceDirectory, input);
+    }
+
+    let target = input;
+    if ((input.startsWith("[[") || input.startsWith("![[")) && input.endsWith("]]")) {
+      const offset = input.startsWith("![[") ? 3 : 2;
+      target = input.slice(offset, -2).split("|", 1)[0].trim();
+      const { pathSource } = splitResourceReference(target);
+      const decoded = normalizedVaultPath(pathSource);
+      if (decoded === null) {
+        return invalidVaultPathResult(pathSource, sourceDirectory, input);
+      }
+      const path = hasFileExtension(decoded) ? decoded : `${decoded}.md`;
+      const { fragmentSource } = splitResourceReference(target);
+      const fragment = fragmentSource ? decodedResourcePart(fragmentSource) : "";
+      if (fragment === null) {
+        return failedMediaResult("invalid-encoding", sourceDirectory, input);
+      }
+      return decodedMediaResult("vault-file", path, sourceDirectory, {
+        fragment: fragment || null,
+        input
+      });
+    }
+
+    const markdown = input.match(/^!?\[[^\]]*\]\((.*)\)$/);
+    if (markdown) {
+      target = markdown[1].trim();
+      if (target.startsWith("<") && target.endsWith(">")) {
+        target = target.slice(1, -1).trim();
       }
     }
 
-    return null;
+    const scheme = target.match(/^([a-z][a-z0-9+.-]*:)/i)?.[1]?.toLowerCase() || null;
+    if (scheme) {
+      if (!SUPPORTED_MEDIA_PROTOCOL_SET.has(scheme)) {
+        return failedMediaResult("unsupported-protocol", sourceDirectory, input, scheme);
+      }
+      let parsed;
+      try {
+        parsed = new URL(target);
+      } catch (_) {
+        return failedMediaResult("invalid-resource", sourceDirectory, input, scheme);
+      }
+      const fragment = parsed.hash ? decodedResourcePart(parsed.hash.slice(1)) : "";
+      if (fragment === null) {
+        return failedMediaResult("invalid-encoding", sourceDirectory, input, scheme);
+      }
+      if (scheme === "http:" || scheme === "https:") {
+        return decodedMediaResult("link", parsed.href, sourceDirectory, {
+          fragment: fragment || null,
+          protocol: scheme,
+          input
+        });
+      }
+      if (scheme === "obsidian:") {
+        const file = parsed.searchParams.get("file");
+        if (!file) {
+          return decodedMediaResult("link", parsed.href, sourceDirectory, {
+            fragment: fragment || null,
+            protocol: scheme,
+            input
+          });
+        }
+        const path = normalizedVaultPath(file, { allowAbsolute: true });
+        if (path === null) {
+          return invalidVaultPathResult(file, sourceDirectory, input, scheme);
+        }
+        return decodedMediaResult("vault-file", path, sourceDirectory, {
+          fragment: fragment || null,
+          protocol: scheme,
+          input
+        });
+      }
+      const path = normalizedVaultPath(parsed.pathname, {
+        allowAbsolute: scheme === "file:"
+      });
+      if (path === null) {
+        return invalidVaultPathResult(parsed.pathname, sourceDirectory, input, scheme);
+      }
+      return decodedMediaResult("vault-file", path, sourceDirectory, {
+        fragment: fragment || null,
+        protocol: scheme,
+        input
+      });
+    }
+
+    const { pathSource, fragmentSource } = splitResourceReference(target);
+    const path = normalizedVaultPath(pathSource);
+    const fragment = fragmentSource ? decodedResourcePart(fragmentSource) : "";
+    if (path === null) {
+      return invalidVaultPathResult(pathSource, sourceDirectory, input);
+    }
+    if (fragment === null) {
+      return failedMediaResult("invalid-encoding", sourceDirectory, input);
+    }
+    if (!hasFileExtension(path)) {
+      return failedMediaResult("invalid-resource", sourceDirectory, input);
+    }
+    return decodedMediaResult("vault-file", path, sourceDirectory, {
+      fragment: fragment || null,
+      input
+    });
   }
 
   function obsidianDragPath(payload) {
@@ -42985,14 +49952,15 @@ var MediaDrop = (() => {
   }
 
   function createLinkNodeSpec(url, position, settings = {}, id = "") {
-    const filePath = extractFilePathFromUrl(url);
-    const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(String(url || "").trim());
-    if (filePath && !hasUriScheme) {
-      const size = mediaNodeSize(filePath, "", settings);
+    const resource = decodeMediaResource(url);
+    if (!resource.ok) return null;
+
+    if (resource.type === "vault-file" && !resource.protocol) {
+      const size = mediaNodeSize(resource.path, "", settings);
       return {
         id,
         type: "file",
-        file: filePath,
+        file: resource.path,
         x: Number(position?.x) || 0,
         y: Number(position?.y) || 0,
         width: size.width,
@@ -43000,12 +49968,11 @@ var MediaDrop = (() => {
       };
     }
 
-    const isObsidianUrl = String(url || "").startsWith("obsidian:");
-    if (isObsidianUrl) {
+    if (resource.protocol === "obsidian:") {
       return {
         id,
         type: "text",
-        text: `[Obsidian link](<${url}>)`,
+        text: `[Obsidian link](<${resource.input}>)`,
         x: Number(position?.x) || 0,
         y: Number(position?.y) || 0,
         width: 420,
@@ -43016,7 +49983,7 @@ var MediaDrop = (() => {
     return {
       id,
       type: "link",
-      url,
+      url: resource.input,
       x: Number(position?.x) || 0,
       y: Number(position?.y) || 0,
       width: 480,
@@ -43041,7 +50008,9 @@ var MediaDrop = (() => {
     // Check application/x-obsidian-app-file first (Obsidian file explorer drag)
     if (obsidianAppFile) {
       const path = obsidianDragPath(obsidianAppFile);
-      if (path) return path;
+      const resource = decodeMediaResource(path);
+      if (!resource.ok) return "";
+      return resource.protocol ? path : resource.value;
     }
 
     const candidate = uriList
@@ -43050,31 +50019,9 @@ var MediaDrop = (() => {
       .find((line) => line && !line.startsWith("#"))
       || plainText.trim();
 
-    if (!candidate) return "";
-
-    if (candidate.startsWith("obsidian:") || candidate.startsWith("http:") || candidate.startsWith("https:") || candidate.startsWith("app://") || candidate.startsWith("file://")) {
-      return candidate;
-    }
-
-    if (candidate.startsWith("[[") && candidate.includes("]]")) {
-      return candidate;
-    }
-
-    const extracted = extractFilePathFromUrl(candidate);
-    if (extracted) {
-      return extracted;
-    }
-
-    try {
-      const url = new URL(candidate);
-      return ["http:", "https:", "obsidian:", "app:", "file:"].includes(url.protocol) ? url.href : candidate;
-    } catch (_) {
-      if (candidate.includes("/") || candidate.endsWith(".md") || candidate.endsWith(".canvas")) {
-        return candidate;
-      }
-    }
-
-    return "";
+    const resource = decodeMediaResource(candidate);
+    if (!resource.ok) return "";
+    return resource.protocol ? candidate : resource.value;
   }
 
   function hasSupportedDrop(dataTransfer) {
@@ -43082,11 +50029,7 @@ var MediaDrop = (() => {
       return false;
     if (dataTransfer.files?.length > 0)
       return true;
-    if (dataTransfer.types && Array.from(dataTransfer.types).includes("application/x-obsidian-app-file"))
-      return true;
-    if (droppedUrl(dataTransfer))
-      return true;
-    return Array.from(dataTransfer.types || []).includes("text/uri-list");
+    return !!droppedUrl(dataTransfer);
   }
 
   function linkLabel(url) {
@@ -43103,48 +50046,29 @@ var MediaDrop = (() => {
   module.exports = {
     createFileNodeSpec,
     createLinkNodeSpec,
+    decodeMediaResource,
     droppedUrl,
-    extractFilePathFromUrl,
     hasSupportedDrop,
     linkLabel,
     mediaKind,
     mediaNodeSize,
-    obsidianDragPath
+    obsidianDragPath,
+    SUPPORTED_MEDIA_PROTOCOLS
   };
   return module.exports;
 })();
 // </tomindmap:module media-drop>
 // <tomindmap:module tree-drag>
 var TreeDrag = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   const ATTACHMENT_DISTANCE = 180;
+  const EDGE_CURVATURE = 0.35;
+  const EDGE_FROM_END = "none";
+  const EDGE_TO_END = "arrow";
 
-  const treeModel = (
-    typeof require === "function"
-      ? (() => {
-          try {
-            return require("./tree-model.js");
-          } catch (_) {
-            return {};
-          }
-        })()
-      : {}
-  ) || {};
-
-  function getFindTreeForNode() {
-    return (
-      treeModel.findTreeForNode ||
-      (typeof findTreeForNode === "function" ? findTreeForNode : null)
-    );
-  }
-
-  function getGetDescendants() {
-    return (
-      treeModel.getDescendants ||
-      (typeof getDescendants === "function" ? getDescendants : null)
-    );
-  }
 
   function getNodeCenter(node) {
     return {
@@ -43246,8 +50170,8 @@ var TreeDrag = (() => {
       return true;
     }
 
-    const findFn = getFindTreeForNode();
-    const descendantsFn = getGetDescendants();
+    const findFn = findTreeForNode;
+    const descendantsFn = getDescendants;
 
     if (!findFn || !descendantsFn) {
       return false;
@@ -43264,6 +50188,37 @@ var TreeDrag = (() => {
     return descendants.some(
       (item) => item?.canvasNode?.id === targetId
     );
+  }
+
+  /**
+   * Every id in the subtree of rootId, including rootId itself.
+   *
+   * A drag collects this set once when the gesture starts. Repeating descendant
+   * discovery per candidate card made every animation frame quadratic.
+   */
+  function collectSubtreeIds(forest, rootId) {
+    const ids = new Set();
+    if (!rootId) {
+      return ids;
+    }
+
+    ids.add(rootId);
+
+    const findFn = findTreeForNode;
+    const descendantsFn = getDescendants;
+    const treeNode = findFn ? findFn(forest, rootId) : null;
+
+    if (!treeNode || !descendantsFn) {
+      return ids;
+    }
+
+    for (const item of descendantsFn(treeNode)) {
+      if (item?.canvasNode?.id) {
+        ids.add(item.canvasNode.id);
+      }
+    }
+
+    return ids;
   }
 
   /**
@@ -43700,7 +50655,8 @@ var TreeDrag = (() => {
   function removeIncomingParentEdges(
     canvas,
     canvasApi,
-    draggedNode
+    draggedNode,
+    exceptEdge = null
   ) {
     if (!canvasApi.getIncomingEdges) {
       return;
@@ -43710,71 +50666,141 @@ var TreeDrag = (() => {
       canvasApi.getIncomingEdges(canvas, draggedNode) || [];
 
     for (const edge of incomingEdges) {
+      if (edge === exceptEdge) continue;
       if (canvasApi.removeEdge) {
         canvasApi.removeEdge(canvas, edge);
       }
     }
   }
 
-  function applyCurvedArrowStyle(
-    canvas,
-    canvasApi,
-    edge,
-    options = {}
-  ) {
+  function applyEdgeStyle(canvas, canvasApi, edge, payload = {}) {
     if (!edge) {
       return;
     }
 
-    const {
-      preview = false,
-      color,
-      curvature = 0.35
-    } = options;
+    const curved = payload.lineType
+      ? payload.lineType === "curved"
+      : payload.curve ?? true;
+    const curvature = payload.curvature ?? EDGE_CURVATURE;
+    const fromEnd = payload.fromEnd ?? EDGE_FROM_END;
+    const toEnd = payload.toEnd ?? EDGE_TO_END;
+    const style = { lineType: curved ? "curved" : "straight", curve: curved, curvature };
 
     /*
      * Different Canvas wrappers expose different APIs. These fallbacks let
      * the same logic work without crashing when one method is unavailable.
      */
     if (canvasApi.setEdgeCurved) {
-      canvasApi.setEdgeCurved(canvas, edge, true, curvature);
+      canvasApi.setEdgeCurved(canvas, edge, curved, curvature);
     } else if (canvasApi.updateEdge) {
-      canvasApi.updateEdge(canvas, edge, {
-        lineType: "curved",
-        curve: true,
-        curvature
-      });
+      canvasApi.updateEdge(canvas, edge, style);
     } else {
-      edge.lineType = "curved";
-      edge.curve = true;
+      edge.lineType = style.lineType;
+      edge.curve = curved;
       edge.curvature = curvature;
     }
 
     if (canvasApi.setEdgeArrow) {
-      canvasApi.setEdgeArrow(canvas, edge, "to");
+      canvasApi.setEdgeArrow(canvas, edge, toEnd);
     } else if (canvasApi.updateEdge) {
-      canvasApi.updateEdge(canvas, edge, {
-        fromEnd: "none",
-        toEnd: "arrow"
-      });
-    } else {
-      edge.fromEnd = "none";
-      edge.toEnd = "arrow";
+      canvasApi.updateEdge(canvas, edge, { fromEnd, toEnd });
+    } else if (edge.from && edge.to) {
+      edge.from.end = fromEnd;
+      edge.to.end = toEnd;
     }
 
-    if (color) {
+    if (payload.color) {
       if (canvasApi.setEdgeColor) {
-        canvasApi.setEdgeColor(canvas, edge, color);
+        canvasApi.setEdgeColor(canvas, edge, payload.color);
       } else {
-        edge.color = color;
+        edge.color = payload.color;
       }
     }
 
-    if (preview) {
+    if (payload.preview) {
       edge.__mindMapPreview = true;
     }
 
     canvas?.requestFrame?.();
+  }
+
+  /**
+   * The complete serializable payload of one branch link.
+   *
+   * Canvas keeps the endpoints as live card references, so a drag transaction
+   * stores the endpoint ids beside the authored presentation and rebuilds the
+   * link from this single record.
+   */
+  function snapshotEdgePayload(edge) {
+    if (!edge) {
+      return null;
+    }
+
+    return {
+      id: edge.id ?? null,
+      fromNodeId: edge?.from?.node?.id ?? null,
+      fromSide: edge?.from?.side ?? null,
+      fromEnd: edge?.from?.end ?? EDGE_FROM_END,
+      toNodeId: edge?.to?.node?.id ?? null,
+      toSide: edge?.to?.side ?? null,
+      toEnd: edge?.to?.end ?? EDGE_TO_END,
+      color: edge?.color ?? null,
+      label: edge?.label ?? null,
+      lineType: edge?.lineType ?? null,
+      curve: edge?.curve ?? null,
+      curvature: edge?.curvature ?? EDGE_CURVATURE
+    };
+  }
+
+  /**
+   * Rebuild one branch link from a payload, keeping the same link identity when
+   * Canvas still allows it. A card that disappeared mid-drag yields no link
+   * instead of a dangling endpoint.
+   */
+  function restoreEdgePayload(canvas, canvasApi, payload) {
+    if (!canvas || !canvasApi?.createEdge || !payload) {
+      return null;
+    }
+
+    const fromNode = canvas.nodes?.get?.(payload.fromNodeId);
+    const toNode = canvas.nodes?.get?.(payload.toNodeId);
+
+    if (!fromNode || !toNode) {
+      return null;
+    }
+
+    const edge = canvasApi.createEdge(
+      canvas,
+      fromNode,
+      toNode,
+      payload.fromSide || "right",
+      payload.toSide || "left",
+      payload.color ?? undefined,
+      {
+        ...(payload.id ? { id: payload.id } : {}),
+        ...(payload.label !== null && payload.label !== undefined
+          ? { label: payload.label }
+          : {}),
+        ...(payload.lineType !== null && payload.lineType !== undefined
+          ? { lineType: payload.lineType }
+          : {}),
+        ...(payload.curve !== null && payload.curve !== undefined
+          ? { curve: payload.curve }
+          : {}),
+        ...(payload.curvature !== null && payload.curvature !== undefined
+          ? { curvature: payload.curvature }
+          : {}),
+        fromEnd: payload.fromEnd ?? EDGE_FROM_END,
+        toEnd: payload.toEnd ?? EDGE_TO_END
+      }
+    );
+
+    if (!edge) {
+      return null;
+    }
+
+    applyEdgeStyle(canvas, canvasApi, edge, payload);
+    return edge;
   }
 
   /**
@@ -43804,25 +50830,61 @@ var TreeDrag = (() => {
       parentNode
     );
 
+    /*
+     * A branch link is one authored object that survives a drag: the new parent
+     * only decides the sides, while the carried payload keeps identity, label,
+     * ends, colour, and curve of the link being re-pointed.
+     */
+    const carried = options.carry || null;
     const color =
+      carried?.color ??
       options.color ??
       parentNode.color ??
       childNode.color ??
       undefined;
 
-    const edge = canvasApi.createEdge(
-      canvas,
-      parentNode,
-      childNode,
-      fromSide,
-      toSide,
-      color
-    );
+    const edgeOptions = {
+      ...(carried?.id ? { id: carried.id } : {}),
+      ...(carried?.label !== null && carried?.label !== undefined
+        ? { label: carried.label }
+        : {}),
+      ...(carried?.lineType !== null && carried?.lineType !== undefined
+        ? { lineType: carried.lineType }
+        : {}),
+      ...(carried?.curve !== null && carried?.curve !== undefined
+        ? { curve: carried.curve }
+        : {}),
+      ...(carried?.curvature !== null && carried?.curvature !== undefined
+        ? { curvature: carried.curvature }
+        : {}),
+      fromEnd: carried?.fromEnd ?? EDGE_FROM_END,
+      toEnd: carried?.toEnd ?? EDGE_TO_END
+    };
+    const edge = options.replaceEdge && canvasApi.replaceEdge
+      ? canvasApi.replaceEdge(
+          canvas,
+          options.replaceEdge,
+          parentNode,
+          childNode,
+          fromSide,
+          toSide,
+          color,
+          edgeOptions
+        )
+      : canvasApi.createEdge(
+          canvas,
+          parentNode,
+          childNode,
+          fromSide,
+          toSide,
+          color,
+          edgeOptions
+        );
 
-    applyCurvedArrowStyle(canvas, canvasApi, edge, {
-      preview: Boolean(options.preview),
+    applyEdgeStyle(canvas, canvasApi, edge, {
+      ...carried,
       color,
-      curvature: options.curvature ?? 0.35
+      preview: Boolean(options.preview)
     });
 
     return edge;
@@ -43831,7 +50893,9 @@ var TreeDrag = (() => {
   /**
    * Move a subtree under a new parent.
    *
-   * For sibling drop zones, the target's parent becomes the new parent.
+   * For sibling drop zones, the target's parent becomes the new parent. The
+   * branch link that used to hold the subtree is carried over, so a drop never
+   * discards an authored label, ends, colour, or curve.
    */
   function reparentSubtree(
     canvas,
@@ -43840,7 +50904,8 @@ var TreeDrag = (() => {
     targetNode,
     dropZone = "child",
     forest = [],
-    mainRootNode = null
+    mainRootNode = null,
+    options = {}
   ) {
     if (
       !canvas ||
@@ -43893,10 +50958,14 @@ var TreeDrag = (() => {
     }
 
     /*
-     * Remove old edges only after all validation has succeeded. Previously,
-     * invalid drops could leave the node disconnected.
+     * Create and validate the replacement before removing the authored link.
+     * CanvasAPI.replaceEdge preserves the authored ID and restores the original
+     * if import fails; older adapters use the create-before-remove fallback.
      */
-    removeIncomingParentEdges(canvas, canvasApi, draggedNode);
+    const incoming = (canvasApi.getIncomingEdges?.(canvas, draggedNode) || [])
+      .filter((edge) => !edge?.__mindMapPreview);
+    const originalEdge = incoming[0] || null;
+    const carried = options.carry || snapshotEdgePayload(originalEdge);
 
     const edge = createMindMapEdge(
       canvas,
@@ -43906,68 +50975,15 @@ var TreeDrag = (() => {
       mainRootNode || newParent,
       {
         preview: false,
+        carry: carried,
+        replaceEdge: originalEdge,
         color: newParent.color
       }
     );
+    if (!edge) return false;
 
-    return Boolean(edge);
-  }
-
-  function isWithinGraphBounds(
-    draggedNode,
-    allNodes,
-    paddingRatio = 0.2
-  ) {
-    if (!draggedNode) {
-      return false;
-    }
-
-    const nodes = Array.isArray(allNodes)
-      ? allNodes
-      : Array.from(allNodes || []);
-
-    const otherNodes = nodes.filter(
-      (node) =>
-        node &&
-        node.id !== draggedNode.id &&
-        node.type !== "group"
-    );
-
-    if (otherNodes.length === 0) {
-      return false;
-    }
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-
-    for (const node of otherNodes) {
-      const x = Number(node.x || 0);
-      const y = Number(node.y || 0);
-      const width = Math.max(1, Number(node.width) || 1);
-      const height = Math.max(1, Number(node.height) || 1);
-
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x + width);
-      maxY = Math.max(maxY, y + height);
-    }
-
-    const graphWidth = Math.max(1, maxX - minX);
-    const graphHeight = Math.max(1, maxY - minY);
-
-    const paddingX = graphWidth * paddingRatio;
-    const paddingY = graphHeight * paddingRatio;
-
-    const center = getNodeCenter(draggedNode);
-
-    return (
-      center.x >= minX - paddingX &&
-      center.x <= maxX + paddingX &&
-      center.y >= minY - paddingY &&
-      center.y <= maxY + paddingY
-    );
+    removeIncomingParentEdges(canvas, canvasApi, draggedNode, edge);
+    return true;
   }
 
   function isWithinAttachmentRadius(
@@ -43992,8 +51008,10 @@ var TreeDrag = (() => {
 
   module.exports = {
     ATTACHMENT_DISTANCE,
-    applyCurvedArrowStyle,
+    EDGE_CURVATURE,
+    applyEdgeStyle,
     classifyDropZone,
+    collectSubtreeIds,
     createMindMapEdge,
     closestCornerToNode,
     closestPointOnNode,
@@ -44007,30 +51025,71 @@ var TreeDrag = (() => {
     getNodeCenter,
     isDescendant,
     isWithinAttachmentRadius,
-    isWithinGraphBounds,
     nodeToNodeDistance,
     pointToNodeDistance,
     pointToSegmentDistance,
     segmentNodeEntry,
+    snapshotEdgePayload,
     removeIncomingParentEdges,
-    reparentSubtree
+    reparentSubtree,
+    restoreEdgePayload
   };
   return module.exports;
 })();
 // </tomindmap:module tree-drag>
 // <tomindmap:module drag-preview-controller>
-var { createDragAttachmentController } = (() => {
+var {
+  createDragAttachmentController,
+  isPrimaryCardGesture
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
+
   const {
     ATTACHMENT_DISTANCE,
+    collectSubtreeIds,
     createMindMapEdge,
     findNearestNodeOnBranch,
     getConnectionSides,
-    isDescendant,
     nodeToNodeDistance,
-    reparentSubtree
-  } = typeof TreeDrag !== "undefined" ? TreeDrag : require("./tree-drag.js");
+    reparentSubtree,
+    snapshotEdgePayload
+  } = typeof TreeDrag !== "undefined" ? TreeDrag : TreeDrag;
+
+  const PRIMARY_BUTTON = 0;
+  const CANVAS_OWNED_CONTROL =
+    ".canvas-node-connection-point, .canvas-node-resizer, .canvas-node-resizers";
+
+  /**
+   * The one predicate for a card gesture this plugin owns.
+   *
+   * Returns the topic card the gesture started on, or null when the gesture
+   * belongs to Canvas or to another adapter: a secondary button, a connection
+   * point or resizer, a group, empty space, or a Canvas whose mind-map mode is
+   * off. Only claimed gestures may mutate the map.
+   */
+  function isPrimaryCardGesture(event, context = {}) {
+    if (!event || context.isEnabled?.() === false) {
+      return null;
+    }
+
+    if (event.button !== PRIMARY_BUTTON) {
+      return null;
+    }
+
+    if (event.target?.closest?.(CANVAS_OWNED_CONTROL)) {
+      return null;
+    }
+
+    const node = context.findNode?.(event) || null;
+
+    if (!node || node.isEditing || event.target?.closest?.(".cm-editor, .canvas-node-content-editing") || context.isGroupNode?.(node)) {
+      return null;
+    }
+
+    return node;
+  }
 
   function createDragAttachmentController(
     canvas,
@@ -44039,27 +51098,30 @@ var { createDragAttachmentController } = (() => {
     getRootNode
   ) {
     let activeDraggedNode = null;
-    let originalEdges = [];
+    let originalLinks = [];
+    let originalEdgeObjects = [];
     let originalParent = null;
-    let originalRemoved = false;
     let sessionForest = [];
+    let dragIndex = { descendantIds: new Set(), maps: [] };
     let previewEdge = null;
     let previewParent = null;
     let state = "idle";
+    let finished = false;
+    let settledResult = null;
+    let beginTopology = "";
 
     function incomingEdges(node) {
       return (canvasApi.getIncomingEdges?.(canvas, node) || [])
         .filter((edge) => edge !== previewEdge && !edge?.__mindMapPreview);
     }
 
-    function snapshotEdge(edge) {
-      return {
-        fromNode: edge?.from?.node || null,
-        toNode: edge?.to?.node || null,
-        fromSide: edge?.from?.side || "right",
-        toSide: edge?.to?.side || "left",
-        color: edge?.color
-      };
+    function permanentTopologySignature() {
+      const nodes = [...(canvas?.nodes?.keys?.() || [])].map(String).sort();
+      const edges = [...(canvas?.edges?.values?.() || [])]
+        .filter((edge) => !edge?.__mindMapPreview)
+        .map((edge) => `${edge?.from?.node?.id || ""}>${edge?.to?.node?.id || ""}`)
+        .sort();
+      return `${nodes.join(",")}|${edges.join(",")}`;
     }
 
     function removePreview() {
@@ -44070,40 +51132,16 @@ var { createDragAttachmentController } = (() => {
       previewParent = null;
     }
 
-    function removePermanentIncoming(node) {
-      if (originalRemoved)
-        return;
-      for (const edge of incomingEdges(node))
-        canvasApi.removeEdge?.(canvas, edge);
-      originalRemoved = originalEdges.length > 0;
-    }
-
-    function restoreOriginal() {
-      if (!originalRemoved || !activeDraggedNode)
-        return;
-      for (const edge of originalEdges) {
-        if (!edge.fromNode || !edge.toNode)
-          continue;
-        canvasApi.createEdge?.(
-          canvas,
-          edge.fromNode,
-          edge.toNode,
-          edge.fromSide,
-          edge.toSide,
-          edge.color
-        );
-      }
-      originalRemoved = false;
-    }
-
     function resetState() {
       activeDraggedNode = null;
-      originalEdges = [];
+      originalLinks = [];
+      originalEdgeObjects = [];
       originalParent = null;
-      originalRemoved = false;
       sessionForest = [];
+      dragIndex = { descendantIds: new Set(), maps: [] };
       previewEdge = null;
       previewParent = null;
+      beginTopology = "";
       state = "idle";
     }
 
@@ -44112,69 +51150,98 @@ var { createDragAttachmentController } = (() => {
         cancel();
       activeDraggedNode = draggedNode || null;
       sessionForest = draggedNode ? getForest?.() || [] : [];
-      originalEdges = draggedNode
-        ? incomingEdges(draggedNode).map(snapshotEdge)
-        : [];
-      originalParent = originalEdges[0]?.fromNode || null;
-      originalRemoved = false;
+      /*
+       * The branch link is snapshotted once, in full, and every later frame
+       * reuses it: preview, commit, and rollback all re-point the same authored
+       * object instead of rebuilding a default arrow.
+       */
+      originalEdgeObjects = draggedNode ? incomingEdges(draggedNode) : [];
+      originalLinks = originalEdgeObjects.map(snapshotEdgePayload);
+      originalParent =
+        canvas.nodes?.get?.(originalLinks[0]?.fromNodeId) || null;
+      beginTopology = permanentTopologySignature();
+      dragIndex = buildDragIndex(sessionForest, draggedNode);
       state = draggedNode ? "original" : "idle";
+      finished = false;
+      settledResult = null;
       return originalParent;
     }
 
-    function getAllNodes() {
-      if (canvas.nodes?.values)
-        return Array.from(canvas.nodes.values());
-      return canvas.getData?.().nodes || [];
-    }
-
-    function treeNodes(root) {
-      const nodes = [];
-      const stack = root ? [root] : [];
-      while (stack.length > 0) {
-        const tree = stack.pop();
-        nodes.push(tree.canvasNode);
-        stack.push(...(tree.children || []));
+    /**
+     * The per-drag index: the dragged topic's subtree, and the attachable cards
+     * of every map in one fixed order. Both are built once when the gesture
+     * starts, so an animation frame only measures cards.
+     */
+    function buildDragIndex(forest, draggedNode) {
+      const descendantIds = collectSubtreeIds(forest, draggedNode?.id);
+      const maps = [];
+      for (const root of forest) {
+        const cards = [];
+        const stack = root ? [root] : [];
+        while (stack.length > 0) {
+          const tree = stack.pop();
+          if (!tree) continue;
+          cards.push(tree.canvasNode);
+          const children = tree.children || [];
+          for (let index = children.length - 1; index >= 0; index--)
+            stack.push(children[index]);
+        }
+        maps.push({
+          root: root.canvasNode,
+          cards: cards.filter(
+            (card) =>
+              card &&
+              card.id !== draggedNode?.id &&
+              !descendantIds.has(card.id)
+          )
+        });
       }
-      return nodes;
+      return { descendantIds, maps };
     }
 
     function chooseAttachmentMap(draggedNode) {
-      const maps = sessionForest.map((root) => {
-        const nodes = treeNodes(root).filter(
-          (node) => node.id !== draggedNode.id &&
-            !isDescendant(sessionForest, draggedNode.id, node.id)
-        );
-        if (nodes.length === 0)
-          return null;
-        const minX = Math.min(...nodes.map((node) => node.x));
-        const minY = Math.min(...nodes.map((node) => node.y));
-        const maxX = Math.max(...nodes.map((node) => node.x + node.width));
-        const maxY = Math.max(...nodes.map((node) => node.y + node.height));
-        const dx = Math.max(
-          minX - (draggedNode.x + draggedNode.width),
-          draggedNode.x - maxX,
-          0
-        );
-        const dy = Math.max(
-          minY - (draggedNode.y + draggedNode.height),
-          draggedNode.y - maxY,
-          0
-        );
-        const boxDistance = Math.hypot(dx, dy);
-        let nodeDistance = Infinity;
-        for (const node of nodes)
-          nodeDistance = Math.min(
-            nodeDistance,
-            nodeToNodeDistance(draggedNode, node)
+      const maps = dragIndex.maps
+        .map((map) => {
+          const cards = map.cards;
+          if (cards.length === 0)
+            return null;
+          const draggedLeft = draggedNode.x;
+          const draggedTop = draggedNode.y;
+          const draggedRight = draggedLeft + draggedNode.width;
+          const draggedBottom = draggedTop + draggedNode.height;
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+          for (const node of cards) {
+            const left = node.x;
+            const top = node.y;
+            const right = left + node.width;
+            const bottom = top + node.height;
+            if (left < minX) minX = left;
+            if (top < minY) minY = top;
+            if (right > maxX) maxX = right;
+            if (bottom > maxY) maxY = bottom;
+          }
+          const boxDistance = Math.hypot(
+            Math.max(minX - draggedRight, draggedLeft - maxX, 0),
+            Math.max(minY - draggedBottom, draggedTop - maxY, 0)
           );
-        return {
-          root: root.canvasNode,
-          nodes,
-          nodeDistance,
-          boxDistance,
-          contains: boxDistance <= ATTACHMENT_DISTANCE
-        };
-      }).filter(Boolean);
+          let nodeDistance = Infinity;
+          for (const node of cards)
+            nodeDistance = Math.min(
+              nodeDistance,
+              nodeToNodeDistance(draggedNode, node)
+            );
+          return {
+            root: map.root,
+            nodes: cards,
+            nodeDistance,
+            boxDistance,
+            contains: boxDistance <= ATTACHMENT_DISTANCE
+          };
+        })
+        .filter(Boolean);
 
       // Rank by the closest actual card, not by the map's buffered rectangle.
       // A floating card the cursor is sitting on must win over a large map whose
@@ -44202,20 +51269,16 @@ var { createDragAttachmentController } = (() => {
       if (activeDraggedNode?.id !== draggedNode.id)
         begin(draggedNode);
 
-      const forest = sessionForest;
-      const allNodes = getAllNodes();
       const attachmentMap = chooseAttachmentMap(draggedNode);
       const candidate = attachmentMap?.root || null;
-      const candidateRoot = attachmentMap?.root || null;
-      const rayNodes = attachmentMap?.nodes || allNodes;
       const rayTarget = candidate
         ? attachmentMap.nodes.length === 1
           ? candidate
           : findNearestNodeOnBranch(
             draggedNode,
-            rayNodes,
-            candidateRoot,
-            (rootId, targetId) => isDescendant(forest, rootId, targetId)
+            attachmentMap.nodes,
+            candidate,
+            (rootId, targetId) => dragIndex.descendantIds.has(targetId)
           )
         : null;
       const targetNode = rayTarget;
@@ -44224,7 +51287,6 @@ var { createDragAttachmentController } = (() => {
         : null;
       if (!targetNode) {
         removePreview();
-        removePermanentIncoming(draggedNode);
         state = "detached";
         return { state, target: null };
       }
@@ -44246,22 +51308,24 @@ var { createDragAttachmentController } = (() => {
       }
 
       removePreview();
-      removePermanentIncoming(draggedNode);
-      const edge = createMindMapEdge(
-        canvas,
-        canvasApi,
-        targetNode,
-        draggedNode,
-        mainRootNode,
-        {
-          preview: true,
-          color: targetNode.color,
-          curvature: 0.35
-        }
-      );
+      let edge = null;
+      try {
+        edge = createMindMapEdge(
+          canvas,
+          canvasApi,
+          targetNode,
+          draggedNode,
+          mainRootNode,
+          {
+            preview: true,
+            carry: originalLinks[0] || null,
+            color: targetNode.color
+          }
+        );
+      } catch (_) {
+        edge = null;
+      }
       if (!edge) {
-        removePreview();
-        restoreOriginal();
         state = "original";
         return { state, target: originalParent };
       }
@@ -44273,122 +51337,156 @@ var { createDragAttachmentController } = (() => {
       return { state, target: targetNode, incomingSide: edge.to?.side || null };
     }
 
-    function commit(draggedNode) {
+    /**
+     * Close the session exactly once. Every later terminal signal answers with
+     * the same result instead of touching the map again.
+     */
+    function settle(result) {
+      resetState();
+      finished = true;
+      settledResult = result;
+      return result;
+    }
+
+    function finish(reason, draggedNode) {
+      if (finished) {
+        return settledResult;
+      }
+
+      if (reason !== "commit") {
+        removePreview();
+        return settle({ changed: false, state: "cancelled", target: null, reason });
+      }
+
       if (!draggedNode || activeDraggedNode?.id !== draggedNode.id) {
-        cancel();
-        return { changed: false, state: "idle", target: null };
+        removePreview();
+        return settle({ changed: false, state: "idle", target: null, reason });
+      }
+
+      const draggedStillLive = canvas.nodes?.get?.(draggedNode.id) === draggedNode;
+      const targetStillLive = !previewParent
+        || canvas.nodes?.get?.(previewParent.id) === previewParent;
+      if (
+        !draggedStillLive
+        || !targetStillLive
+        || permanentTopologySignature() !== beginTopology
+      ) {
+        removePreview();
+        return settle({
+          changed: false,
+          state: "original",
+          target: originalParent,
+          reason: `${reason}:stale-topology`
+        });
       }
 
       if (state === "preview" && previewParent) {
         const targetNode = previewParent;
         const incomingSide = previewEdge?.to?.side || null;
         removePreview();
-        const attached = reparentSubtree(
-          canvas,
-          canvasApi,
-          draggedNode,
-          targetNode,
-          "child",
-          sessionForest,
-          getRootNode?.(targetNode) || targetNode
-        );
-        if (!attached) {
-          restoreOriginal();
-          const result = { changed: false, state: "original", target: originalParent };
-          resetState();
-          return result;
+        const currentForest =
+          canvasApi.getGraphQuery?.(canvas)?.forest || getForest?.() || sessionForest;
+        let attached = false;
+        try {
+          attached = reparentSubtree(
+            canvas,
+            canvasApi,
+            draggedNode,
+            targetNode,
+            "child",
+            currentForest,
+            getRootNode?.(targetNode) || targetNode,
+            { carry: originalLinks[0] || null }
+          );
+        } catch (_) {
+          attached = false;
         }
-        const result = {
-          changed: originalParent?.id !== targetNode.id,
+        if (!attached) {
+          return settle({
+            changed: false,
+            state: "original",
+            target: originalParent,
+            reason
+          });
+        }
+        const wasAlreadySingleParent =
+          originalLinks.length === 1 &&
+          originalLinks[0]?.fromNodeId === targetNode.id;
+        return settle({
+          changed: !wasAlreadySingleParent,
           state: "attached",
           target: targetNode,
-          incomingSide
-        };
-        resetState();
-        return result;
+          incomingSide,
+          reason
+        });
       }
 
       if (state === "detached") {
         removePreview();
         for (const edge of incomingEdges(draggedNode))
           canvasApi.removeEdge?.(canvas, edge);
-        const result = {
-          changed: originalEdges.length > 0,
+        return settle({
+          changed: originalLinks.length > 0,
           state: "detached",
-          target: null
-        };
-        resetState();
-        return result;
+          target: null,
+          reason
+        });
       }
 
-      // A meaningful drag that ends near the old parent keeps exactly one
-      // incoming parent edge, repairing malformed multi-parent branches too.
-      const hadSurplusParents = originalEdges.length > 1;
-      restoreOriginal();
-      if (hadSurplusParents) {
-        const keepParentId = originalEdges[0]?.fromNode?.id;
-        for (const edge of incomingEdges(draggedNode)) {
-          if (edge.from?.node?.id !== keepParentId)
-            canvasApi.removeEdge?.(canvas, edge);
-        }
+      /*
+       * A meaningful drag that ends near the old parent keeps exactly one
+       * incoming parent link, repairing malformed multi-parent branches too.
+       */
+      const keepEdge = originalEdgeObjects[0] || null;
+      let removed = 0;
+      for (const edge of incomingEdges(draggedNode)) {
+        if (edge === keepEdge) continue;
+        canvasApi.removeEdge?.(canvas, edge);
+        removed += 1;
       }
-      const result = {
-        changed: hadSurplusParents,
+      return settle({
+        changed: removed > 0,
         state: "original",
-        target: originalParent
-      };
-      resetState();
-      return result;
+        target: originalParent,
+        reason
+      });
+    }
+
+    /*
+     * `commit` and `cancel` stay as the two named terminal paths; both are the
+     * one `finish` policy, so a second terminal signal from a lost capture,
+     * blur, mode change, or teardown can never replay or undo the first.
+     */
+    function commit(draggedNode) {
+      return finish("commit", draggedNode);
     }
 
     function cancel() {
-      removePreview();
-      restoreOriginal();
-      resetState();
+      return finish("cancel");
     }
 
     return {
       begin,
       updatePreview,
+      finish,
       commit,
       cancel
     };
   }
 
   module.exports = {
-    createDragAttachmentController
+    createDragAttachmentController,
+    isPrimaryCardGesture
   };
   return module.exports;
 })();
 // </tomindmap:module drag-preview-controller>
 // <tomindmap:module mindmap-actions>
 var MindmapActions = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
-  const treeModel =
-  	(typeof require === 'function'
-  		? (function () {
-  				try {
-  					return require('./tree-model.js');
-  				} catch (_) {
-  					return {};
-  				}
-  			})()
-  		: {}) || {};
 
-  function getFindTreeForNode() {
-  	return (
-  		treeModel.findTreeForNode ||
-  		(typeof findTreeForNode === 'function' ? findTreeForNode : null)
-  	);
-  }
-
-  function getGetDescendants() {
-  	return (
-  		treeModel.getDescendants ||
-  		(typeof getDescendants === 'function' ? getDescendants : null)
-  	);
-  }
 
   /**
    * Read the first meaningful line of a topic as a clean display title.
@@ -44425,15 +51523,7 @@ var MindmapActions = (() => {
 
   /** Keep generated note names portable across the platforms Obsidian supports. */
   function safeTopicFilename(title) {
-  	const value = String(topicTitleFromText(title) || 'Untitled')
-  		.replace(/[\u0000-\u001f\u007f]/g, '')
-  		.replace(/[\\/:*?"<>|]/g, '-')
-  		.replace(/\s+/g, ' ')
-  		.trim()
-  		.replace(/[. ]+$/g, '')
-  		.slice(0, 120)
-  		.trim();
-  	return value || 'Untitled';
+  	return portableFilenameStem(topicTitleFromText(title) || 'Untitled');
   }
 
   function nextTopicFilePath(
@@ -44442,23 +51532,12 @@ var MindmapActions = (() => {
   	extension = 'md',
   	pathExists
   ) {
-  	const folder = String(folderPath || '')
-  		.replace(/^\/+|\/+$/g, '')
-  		.replace(/\\/g, '/');
-  	const base = safeTopicFilename(title);
-  	const suffixExtension = String(extension || 'md').replace(/^\.+/, '');
-  	const exists = typeof pathExists === 'function' ? pathExists : () => false;
-  	let index = 0;
-  	let candidate;
-  	do {
-  		const suffix = index === 0 ? '' : ` ${index}`;
-  		const basename = `${base}${suffix}`;
-  		candidate = folder
-  			? `${folder}/${basename}.${suffixExtension}`
-  			: `${basename}.${suffixExtension}`;
-  		index++;
-  	} while (exists(candidate));
-  	return candidate;
+  	return allocateFilePath(
+  		folderPath,
+  		topicTitleFromText(title) || 'Untitled',
+  		extension || 'md',
+  		pathExists
+  	);
   }
 
   function nextTopicNotePath(folderPath, title, pathExists) {
@@ -44473,8 +51552,8 @@ var MindmapActions = (() => {
   }
 
   function getTopicBranch(forest, node, includeDescendants = true) {
-  	const findFn = getFindTreeForNode();
-  	const descFn = getGetDescendants();
+  	const findFn = findTreeForNode;
+  	const descFn = getDescendants;
   	const treeNode = findFn ? findFn(forest, node?.id) : null;
   	if (!treeNode) return [];
   	return includeDescendants && descFn
@@ -44482,18 +51561,118 @@ var MindmapActions = (() => {
   		: [treeNode];
   }
 
+  function decodeLinkedCanvasData(sourceData) {
+  	if (!Array.isArray(sourceData?.nodes)) return { ok: false, reason: 'invalid-nodes' };
+  	if (!Array.isArray(sourceData?.edges)) return { ok: false, reason: 'invalid-edges' };
+
+  	const nodeIds = new Set();
+  	for (const node of sourceData.nodes) {
+  		if (!node || typeof node !== 'object' || Array.isArray(node)) {
+  			return { ok: false, reason: 'invalid-node-id' };
+  		}
+  		if (typeof node.id !== 'string' || !node.id.trim()) {
+  			return { ok: false, reason: 'invalid-node-id' };
+  		}
+  		if (nodeIds.has(node.id)) {
+  			return { ok: false, reason: 'duplicate-node-id' };
+  		}
+  		nodeIds.add(node.id);
+  	}
+
+  	const edgeIds = new Set();
+  	for (const edge of sourceData.edges) {
+  		if (!edge || typeof edge !== 'object' || Array.isArray(edge)) {
+  			return { ok: false, reason: 'invalid-edge-id' };
+  		}
+  		if (typeof edge.id !== 'string' || !edge.id.trim()) {
+  			return { ok: false, reason: 'invalid-edge-id' };
+  		}
+  		if (edgeIds.has(edge.id)) {
+  			return { ok: false, reason: 'duplicate-edge-id' };
+  		}
+  		edgeIds.add(edge.id);
+  		if (
+  			typeof edge.fromNode !== 'string' ||
+  			typeof edge.toNode !== 'string' ||
+  			!nodeIds.has(edge.fromNode) ||
+  			!nodeIds.has(edge.toNode)
+  		) {
+  			return { ok: false, reason: 'dangling-edge-endpoint' };
+  		}
+  	}
+
+  	if (sourceData.nodes.length === 0) {
+  		return { ok: true, value: { nodes: [], edges: [], rootId: null } };
+  	}
+
+  	const incomingCounts = new Map(sourceData.nodes.map((node) => [node.id, 0]));
+  	const outgoing = new Map();
+  	for (const edge of sourceData.edges) {
+  		if (edge.fromNode === edge.toNode) return { ok: false, reason: 'cycle' };
+  		incomingCounts.set(edge.toNode, incomingCounts.get(edge.toNode) + 1);
+  		if (!outgoing.has(edge.fromNode)) outgoing.set(edge.fromNode, []);
+  		outgoing.get(edge.fromNode).push(edge.toNode);
+  	}
+
+  	const roots = sourceData.nodes.filter((node) => incomingCounts.get(node.id) === 0);
+  	if (roots.length === 0) return { ok: false, reason: 'missing-root' };
+  	if (roots.length !== 1) return { ok: false, reason: 'multiple-roots' };
+
+  	const reachable = new Set([roots[0].id]);
+  	const reachableQueue = [roots[0].id];
+  	for (let cursor = 0; cursor < reachableQueue.length; cursor++) {
+  		for (const childId of outgoing.get(reachableQueue[cursor]) || []) {
+  			if (reachable.has(childId)) continue;
+  			reachable.add(childId);
+  			reachableQueue.push(childId);
+  		}
+  	}
+  	if (reachable.size !== sourceData.nodes.length) {
+  		return { ok: false, reason: 'unreachable-node' };
+  	}
+
+  	const remainingIncoming = new Map(incomingCounts);
+  	const cycleQueue = sourceData.nodes
+  		.filter((node) => remainingIncoming.get(node.id) === 0)
+  		.map((node) => node.id);
+  	let acyclicCount = 0;
+  	for (let cursor = 0; cursor < cycleQueue.length; cursor++) {
+  		acyclicCount++;
+  		for (const childId of outgoing.get(cycleQueue[cursor]) || []) {
+  			const nextCount = remainingIncoming.get(childId) - 1;
+  			remainingIncoming.set(childId, nextCount);
+  			if (nextCount === 0) cycleQueue.push(childId);
+  		}
+  	}
+  	if (acyclicCount !== sourceData.nodes.length) {
+  		return { ok: false, reason: 'cycle' };
+  	}
+  	if ([...incomingCounts.values()].some((count) => count > 1)) {
+  		return { ok: false, reason: 'multiple-parents' };
+  	}
+
+  	return {
+  		ok: true,
+  		value: { nodes: sourceData.nodes, edges: sourceData.edges, rootId: roots[0].id }
+  	};
+  }
+
   /**
-   * Remap a serialized nested Canvas graph into a target Canvas at an anchor.
+   * Validate and remap a serialized nested Canvas graph at a target anchor.
    * Source IDs are never reused, so expanding a linked map cannot overwrite an
    * unrelated card in the parent map.
    */
   function remapLinkedCanvasData(sourceData, anchor, existingIds, makeId) {
-  	const sourceNodes = (Array.isArray(sourceData?.nodes) ? sourceData.nodes : []).filter(
-  		(node) => node && typeof node === 'object'
-  	);
+  	const decoded = decodeLinkedCanvasData(sourceData);
+  	if (!decoded.ok) return decoded;
+  	const { nodes: sourceNodes, edges: sourceEdges, rootId: sourceRootId } = decoded.value;
   	if (sourceNodes.length === 0) {
-  		return { nodes: [], edges: [], idMap: new Map(), rootId: null };
+  		return {
+  			ok: true,
+  			value: { nodes: [], edges: [], idMap: new Map(), rootId: null }
+  		};
   	}
+
   	const usedIds = new Set(existingIds || []);
   	const nextId =
   		typeof makeId === 'function'
@@ -44501,50 +51680,43 @@ var MindmapActions = (() => {
   			: () => `linked-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   	const idMap = new Map();
   	for (const sourceNode of sourceNodes) {
-  		const oldId = String(sourceNode.id || '');
   		let id = String(nextId() || '');
   		while (!id || usedIds.has(id)) id = String(nextId() || '');
   		usedIds.add(id);
-  		idMap.set(oldId, id);
+  		idMap.set(sourceNode.id, id);
   	}
-  	const sourceEdges = (Array.isArray(sourceData?.edges) ? sourceData.edges : []).filter(
-  		(edge) => edge && typeof edge === 'object'
-  	);
-  	const incoming = new Set(sourceEdges.map((edge) => String(edge.toNode || '')));
-  	const sourceRoot =
-  		sourceNodes.find((item) => !incoming.has(String(item.id || ''))) || sourceNodes[0];
+  	const sourceRoot = sourceNodes.find((node) => node.id === sourceRootId);
   	const sourceRootX = Number(sourceRoot.x) || 0;
   	const sourceRootY = Number(sourceRoot.y) || 0;
   	const anchorX = Number(anchor?.x) || 0;
   	const anchorY = Number(anchor?.y) || 0;
   	const nodes = sourceNodes.map((item) => ({
   		...item,
-  		id: idMap.get(String(item.id || '')),
+  		id: idMap.get(item.id),
   		type: item.type || (item.file || item.url ? 'file' : 'text'),
   		x: anchorX + (Number(item.x) || 0) - sourceRootX,
   		y: anchorY + (Number(item.y) || 0) - sourceRootY,
   		width: Number(item.width) || Number(anchor?.width) || 300,
   		height: Number(item.height) || Number(anchor?.height) || 60
   	}));
-  	const edges = [];
-  	for (const edge of sourceEdges) {
-  		const fromNode = idMap.get(String(edge.fromNode || ''));
-  		const toNode = idMap.get(String(edge.toNode || ''));
-  		if (!fromNode || !toNode) continue;
+  	const edges = sourceEdges.map((edge) => {
   		let edgeId = String(nextId() || '');
   		while (!edgeId || usedIds.has(edgeId)) edgeId = String(nextId() || '');
   		usedIds.add(edgeId);
   		const next = {
   			...edge,
   			id: edgeId,
-  			fromNode,
-  			toNode
+  			fromNode: idMap.get(edge.fromNode),
+  			toNode: idMap.get(edge.toNode)
   		};
   		delete next.from;
   		delete next.to;
-  		edges.push(next);
-  	}
-  	return { nodes, edges, idMap, rootId: idMap.get(String(sourceRoot.id || '')) };
+  		return next;
+  	});
+  	return {
+  		ok: true,
+  		value: { nodes, edges, idMap, rootId: idMap.get(sourceRootId) }
+  	};
   }
 
   function updateLinkedParentCardData(data, nodeId, title, filePath = '') {
@@ -44597,7 +51769,7 @@ var MindmapActions = (() => {
    * graph, while exports and the outline still see the complete hierarchy.
    */
   function syncCollapsedVisibility(canvas) {
-  	if (!canvas?.nodes || !treeModel.buildForest) return 0;
+  	if (!canvas?.nodes) return 0;
   	const nodes = Array.from(canvas.nodes.values());
   	for (const node of nodes) {
   		setCanvasNodeClass(node, 'tomindmap-collapsed-hidden', false);
@@ -44606,7 +51778,7 @@ var MindmapActions = (() => {
   	for (const edge of canvas.edges?.values?.() || [])
   		setCanvasEdgeHidden(edge, false);
 
-  	const forest = treeModel.buildForest(canvas, { includeHidden: true });
+  	const forest = buildForest(canvas, { includeHidden: true });
   	const hiddenIds = new Set();
   	const getData = (node) => {
   		try {
@@ -44617,26 +51789,30 @@ var MindmapActions = (() => {
   			return {};
   		}
   	};
-  	const descFn = getGetDescendants();
-  	const visit = (treeNode) => {
-  		if (getData(treeNode.canvasNode).collapsed) {
-  			setCanvasNodeClass(
-  				treeNode.canvasNode,
-  				'tomindmap-collapsed-node',
-  				true
-  			);
+  	const stack = [];
+  	for (let index = forest.length - 1; index >= 0; index--) {
+  		stack.push({ treeNode: forest[index], hiddenByAncestor: false });
+  	}
+  	while (stack.length > 0) {
+  		const { treeNode, hiddenByAncestor } = stack.pop();
+  		const node = treeNode.canvasNode;
+  		if (!node) continue;
+  		const collapsed = getData(node).collapsed === true;
+  		if (collapsed) {
+  			setCanvasNodeClass(node, 'tomindmap-collapsed-node', true);
   		}
-  		if (getData(treeNode.canvasNode).collapsed && descFn) {
-  			for (const descendant of descFn(treeNode)) {
-  				const child = descendant.canvasNode;
-  				if (!child) continue;
-  				hiddenIds.add(child.id);
-  				setCanvasNodeClass(child, 'tomindmap-collapsed-hidden', true);
-  			}
+  		if (hiddenByAncestor) {
+  			hiddenIds.add(node.id);
+  			setCanvasNodeClass(node, 'tomindmap-collapsed-hidden', true);
   		}
-  		for (const child of treeNode.children) visit(child);
-  	};
-  	for (const root of forest) visit(root);
+  		const hideChildren = hiddenByAncestor || collapsed;
+  		for (let index = treeNode.children.length - 1; index >= 0; index--) {
+  			stack.push({
+  				treeNode: treeNode.children[index],
+  				hiddenByAncestor: hideChildren
+  			});
+  		}
+  	}
   	for (const edge of canvas.edges?.values?.() || []) {
   		const fromId = edge.from?.node?.id;
   		const toId = edge.to?.node?.id;
@@ -44663,8 +51839,8 @@ var MindmapActions = (() => {
   function colorBranch(canvas, forest, node, color) {
   	if (!canvas || !node) return 0;
 
-  	const findFn = getFindTreeForNode();
-  	const descFn = getGetDescendants();
+  	const findFn = findTreeForNode;
+  	const descFn = getDescendants;
   	const treeNode = findFn ? findFn(forest, node.id) : null;
   	const targetNodes = [node];
   	if (treeNode && descFn) {
@@ -44689,8 +51865,8 @@ var MindmapActions = (() => {
   function toggleSubtreeCollapse(canvas, forest, node) {
   	if (!canvas || !node) return false;
 
-  	const findFn = getFindTreeForNode();
-  	const descFn = getGetDescendants();
+  	const findFn = findTreeForNode;
+  	const descFn = getDescendants;
   	const treeNode = findFn ? findFn(forest, node.id) : null;
   	if (!treeNode || treeNode.children.length === 0) return false;
 
@@ -44698,7 +51874,7 @@ var MindmapActions = (() => {
   		typeof node.getData === 'function'
   			? node.getData()
   			: node.unknownData || {};
-  	const currentlyCollapsed = !!data.collapsed;
+  	const currentlyCollapsed = data.collapsed === true;
   	const nextState = !currentlyCollapsed;
 
   	if (typeof node.setData === 'function') {
@@ -44753,404 +51929,111 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
-		const debouncedSave = (0, import_obsidian3.debounce)(async () => {
+		const save = async (patch) => {
+			this.plugin.settings = normalizeSettings({
+				...this.plugin.settings,
+				...patch
+			});
 			await this.plugin.saveSettings();
-		}, 500);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default mindmap mode')
-			.setDesc(
-				'Whether canvases default to mindmap mode (can be toggled per canvas)'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.defaultMindmapMode)
-					.onChange(async (value) => {
-						this.plugin.settings.defaultMindmapMode = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Create a central topic on blank canvases')
-			.setDesc(
+			return this.plugin.settings;
+		};
+		const descriptions = {
+			defaultMindmapMode: [
+				'Default mindmap mode',
+				'Whether canvases default to mindmap mode (can be toggled per canvas).'
+			],
+			autoCreateRootTopic: [
+				'Create a central topic on blank canvases',
 				'Open an empty mindmap canvas with an editable, distinctly colored central topic already selected.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.autoCreateRootTopic)
-					.onChange(async (value) => {
-						this.plugin.settings.autoCreateRootTopic = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Rename canvas from central topic')
-			.setDesc(
-				'Rename the Canvas file to match its central topic after the title is edited.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.renameCanvasFromRootTopic)
-					.onChange(async (value) => {
-						this.plugin.settings.renameCanvasFromRootTopic = value;
-						await this.plugin.saveSettings();
-					})
-			);
+			],
+			renameCanvasFromRootTopic: [
+				'Rename canvas from central topic',
+				'Reuse the Canvas filename for the central topic after it is edited.'
+			],
+			autoColor: ['Auto-color branches', 'Assign distinct colors to top-level branches.'],
+			mouseNavigation: [
+				'Mouse back/forward navigation',
+				"Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's note navigation."
+			],
+			wrapArrowNavigation: [
+				'Wrap arrow navigation',
+				'At the edge of the map, continue from the opposite edge instead of stopping.'
+			],
+			exportMarkmapFrontmatter: [
+				'Markmap export frontmatter',
+				'Include portable Markmap YAML options in new Markdown exports. Imported frontmatter is preserved.'
+			]
+		};
+		for (const field of SETTINGS_FIELDS) {
+			if (field.type === 'boolean') {
+				const [name, description] = descriptions[field.key] || [field.key, field.key];
+				new import_obsidian3.Setting(containerEl)
+					.setName(name)
+					.setDesc(description)
+					.addToggle((toggle) =>
+						toggle
+							.setValue(this.plugin.settings[field.key])
+							.onChange(async (value) => {
+								const settings = await save({ [field.key]: value });
+								toggle.setValue(settings[field.key]);
+							})
+					);
+			}
+		}
 		new import_obsidian3.Setting(containerEl)
 			.setName('Keyboard workflow')
 			.setDesc(
-				'Type to edit · Enter creates a sibling (or saves while editing) · Shift+Enter creates a sibling above (or a line break while editing) · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+Delete removes only the topic · Mod+Enter inserts a parent · Alt+Up/Down reorders · Mod+F searches the outline · F2 edits · Mod+R selects the root.'
+				'Type to edit · Enter creates a sibling · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+F opens the outline.'
 			);
 		new import_obsidian3.Setting(containerEl)
 			.setName('Customizable mind-map actions')
 			.setDesc(
-				'Open Settings → Hotkeys and search ToMindMap to customize collapse/expand, file conversion, nested-map conversion, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod (Cmd on macOS).'
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Auto-color branches')
-			.setDesc('Assign distinct colors to top-level branches')
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.autoColor)
-					.onChange(async (value) => {
-						this.plugin.settings.autoColor = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Horizontal gap')
-			.setDesc('Space between parent and child nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.horizontalGap))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.horizontalGap = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Vertical gap')
-			.setDesc('Space between sibling nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.verticalGap))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.verticalGap = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default node width')
-			.setDesc('Width of newly created nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.defaultNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.defaultNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Minimum automatic width')
-			.setDesc('Smallest card width used by automatic layout (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.minNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.minNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Maximum auto width')
-			.setDesc(
-				'Generous safety limit for exceptionally wide content (px)'
-			)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.maxNodeWidth))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.maxNodeWidth = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Default node height')
-			.setDesc('Height of newly created nodes (px)')
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.defaultNodeHeight))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.defaultNodeHeight = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Maximum auto height')
-			.setDesc(
-				'Generous safety limit for exceptionally tall content (px)'
-			)
-			.addText((text) =>
-				text
-					.setValue(String(this.plugin.settings.maxNodeHeight))
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num > 0) {
-							this.plugin.settings.maxNodeHeight = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Mouse back/forward navigation')
-			.setDesc(
-				"Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's default note navigation"
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.mouseNavigation)
-					.onChange(async (value) => {
-						this.plugin.settings.mouseNavigation = value;
-						await this.plugin.saveSettings();
-					})
+				'Open Settings → Hotkeys to customize collapse, conversions, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod.'
 			);
 		new import_obsidian3.Setting(containerEl)
 			.setName('Touch controls')
 			.setDesc(
-				'Floating touch toolbar (edit, add child, add sibling, more) with long-press menus and double-tap editing. Auto shows it on touch-primary devices.'
+				'Floating touch toolbar with long-press menus and double-tap editing. Auto shows it on touch-primary devices.'
 			)
-			.addDropdown((dropdown) =>
+			.addDropdown((dropdown) => {
+				for (const value of ['auto', 'on', 'off'])
+					dropdown.addOption(value, value === 'auto' ? 'Auto' : value === 'on' ? 'Always on' : 'Off');
 				dropdown
-					.addOption('auto', 'Auto')
-					.addOption('on', 'Always on')
-					.addOption('off', 'Off')
 					.setValue(this.plugin.settings.touchControls)
 					.onChange(async (value) => {
-						this.plugin.settings.touchControls = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Wrap arrow navigation')
-			.setDesc(
-				'At the edge of the map, continue from the opposite edge instead of stopping.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.wrapArrowNavigation)
-					.onChange(async (value) => {
-						this.plugin.settings.wrapArrowNavigation = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Arrow corridor buffer')
-			.setDesc(
-				'Extra tolerance around the straight navigation line. Outside it, the directional wedge uses the corners of the complete map bounds.'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.navigationCrossAxisBuffer)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0) {
-							this.plugin.settings.navigationCrossAxisBuffer =
-								num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Navigation zoom padding')
-			.setDesc(
-				'Extra space around the target node when zooming after navigation (px). 0 = tight zoom.'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.navigationZoomPadding)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0) {
-							this.plugin.settings.navigationZoomPadding = num;
-							debouncedSave();
-						}
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Markmap export frontmatter')
-			.setDesc(
-				'Include portable Markmap YAML options in new Markdown exports. Frontmatter imported from a file is always preserved.'
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.exportMarkmapFrontmatter)
-					.onChange(async (value) => {
-						this.plugin.settings.exportMarkmapFrontmatter = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new import_obsidian3.Setting(containerEl)
-			.setName('Markmap color freeze level')
-			.setDesc(
-				'Default colorFreezeLevel written to new Markmap Markdown exports (0–10).'
-			)
-			.addText((text) =>
-				text
-					.setValue(
-						String(this.plugin.settings.markmapColorFreezeLevel)
-					)
-					.onChange((value) => {
-						const num = parseInt(value, 10);
-						if (!isNaN(num) && num >= 0 && num <= 10) {
-							this.plugin.settings.markmapColorFreezeLevel = num;
-							debouncedSave();
-						}
-					})
-			);
+						const settings = await save({ touchControls: value });
+						dropdown.setValue(settings.touchControls);
+					});
+			});
+		const numericNames = {
+			horizontalGap: ['Horizontal gap', 'Space between parent and child topics (px).'],
+			verticalGap: ['Vertical gap', 'Space between sibling topics (px).'],
+			minNodeWidth: ['Minimum automatic width', 'Smallest card width used by automatic layout (px).'],
+			maxNodeWidth: ['Maximum auto width', 'Safety limit for exceptionally wide content (px).'],
+			defaultNodeWidth: ['Default node width', 'Width of newly created topics (px).'],
+			defaultNodeHeight: ['Default node height', 'Height of newly created topics (px).'],
+			maxNodeHeight: ['Maximum auto height', 'Safety limit for exceptionally tall content (px).'],
+			navigationCrossAxisBuffer: ['Arrow corridor buffer', 'Extra tolerance around the straight navigation line.'],
+			navigationZoomPadding: ['Navigation zoom padding', 'Extra space around a navigation target (px).'],
+			markmapColorFreezeLevel: ['Markmap color freeze level', 'Default value written to new Markmap exports (0–10).']
+		};
+		for (const field of SETTINGS_FIELDS) {
+			if (field.type !== 'number') continue;
+			const [name, description] = numericNames[field.key] || [field.key, field.key];
+			new import_obsidian3.Setting(containerEl)
+				.setName(name)
+				.setDesc(description)
+				.addText((text) =>
+					text
+						.setValue(String(this.plugin.settings[field.key]))
+						.onChange(async (rawValue) => {
+							const settings = await save({ [field.key]: rawValue });
+							text.setValue(String(settings[field.key]));
+						})
+				);
+		}
 	}
 };
-
-// src/canvas/subtree-drag.ts
-function collectDescendants(canvas, canvasApi, nodeId) {
-	const result = [];
-	const visited = /* @__PURE__ */ new Set([nodeId]);
-	const queue = [nodeId];
-	for (let cursor = 0; cursor < queue.length; cursor++) {
-		const id = queue[cursor];
-		for (const edge of canvasApi.getOutgoingEdges(canvas, id)) {
-			const childId = edge.to.node.id;
-			if (!visited.has(childId)) {
-				visited.add(childId);
-				result.push(edge.to.node);
-				queue.push(childId);
-			}
-		}
-	}
-	return result;
-}
-function registerSubtreeDragHandler(
-	canvas,
-	canvasApi,
-	onDragEnd,
-	enabled = () => true
-) {
-	var _a, _b, _c;
-	let draggedNode = null;
-	let cachedDescendants = null;
-	let originalMoveTo = null;
-	let dragStartX = 0;
-	let dragStartY = 0;
-	function installWrapper(node) {
-		const descendants = collectDescendants(canvas, canvasApi, node.id);
-		draggedNode = node;
-		cachedDescendants = descendants;
-		dragStartX = node.x;
-		dragStartY = node.y;
-		if (descendants.length === 0) return;
-		const proto = Object.getPrototypeOf(node);
-		originalMoveTo = proto.moveTo.bind(node);
-		node.moveTo = (pos) => {
-			const dx = pos.x - node.x;
-			const dy = pos.y - node.y;
-			originalMoveTo(pos);
-			for (const desc of cachedDescendants) {
-				const descProto = Object.getPrototypeOf(desc);
-				descProto.moveTo.call(desc, { x: desc.x + dx, y: desc.y + dy });
-			}
-		};
-	}
-	function clearDragSession() {
-		if (draggedNode && originalMoveTo) {
-			delete draggedNode.moveTo;
-		}
-		draggedNode = null;
-		cachedDescendants = null;
-		originalMoveTo = null;
-		dragStartX = 0;
-		dragStartY = 0;
-	}
-	const downHandler = (e) => {
-		if (!enabled()) return;
-		if (draggedNode) clearDragSession();
-		const node = findNodeFromEvent(canvas, e);
-		if (node) {
-			installWrapper(node);
-		}
-	};
-	const moveHandler = (e) => {
-		if (!enabled()) {
-			clearDragSession();
-			return;
-		}
-		if (e.buttons === 0) return;
-		if (!draggedNode) {
-			const node = canvasApi.getSelectedNode(canvas);
-			if (node) installWrapper(node);
-			if (!draggedNode) return;
-		}
-		const currentSelected = canvasApi.getSelectedNode(canvas);
-		if (!currentSelected || currentSelected.id !== draggedNode.id) {
-			clearDragSession();
-		}
-	};
-	const upHandler = () => {
-		if (!draggedNode) return;
-		if (!enabled()) {
-			clearDragSession();
-			return;
-		}
-		const completedNode = draggedNode;
-		const moved =
-			Math.abs(completedNode.x - dragStartX) > 0.5 ||
-			Math.abs(completedNode.y - dragStartY) > 0.5;
-		canvas.requestSave();
-		clearDragSession();
-		if (moved && onDragEnd) onDragEnd(completedNode);
-	};
-	(_a = canvas.wrapperEl) == null
-		? void 0
-		: _a.addEventListener('pointerdown', downHandler, true);
-	(_b = canvas.wrapperEl) == null
-		? void 0
-		: _b.addEventListener('pointermove', moveHandler);
-	(_c = canvas.wrapperEl) == null
-		? void 0
-		: _c.addEventListener('pointerup', upHandler);
-	return () => {
-		var _a2, _b2, _c2;
-		clearDragSession();
-		(_a2 = canvas.wrapperEl) == null
-			? void 0
-			: _a2.removeEventListener('pointerdown', downHandler, true);
-		(_b2 = canvas.wrapperEl) == null
-			? void 0
-			: _b2.removeEventListener('pointermove', moveHandler);
-		(_c2 = canvas.wrapperEl) == null
-			? void 0
-			: _c2.removeEventListener('pointerup', upHandler);
-	};
-}
 
 // src/canvas/group-drag.ts
 function identifyStrangers(canvas, canvasApi, group, groupIds) {
@@ -45191,73 +52074,95 @@ function identifyStrangers(canvas, canvasApi, group, groupIds) {
 	return Array.from(strangerIds).map((id) => insideNodes.get(id));
 }
 function registerGroupDragHandler(canvas, canvasApi, enabled = () => true) {
-	var _a, _b;
-	const frozenNodes = [];
-	const downHandler = (e) => {
-		if (!enabled()) return;
-		if (!e.altKey) return;
-		const node = findNodeFromEvent(canvas, e);
-		if (!node) return;
-		const groupIds = getGroupIds(canvas);
-		if (!groupIds.has(node.id)) return;
-		const strangers = identifyStrangers(canvas, canvasApi, node, groupIds);
-		for (const stranger of strangers) {
-			frozenNodes.push(stranger);
+	const wrapper = canvas.wrapperEl;
+	const view = wrapper?.ownerDocument?.defaultView;
+	const frozen = [];
+	let activePointerId = null;
+	let finished = false;
+	const finish = (reason, event = null) => {
+		if (finished) return false;
+		if (event && activePointerId !== null && event.pointerId !== undefined &&
+			event.pointerId !== activePointerId) return false;
+		finished = true;
+		activePointerId = null;
+		let changed = false;
+		for (const record of frozen) {
+			if (record.hadOwn) record.node.moveTo = record.original;
+			else delete record.node.moveTo;
+			changed = true;
+		}
+		frozen.length = 0;
+		if (reason === 'commit' && changed) canvas.requestSave();
+		return changed;
+	};
+	const downHandler = (event) => {
+		if (!enabled() || event.button !== 0 || !event.altKey) return;
+		const node = findNodeFromEvent(canvas, event);
+		if (!node || !getGroupIds(canvas).has(node.id)) return;
+		finish('replace');
+		finished = false;
+		activePointerId = event.pointerId ?? null;
+		for (const stranger of identifyStrangers(canvas, canvasApi, node, getGroupIds(canvas))) {
+			frozen.push({
+				node: stranger,
+				hadOwn: Object.prototype.hasOwnProperty.call(stranger, 'moveTo'),
+				original: stranger.moveTo
+			});
 			stranger.moveTo = () => {};
 		}
 	};
-	const upHandler = () => {
-		if (frozenNodes.length === 0) return;
-		for (const node of frozenNodes) {
-			delete node.moveTo;
+	const commit = (event) => finish('commit', event);
+	const cancel = (event) => finish('cancel', event);
+	const blur = () => finish('blur');
+	wrapper?.addEventListener('pointerdown', downHandler, true);
+	wrapper?.addEventListener('pointerup', commit, true);
+	wrapper?.addEventListener('pointercancel', cancel, true);
+	wrapper?.addEventListener('lostpointercapture', cancel, true);
+	view?.addEventListener?.('blur', blur);
+	const owner = {
+		finish,
+		dispose(reason = 'teardown') {
+			finish(reason);
+			wrapper?.removeEventListener('pointerdown', downHandler, true);
+			wrapper?.removeEventListener('pointerup', commit, true);
+			wrapper?.removeEventListener('pointercancel', cancel, true);
+			wrapper?.removeEventListener('lostpointercapture', cancel, true);
+			view?.removeEventListener?.('blur', blur);
 		}
-		frozenNodes.length = 0;
-		canvas.requestSave();
 	};
-	(_a = canvas.wrapperEl) == null
-		? void 0
-		: _a.addEventListener('pointerdown', downHandler, true);
-	(_b = canvas.wrapperEl) == null
-		? void 0
-		: _b.addEventListener('pointerup', upHandler);
-	return () => {
-		var _a2, _b2;
-		if (frozenNodes.length > 0) {
-			for (const node of frozenNodes) {
-				delete node.moveTo;
-			}
-			frozenNodes.length = 0;
-		}
-		(_a2 = canvas.wrapperEl) == null
-			? void 0
-			: _a2.removeEventListener('pointerdown', downHandler, true);
-		(_b2 = canvas.wrapperEl) == null
-			? void 0
-			: _b2.removeEventListener('pointerup', upHandler);
-	};
+	return owner;
 }
 
 // src/ui/auto-resize.ts
-function getEditorElements(node) {
-	var _a;
-	const iframe =
-		(_a = node.contentEl) == null ? void 0 : _a.querySelector('iframe');
-	if (!(iframe == null ? void 0 : iframe.contentDocument))
-		return { iframe: null, scroller: null, cmContent: null };
-	const scroller = iframe.contentDocument.querySelector('.cm-scroller');
-	const cmContent = iframe.contentDocument.querySelector('.cm-content');
-	return { iframe, scroller, cmContent };
-}
 function registerAutoResize(canvas, config, onEditExit) {
 	var _a, _b, _c;
 	let activeNode = null;
+	let pendingTimer = null;
+	let watchGeneration = 0;
+	function clearPending() {
+		if (pendingTimer !== null) clearTimeout(pendingTimer);
+		pendingTimer = null;
+	}
+	function scheduleStop(expectedNode) {
+		clearPending();
+		const generation = ++watchGeneration;
+		pendingTimer = setTimeout(() => {
+			pendingTimer = null;
+			if (generation !== watchGeneration || activeNode !== expectedNode) return;
+			if (!expectedNode.isEditing) stopWatching();
+		}, 50);
+	}
 	function startWatching(node) {
 		if (typeof config.enabled === 'function' && !config.enabled()) return;
+		clearPending();
+		watchGeneration++;
 		if (node.nodeEl)
 			node.nodeEl.removeClass('tomindmap-navigation-selected');
 		activeNode = node;
 	}
 	function stopWatching(triggerRelayout = true) {
+		clearPending();
+		watchGeneration++;
 		if (!activeNode) return;
 		const node = activeNode;
 		activeNode = null;
@@ -45287,22 +52192,14 @@ function registerAutoResize(canvas, config, onEditExit) {
 	};
 	const focusOutHandler = () => {
 		if (!activeNode) return;
-		setTimeout(() => {
-			if (activeNode && !activeNode.isEditing) {
-				stopWatching();
-			}
-		}, 50);
+		scheduleStop(activeNode);
 	};
 	const pointerHandler = (e) => {
 		var _a2;
 		if (!activeNode) return;
 		if ((_a2 = activeNode.nodeEl) == null ? void 0 : _a2.contains(e.target))
 			return;
-		setTimeout(() => {
-			if (activeNode && !activeNode.isEditing) {
-				stopWatching();
-			}
-		}, 50);
+		scheduleStop(activeNode);
 	};
 	(_a = canvas.wrapperEl) == null
 		? void 0
@@ -45333,24 +52230,127 @@ function registerAutoResize(canvas, config, onEditExit) {
 	};
 }
 
-// src/ui/outline-view.ts
 var import_obsidian4 = require('obsidian');
 var OUTLINE_VIEW_TYPE = 'tomindmap-outline';
+function outlineTreeDescendants(tree) {
+	const result = [];
+	const stack = [...(tree?.children || [])].reverse();
+	while (stack.length > 0) {
+		const item = stack.pop();
+		if (!item) continue;
+		result.push(item);
+		for (let index = item.children.length - 1; index >= 0; index--)
+			stack.push(item.children[index]);
+	}
+	return result;
+}
+
+function buildOutlineModel(canvas) {
+	try {
+		if (!canvas || typeof canvas.getData !== 'function' || !canvas.nodes)
+			return { ok: false, reason: 'invalid-canvas' };
+		const data = canvas.getData();
+		if (!data || typeof data !== 'object' || !Array.isArray(data.nodes) || !Array.isArray(data.edges))
+			return { ok: false, reason: 'invalid-canvas-data' };
+		const records = new Map();
+		for (const record of data.nodes) {
+			if (!record || typeof record !== 'object' || typeof record.id !== 'string' || !record.id)
+				return { ok: false, reason: 'invalid-node-record' };
+			if (records.has(record.id))
+				return { ok: false, reason: 'duplicate-node-record' };
+			records.set(record.id, record);
+		}
+		const forest = buildForest(canvas);
+		const nodes = new Map();
+		const collapsibleNodeIds = [];
+		const pending = [...forest].reverse();
+		while (pending.length > 0) {
+			const tree = pending.pop();
+			const id = tree?.canvasNode?.id;
+			if (typeof id !== 'string' || nodes.has(id))
+				return { ok: false, reason: 'invalid-forest' };
+			nodes.set(id, tree);
+			if (tree.children.length > 0) collapsibleNodeIds.push(id);
+			for (let index = tree.children.length - 1; index >= 0; index--)
+				pending.push(tree.children[index]);
+		}
+		const groups = [];
+		for (const record of data.nodes) {
+			if (record.type !== 'group' && record.label === undefined) continue;
+			if (typeof record.label !== 'string')
+				return { ok: false, reason: 'invalid-group-label' };
+			const node = canvas.nodes.get(record.id);
+			if (!node || ![node.x, node.y, node.width, node.height].every(Number.isFinite))
+				return { ok: false, reason: 'invalid-group-geometry' };
+			groups.push({
+				node,
+				label: record.label.trim() || 'Untitled Group',
+				area: node.width * node.height,
+				roots: []
+			});
+		}
+		groups.sort((left, right) =>
+			left.node.y - right.node.y ||
+			left.node.x - right.node.x ||
+			String(left.node.id).localeCompare(String(right.node.id))
+		);
+		const ungrouped = [];
+		for (const root of forest) {
+			const node = root.canvasNode;
+			const centerX = Number(node.x) + Number(node.width) / 2;
+			const centerY = Number(node.y) + Number(node.height) / 2;
+			let selectedGroup = null;
+			for (const group of groups) {
+				const area = group.node;
+				if (
+					centerX >= area.x && centerX <= area.x + area.width &&
+					centerY >= area.y && centerY <= area.y + area.height &&
+					(!selectedGroup || group.area < selectedGroup.area)
+				) selectedGroup = group;
+			}
+			if (selectedGroup) selectedGroup.roots.push(root);
+			else ungrouped.push(root);
+		}
+		return {
+			ok: true,
+			value: {
+				canvas,
+				forest,
+				groups: groups.filter((group) => group.roots.length > 0),
+				ungrouped,
+				nodes,
+				collapsibleNodeIds
+			}
+		};
+	} catch (error) {
+		return { ok: false, reason: 'invalid-canvas', error };
+	}
+}
+
+async function writeClipboardText(value, clipboard = globalThis.navigator?.clipboard) {
+	if (typeof clipboard?.writeText !== 'function')
+		throw new Error('Clipboard access is unavailable');
+	await clipboard.writeText(String(value || ''));
+	return true;
+}
+
 var OutlineView = class extends import_obsidian4.ItemView {
 	constructor(leaf) {
 		super(leaf);
 		this.canvasLeaf = null;
-		this.collapsedGroups = /* @__PURE__ */ new Set();
-		this.collapsedNodes = /* @__PURE__ */ new Set();
-		this.selectedRoots = /* @__PURE__ */ new Set();
+		this.collapsedGroups = new Set();
+		this.collapsedNodes = new Set();
+		this.selectedRoots = new Set();
 		this.lastCanvas = null;
 		this.groupIds = [];
 		this.collapsibleNodeIds = [];
 		this.draggedRoot = null;
 		this.dragSourceGroupId = null;
+		this.dragAllowedRoots = new Set();
 		this.activeNodeId = null;
-		this.allItemEls = /* @__PURE__ */ new Map();
-		this.groupElMap = /* @__PURE__ */ new Map();
+		this.allItemEls = new Map();
+		this.allTreeItems = new Map();
+		this.groupElMap = new Map();
 		this.searchQuery = '';
 		this.navHeaderEl = null;
 		this.collapseBtnEl = null;
@@ -45358,90 +52358,82 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		this.searchComponent = null;
 		this.zoomPadding = 0;
 		this.onForestLayout = null;
+		this.model = null;
+		this.viewDisposers = [];
+		this.session = {
+			canvas: null,
+			generation: 0,
+			timers: new Set(),
+			disposers: new Set()
+		};
 	}
-	getViewType() {
-		return OUTLINE_VIEW_TYPE;
-	}
-	getDisplayText() {
-		return 'Map outline';
-	}
-	getIcon() {
-		return 'list-tree';
-	}
+	getViewType() { return OUTLINE_VIEW_TYPE; }
+	getDisplayText() { return 'Map outline'; }
+	getIcon() { return 'list-tree'; }
 	onOpen() {
 		this.contentEl.addClass('tomindmap-outline');
+		this.contentEl.setAttribute('role', 'tree');
+		this.contentEl.setAttribute('aria-label', 'Map outline');
 		const navHeader = this.containerEl.createDiv({ cls: 'nav-header' });
 		this.containerEl.insertBefore(navHeader, this.contentEl);
 		this.navHeaderEl = navHeader;
-		const navButtons = navHeader.createDiv({
-			cls: 'nav-buttons-container'
-		});
-		const searchBtn = navButtons.createDiv({
+		const navButtons = navHeader.createDiv({ cls: 'nav-buttons-container' });
+		const searchBtn = navButtons.createEl('button', {
 			cls: 'clickable-icon nav-action-button',
-			attr: { 'aria-label': 'Search' }
+			attr: { type: 'button', 'aria-label': 'Search map outline' }
 		});
 		(0, import_obsidian4.setIcon)(searchBtn, 'search');
-		this.collapseBtnEl = navButtons.createDiv({
+		this.collapseBtnEl = navButtons.createEl('button', {
 			cls: 'clickable-icon nav-action-button',
-			attr: { 'aria-label': 'Collapse all' }
+			attr: { type: 'button', 'aria-label': 'Collapse all' }
 		});
 		(0, import_obsidian4.setIcon)(this.collapseBtnEl, 'chevrons-down-up');
-		this.collapseBtnEl.addEventListener('click', () => {
-			if (!this.lastCanvas) return;
-			const hasCollapsibleItems =
-				this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
-			const allCollapsed =
-				hasCollapsibleItems &&
-				this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
-				this.collapsibleNodeIds.every((id) =>
-					this.collapsedNodes.has(id)
-				);
-			if (allCollapsed) {
-				this.collapsedGroups.clear();
-				this.collapsedNodes.clear();
-			} else {
-				for (const id of this.groupIds) this.collapsedGroups.add(id);
-				for (const id of this.collapsibleNodeIds)
-					this.collapsedNodes.add(id);
-			}
-			this.refresh(this.lastCanvas);
-		});
-		this.searchContainerEl = navHeader.createDiv({
-			cls: 'tomindmap-outline-search-container'
-		});
+		this.addViewListener(searchBtn, 'click', () => this.toggleSearch());
+		this.addViewListener(this.collapseBtnEl, 'click', () => this.toggleAllCollapsed());
+		this.searchContainerEl = navHeader.createDiv({ cls: 'tomindmap-outline-search-container' });
 		this.searchContainerEl.hide();
-		this.searchComponent = new import_obsidian4.SearchComponent(
-			this.searchContainerEl
-		);
+		this.searchComponent = new import_obsidian4.SearchComponent(this.searchContainerEl);
 		this.searchComponent.setPlaceholder('Filter...');
 		this.searchComponent.onChange((value) => {
 			this.searchQuery = value;
-			this.applyFilter();
+			if (this.model) this.renderModel(this.model);
 		});
-		searchBtn.addEventListener('click', () => {
-			if (!this.searchContainerEl || !this.searchComponent) return;
-			if (this.searchContainerEl.isShown()) {
-				this.searchContainerEl.hide();
-				this.searchQuery = '';
-				this.searchComponent.setValue('');
-				this.applyFilter();
-			} else {
-				this.searchContainerEl.show();
-				this.searchComponent.inputEl.focus();
-			}
-		});
+		this.installDelegatedListeners();
+		if (this.lastCanvas) this.refresh(this.lastCanvas);
+		else this.clear();
 		return Promise.resolve();
 	}
 	onClose() {
-		this.clear();
-		if (this.navHeaderEl) {
-			this.navHeaderEl.remove();
-			this.navHeaderEl = null;
-		}
+		this.disposeCanvasSession();
+		for (const dispose of this.viewDisposers.splice(0)) dispose();
+		if (this.navHeaderEl) this.navHeaderEl.remove();
+		this.navHeaderEl = null;
 		this.collapseBtnEl = null;
 		this.searchContainerEl = null;
 		this.searchComponent = null;
 		return Promise.resolve();
+	}
+	addViewListener(target, type, listener, options) {
+		target.addEventListener(type, listener, options);
+		const dispose = () => target.removeEventListener(type, listener, options);
+		this.viewDisposers.push(dispose);
+		return dispose;
+	}
+	installDelegatedListeners() {
+		this.addViewListener(this.contentEl, 'click', (event) => this.handleOutlineClick(event));
+		this.addViewListener(this.contentEl, 'dblclick', (event) => this.handleOutlineDoubleClick(event));
+		this.addViewListener(this.contentEl, 'contextmenu', (event) => this.handleOutlineContextMenu(event));
+		this.addViewListener(this.contentEl, 'keydown', (event) => this.handleOutlineKeydown(event));
+		this.addViewListener(this.contentEl, 'pointerdown', (event) => {
+			const handle = event.target?.closest?.('.tomindmap-outline-drag-handle');
+			const id = handle?.parentElement?.getAttribute?.('data-outline-id');
+			if (id) this.dragAllowedRoots.add(id);
+		});
+		this.addViewListener(this.contentEl, 'dragstart', (event) => this.handleOutlineDragStart(event));
+		this.addViewListener(this.contentEl, 'dragend', () => this.clearOutlineDrag());
+		this.addViewListener(this.contentEl, 'dragover', (event) => this.handleOutlineDragOver(event));
+		this.addViewListener(this.contentEl, 'dragleave', (event) => this.handleOutlineDragLeave(event));
+		this.addViewListener(this.contentEl, 'drop', (event) => this.handleOutlineDrop(event));
 	}
 	openSearch() {
 		if (!this.searchContainerEl || !this.searchComponent) return;
@@ -45449,484 +52441,418 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		this.searchComponent.inputEl.focus();
 		this.searchComponent.inputEl.select();
 	}
-	/**
-	 * Rebuild the outline from the current canvas state.
-	 */
-	refresh(canvas) {
-		var _a;
-		this.contentEl.empty();
-		this.selectedRoots.clear();
-		this.groupElMap.clear();
-		this.allItemEls.clear();
-		this.lastCanvas = canvas;
-		this.canvasLeaf =
-			(_a = this.app.workspace.getLeavesOfType('canvas').find((l) => {
-				var _a2;
-				return (
-					((_a2 = l.view) == null ? void 0 : _a2.canvas) === canvas
-				);
-			})) != null
-				? _a
-				: null;
-		if (this.searchComponent) {
-			this.searchComponent.setValue(this.searchQuery);
+	toggleSearch() {
+		if (!this.searchContainerEl || !this.searchComponent) return;
+		if (this.searchContainerEl.isShown()) {
+			this.searchContainerEl.hide();
+			this.searchQuery = '';
+			this.searchComponent.setValue('');
+			if (this.model) this.renderModel(this.model);
+		} else {
+			this.searchContainerEl.show();
+			this.searchComponent.inputEl.focus();
 		}
-		const forest = buildForest(canvas);
+	}
+	toggleAllCollapsed() {
+		if (!this.lastCanvas || !this.model) return;
+		const ids = [...this.groupIds, ...this.collapsibleNodeIds];
+		if (ids.length === 0) return;
+		const allCollapsed = this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
+			this.collapsibleNodeIds.every((id) => this.collapsedNodes.has(id));
+		if (allCollapsed) {
+			this.collapsedGroups.clear();
+			this.collapsedNodes.clear();
+		} else {
+			for (const id of this.groupIds) this.collapsedGroups.add(id);
+			for (const id of this.collapsibleNodeIds) this.collapsedNodes.add(id);
+		}
+		this.renderModel(this.model);
+	}
+	activateCanvasSession(canvas) {
+		if (this.session.canvas === canvas) return;
+		this.disposeCanvasSession();
+		this.session.canvas = canvas;
+		this.session.generation++;
+		this.collapsedGroups.clear();
+		this.collapsedNodes.clear();
+		this.selectedRoots.clear();
+		this.groupIds = [];
 		this.collapsibleNodeIds = [];
-		const collectCollapsibleNodes = (topic) => {
-			if (topic.children.length > 0)
-				this.collapsibleNodeIds.push(topic.canvasNode.id);
-			for (const child of topic.children) collectCollapsibleNodes(child);
-		};
-		for (const root of forest) collectCollapsibleNodes(root);
-		if (forest.length === 0) {
+		this.activeNodeId = null;
+		this.clearOutlineDrag();
+	}
+	disposeCanvasSession() {
+		for (const timer of this.session.timers) clearTimeout(timer);
+		this.session.timers.clear();
+		for (const dispose of this.session.disposers) dispose();
+		this.session.disposers.clear();
+		this.dragAllowedRoots.clear();
+	}
+	trackSessionTimeout(callback, delay) {
+		const generation = this.session.generation;
+		const timer = setTimeout(() => {
+			this.session.timers.delete(timer);
+			if (!this.lastCanvas || this.session.generation !== generation) return;
+			callback();
+		}, delay);
+		this.session.timers.add(timer);
+		return timer;
+	}
+	refresh(canvas) {
+		const decoded = buildOutlineModel(canvas);
+		if (!decoded.ok) return false;
+		const model = decoded.value;
+		this.activateCanvasSession(canvas);
+		this.lastCanvas = canvas;
+		this.model = model;
+		this.canvasLeaf = this.app.workspace.getLeavesOfType('canvas').find((leaf) => leaf.view?.canvas === canvas) || null;
+		if (this.searchComponent) this.searchComponent.setValue(this.searchQuery);
+		this.collapsibleNodeIds = model.collapsibleNodeIds;
+		this.renderModel(model);
+		return true;
+	}
+	renderModel(model) {
+		const canvas = model.canvas;
+		this.contentEl.empty();
+		this.contentEl.setAttribute('role', 'tree');
+		this.contentEl.setAttribute('aria-label', 'Map outline');
+		this.allItemEls.clear();
+		this.allTreeItems.clear();
+		this.groupElMap.clear();
+		this.groupIds = model.groups.map((group) => group.node.id);
+		if (model.ungrouped.length === 0 && model.groups.length === 0) {
 			this.contentEl.createDiv({
 				cls: 'tomindmap-outline-empty',
-				text: 'No root nodes'
+				text: 'No root topics',
+				attr: { role: 'status' }
 			});
+			this.updateCollapseButton();
 			return;
 		}
-		const groups = [];
-		for (const nd of canvas.getData().nodes) {
-			if (nd.type !== 'group') continue;
-			const node = canvas.nodes.get(nd.id);
-			if (!node) continue;
-			groups.push({
-				node,
-				label: (nd.label || '').trim() || 'Untitled Group',
-				area: node.width * node.height,
-				roots: []
+		if (model.ungrouped.length > 0) {
+			const zone = this.contentEl.createDiv({
+				cls: 'tomindmap-outline-ungrouped-zone',
+				attr: { role: 'group', 'aria-label': 'Ungrouped topics', 'data-outline-drop': 'ungrouped' }
 			});
+			for (const root of model.ungrouped)
+				this.renderTopicBranch(zone, root, canvas, 1, null, true);
 		}
-		groups.sort((a, b) => {
-			const dy = a.node.y - b.node.y;
-			if (Math.abs(dy) > 50) return dy;
-			return a.node.x - b.node.x;
-		});
-		const ungrouped = [];
-		for (const root of forest) {
-			const cx = root.canvasNode.x + root.canvasNode.width / 2;
-			const cy = root.canvasNode.y + root.canvasNode.height / 2;
-			let bestGroup = null;
-			for (const g of groups) {
-				if (
-					cx >= g.node.x &&
-					cx <= g.node.x + g.node.width &&
-					cy >= g.node.y &&
-					cy <= g.node.y + g.node.height
-				) {
-					if (!bestGroup || g.area < bestGroup.area) {
-						bestGroup = g;
-					}
+		for (const group of model.groups)
+			this.renderGroup(group, canvas);
+		this.applyFilter();
+		this.updateCollapseButton();
+		if (this.activeNodeId) this.setActiveItem(this.activeNodeId);
+	}
+	renderTopicBranch(container, rootTree, canvas, level, groupId, isRoot) {
+		const pending = [{ tree: rootTree, container, level, groupId, isRoot }];
+		while (pending.length > 0) {
+			const current = pending.pop();
+			const tree = current.tree;
+			const node = tree.canvasNode;
+			const nodeId = node.id;
+			const hasChildren = tree.children.length > 0;
+			const isCollapsed = hasChildren && !this.searchQuery &&
+				(this.collapsedNodes.has(nodeId) || (current.isRoot && this.collapsedGroups.has(groupId)));
+			const treeItem = current.container.createDiv({
+				cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`,
+				attr: {
+					role: 'treeitem',
+					'aria-level': String(current.level),
+					'aria-expanded': hasChildren ? String(!isCollapsed) : null,
+					'aria-selected': 'false',
+					'data-outline-kind': 'node',
+					'data-outline-id': nodeId,
+					'data-tomindmap-search-text': MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))
+				}
+			});
+			this.allTreeItems.set(nodeId, treeItem);
+			const self = treeItem.createDiv({ cls: 'tree-item-self', attr: { role: 'none' } });
+			const collapse = self.createEl('button', {
+				cls: 'tree-item-icon collapse-icon',
+				attr: {
+					type: 'button',
+					'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} ${MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))}`,
+					'aria-expanded': hasChildren ? String(!isCollapsed) : null,
+					'data-outline-action': 'collapse-node',
+					'data-outline-id': nodeId
+				}
+			});
+			collapse.disabled = !hasChildren;
+			(0, import_obsidian4.setIcon)(collapse, hasChildren ? 'right-triangle' : 'minus');
+			if (current.isRoot) {
+				const handle = self.createDiv({
+					cls: 'tree-item-icon tomindmap-outline-drag-handle',
+					attr: { 'aria-hidden': 'true' }
+				});
+				(0, import_obsidian4.setIcon)(handle, 'grip-vertical');
+			}
+			const select = self.createEl('button', {
+				cls: 'tree-item-inner is-clickable tomindmap-outline-item',
+				text: MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node)),
+				attr: {
+					type: 'button',
+					'aria-label': `Select ${MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))}`,
+					'data-outline-action': 'select-node',
+					'data-outline-id': nodeId,
+					'data-tomindmap-search-text': MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node))
+				}
+			});
+			select.draggable = Boolean(current.isRoot && groupId == null);
+			this.allItemEls.set(nodeId, select);
+			if (hasChildren && !isCollapsed) {
+				const children = treeItem.createDiv({
+					cls: 'tree-item-children',
+					attr: { role: 'group' }
+				});
+				for (let index = tree.children.length - 1; index >= 0; index--) {
+					pending.push({
+						tree: tree.children[index],
+						container: children,
+						level: current.level + 1,
+						groupId: current.groupId,
+						isRoot: false
+					});
 				}
 			}
-			if (bestGroup) {
-				bestGroup.roots.push(root);
-			} else {
-				ungrouped.push(root);
+		}
+	}
+	renderGroup(group, canvas) {
+		const collapsed = this.collapsedGroups.has(group.node.id) && !this.searchQuery;
+		const treeItem = this.contentEl.createDiv({
+			cls: `tree-item tomindmap-outline-group${collapsed ? ' is-collapsed' : ''}`,
+			attr: {
+				role: 'treeitem',
+				'aria-level': '1',
+				'aria-expanded': String(!collapsed),
+				'data-outline-kind': 'group',
+				'data-outline-id': group.node.id,
+				'data-tomindmap-search-text': group.label
 			}
+		});
+		this.allTreeItems.set(group.node.id, treeItem);
+		const self = treeItem.createDiv({ cls: 'tree-item-self', attr: { role: 'none' } });
+		const collapse = self.createEl('button', {
+			cls: 'tree-item-icon collapse-icon',
+			attr: {
+				type: 'button',
+				'aria-label': `${collapsed ? 'Expand' : 'Collapse'} group ${group.label}`,
+				'aria-expanded': String(!collapsed),
+				'data-outline-action': 'collapse-group',
+				'data-outline-id': group.node.id
+			}
+		});
+		(0, import_obsidian4.setIcon)(collapse, 'right-triangle');
+		const label = self.createEl('button', {
+			cls: 'tree-item-inner is-clickable',
+			text: group.label,
+			attr: {
+				type: 'button',
+				'aria-label': `${collapsed ? 'Expand' : 'Collapse'} group ${group.label}`,
+				'data-outline-action': 'collapse-group',
+				'data-outline-id': group.node.id,
+				'data-tomindmap-search-text': group.label
+			}
+		});
+		label.createSpan({ cls: 'tomindmap-outline-group-count', text: String(group.roots.length) });
+		this.groupElMap.set(group.node.id, self);
+		const children = treeItem.createDiv({ cls: 'tree-item-children', attr: { role: 'group' } });
+		if (!collapsed) {
+			for (const root of group.roots)
+				this.renderTopicBranch(children, root, canvas, 2, group.node.id, true);
 		}
-		const ungroupedZone = this.contentEl.createDiv({
-			cls: 'tomindmap-outline-ungrouped-zone'
-		});
-		ungroupedZone.addEventListener('dragover', (e) => {
-			if (!this.draggedRoot || !this.dragSourceGroupId) return;
-			e.preventDefault();
-			ungroupedZone.addClass('is-drag-over');
-		});
-		ungroupedZone.addEventListener('dragleave', () => {
-			ungroupedZone.removeClass('is-drag-over');
-		});
-		ungroupedZone.addEventListener('drop', (e) => {
-			e.preventDefault();
-			ungroupedZone.removeClass('is-drag-over');
-			if (
-				!this.draggedRoot ||
-				!this.dragSourceGroupId ||
-				!this.lastCanvas
-			)
-				return;
-			this.ungroupTree(this.draggedRoot, this.dragSourceGroupId);
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-		});
-		for (const root of ungrouped) {
-			this.renderRootItem(ungroupedZone, root, canvas, true);
-		}
-		for (const group of groups) {
-			if (group.roots.length === 0) continue;
-			this.renderGroup(group, canvas);
-		}
-		this.groupIds = groups
-			.filter((g) => g.roots.length > 0)
-			.map((g) => g.node.id);
-		const hasCollapsibleItems =
-			this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
-		const allCollapsed =
-			hasCollapsibleItems &&
+	}
+	updateCollapseButton() {
+		if (!this.collapseBtnEl) return;
+		const hasItems = this.groupIds.length > 0 || this.collapsibleNodeIds.length > 0;
+		const allCollapsed = hasItems &&
 			this.groupIds.every((id) => this.collapsedGroups.has(id)) &&
 			this.collapsibleNodeIds.every((id) => this.collapsedNodes.has(id));
-		if (this.collapseBtnEl) {
-			(0, import_obsidian4.setIcon)(
-				this.collapseBtnEl,
-				allCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'
-			);
-			this.collapseBtnEl.setAttribute(
-				'aria-label',
-				allCollapsed ? 'Expand all' : 'Collapse all'
-			);
-		}
-		if (this.searchQuery) this.applyFilter();
-		if (this.activeNodeId) {
-			const el = this.allItemEls.get(this.activeNodeId);
-			if (el) el.addClass('is-active');
-		}
+		(0, import_obsidian4.setIcon)(this.collapseBtnEl, allCollapsed ? 'chevrons-up-down' : 'chevrons-down-up');
+		this.collapseBtnEl.disabled = !hasItems;
+		this.collapseBtnEl.setAttribute('aria-label', allCollapsed ? 'Expand all' : 'Collapse all');
 	}
 	applyFilter() {
-		const q = this.searchQuery.toLowerCase().trim();
-		const items = Array.from(
-			this.contentEl.querySelectorAll('.tree-item')
-		).reverse();
+		const query = this.searchQuery.toLowerCase().trim();
+		const items = Array.from(this.contentEl.querySelectorAll('[role="treeitem"]'));
+		const childrenByItem = new Map();
 		for (const item of items) {
-			const label = item.querySelector(
-				':scope > .tree-item-self .tree-item-inner'
-			);
-			const itemSelf = item.querySelector(':scope > .tree-item-self');
-			const searchableText = (
-				itemSelf?.getAttribute('data-tomindmap-search-text') ||
-				label?.textContent ||
-				''
-			).toLowerCase();
-			const ownMatch = q === '' || searchableText.includes(q);
-			const children = Array.from(
-				item.querySelectorAll(
-					':scope > .tree-item-children > .tree-item'
-				)
-			);
-			const descendantMatch = children.some(
-				(child) => !child.hasClass('is-hidden')
-			);
-			const visible = ownMatch || descendantMatch;
+			const container = item.parentElement;
+			const parent = container?.hasClass?.('tree-item-children')
+				? container.parentElement
+				: null;
+			if (parent) {
+				const children = childrenByItem.get(parent) || [];
+				children.push(item);
+				childrenByItem.set(parent, children);
+			}
+		}
+		const hidden = new Map();
+		for (let index = items.length - 1; index >= 0; index--) {
+			const item = items[index];
+			const own = query === '' ||
+				String(item.getAttribute('data-tomindmap-search-text') || '').toLowerCase().includes(query);
+			const descendant = (childrenByItem.get(item) || [])
+				.some((child) => !hidden.get(child));
+			const visible = own || descendant;
+			hidden.set(item, !visible);
 			item.toggleClass('is-hidden', !visible);
-			if (q && descendantMatch) item.removeClass('is-collapsed');
-			if (!q) {
-				const collapseId = item.getAttribute(
-					'data-tomindmap-collapse-id'
-				);
-				const collapseKind = item.getAttribute(
-					'data-tomindmap-collapse-kind'
-				);
-				const collapsed =
-					collapseKind === 'group'
-						? this.collapsedGroups.has(collapseId)
-						: this.collapsedNodes.has(collapseId);
-				item.toggleClass('is-collapsed', !!collapseId && collapsed);
-			}
 		}
 	}
-	/**
-	 * Render a single root node as a tree-item.
-	 */
-	renderRootItem(container, root, canvas, isUngrouped, groupId) {
-		const rootMarkdown = canvasNodeMarkdownText(root.canvasNode);
-		const rootLabel = getRootTitle(rootMarkdown);
-		const isCollapsed = this.collapsedNodes.has(root.canvasNode.id);
-		const treeItem = container.createDiv({
-			cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`
-		});
-		treeItem.setAttribute('data-tomindmap-collapse-id', root.canvasNode.id);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'node');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-item',
-			attr: { 'data-tomindmap-search-text': rootLabel }
-		});
-		const branchIcon = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-branch-icon'
-		});
-		(0, import_obsidian4.setIcon)(
-			branchIcon,
-			root.children.length > 0 ? 'right-triangle' : 'minus'
-		);
-		if (root.children.length > 0) {
-			branchIcon.addClass('collapse-icon');
-			branchIcon.addEventListener('click', (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				const collapse = !treeItem.hasClass('is-collapsed');
-				treeItem.toggleClass('is-collapsed', collapse);
-				if (collapse) this.collapsedNodes.add(root.canvasNode.id);
-				else this.collapsedNodes.delete(root.canvasNode.id);
-			});
+	handleOutlineClick(event) {
+		const button = event.target?.closest?.('[data-outline-action]');
+		if (!button) return;
+		const id = button.getAttribute('data-outline-id');
+		const action = button.getAttribute('data-outline-action');
+		if (action === 'collapse-node') {
+			if (this.collapsedNodes.has(id)) this.collapsedNodes.delete(id);
+			else this.collapsedNodes.add(id);
+			if (this.model) this.renderModel(this.model);
+			return;
 		}
-		const dragHandle = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-drag-handle'
-		});
-		(0, import_obsidian4.setIcon)(dragHandle, 'grip-vertical');
-		self.createDiv({
-			cls: 'tree-item-inner',
-			text: rootLabel
-		});
-		let dragAllowed = false;
-		dragHandle.addEventListener('pointerdown', () => {
-			dragAllowed = true;
-		});
-		self.addEventListener('pointerup', () => {
-			dragAllowed = false;
-		});
-		self.setAttribute('draggable', 'true');
-		self.addEventListener('dragstart', (e) => {
-			var _a;
-			if (!dragAllowed) {
-				e.preventDefault();
-				return;
-			}
-			dragAllowed = false;
-			this.draggedRoot = root;
-			this.dragSourceGroupId = groupId != null ? groupId : null;
-			self.addClass('is-dragging');
-			(_a = e.dataTransfer) == null
-				? void 0
-				: _a.setData('text/plain', root.canvasNode.id);
-		});
-		self.addEventListener('dragend', () => {
-			self.removeClass('is-dragging');
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-			for (const [, el] of this.groupElMap) {
-				el.removeClass('is-drag-over');
-			}
-		});
-		this.allItemEls.set(root.canvasNode.id, self);
-		self.addEventListener('click', (e) => {
-			if (isUngrouped && e.ctrlKey) {
-				if (this.selectedRoots.has(root)) {
-					this.selectedRoots.delete(root);
-					self.removeClass('is-selected');
-				} else {
-					this.selectedRoots.add(root);
-					self.addClass('is-selected');
-				}
-				return;
-			}
-			this.clearSelection();
-			this.setActiveItem(root.canvasNode.id);
-			if (this.canvasLeaf) {
-				this.app.workspace.setActiveLeaf(this.canvasLeaf, {
-					focus: true
-				});
-			}
-			const node = root.canvasNode;
-			canvas.selectOnly(node);
-			const pad = this.zoomPadding;
-			const cx = node.x + node.width / 2;
-			const cy = node.y + node.height / 2;
-			canvas.zoomToBbox({
-				minX: cx - pad,
-				minY: cy - pad,
-				maxX: cx + pad,
-				maxY: cy + pad
-			});
-		});
-		self.addEventListener('contextmenu', (e) => {
-			e.preventDefault();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Copy node link')
-					.setIcon('link')
-					.onClick(() => {
-						const canvasPath = canvas.view.file.path;
-						const node = root.canvasNode;
-						if (node.file) {
-							const vaultName = this.app.vault.getName();
-							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-							);
-						} else if (node.url) {
-							void navigator.clipboard.writeText(node.url);
-						} else {
-							void navigator.clipboard.writeText(
-								`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-							);
-						}
-						new import_obsidian4.Notice('Node link copied');
-					});
-			});
-			if (isUngrouped) {
-				if (!this.selectedRoots.has(root)) {
-					this.clearSelection();
-					this.selectedRoots.add(root);
-					self.addClass('is-selected');
-				}
-				const count = this.selectedRoots.size;
-				menu.addItem((item) => {
-					item.setTitle(
-						`Create group (${count} root${count > 1 ? 's' : ''})`
-					)
-						.setIcon('group')
-						.onClick(() => this.createGroupFromSelection());
-				});
-			}
-			menu.showAtMouseEvent(e);
-		});
-		if (root.children.length > 0) {
-			const childrenContainer = treeItem.createDiv({
-				cls: 'tree-item-children'
-			});
-			for (const child of root.children) {
-				this.renderTopicItem(childrenContainer, child, canvas);
-			}
+		if (action === 'collapse-group') {
+			if (this.collapsedGroups.has(id)) this.collapsedGroups.delete(id);
+			else this.collapsedGroups.add(id);
+			if (this.model) this.renderModel(this.model);
+			return;
 		}
+		if (action === 'select-node') this.selectOutlineNode(id, event);
 	}
-	/**
-	 * Render every nested topic recursively, not just the central topic.
-	 */
-	renderTopicItem(container, topic, canvas) {
-		const topicMarkdown = canvasNodeMarkdownText(topic.canvasNode);
-		const topicLabel = getRootTitle(topicMarkdown);
-		const isCollapsed = this.collapsedNodes.has(topic.canvasNode.id);
-		const treeItem = container.createDiv({
-			cls: `tree-item${isCollapsed ? ' is-collapsed' : ''}`
-		});
-		treeItem.setAttribute(
-			'data-tomindmap-collapse-id',
-			topic.canvasNode.id
-		);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'node');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-item',
-			attr: { 'data-tomindmap-search-text': topicLabel }
-		});
-		const branchIcon = self.createDiv({
-			cls: 'tree-item-icon tomindmap-outline-branch-icon'
-		});
-		(0, import_obsidian4.setIcon)(
-			branchIcon,
-			topic.children.length > 0 ? 'right-triangle' : 'minus'
-		);
-		if (topic.children.length > 0) {
-			branchIcon.addClass('collapse-icon');
-			branchIcon.addEventListener('click', (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				const collapse = !treeItem.hasClass('is-collapsed');
-				treeItem.toggleClass('is-collapsed', collapse);
-				if (collapse) this.collapsedNodes.add(topic.canvasNode.id);
-				else this.collapsedNodes.delete(topic.canvasNode.id);
-			});
-		}
-		self.createDiv({
-			cls: 'tree-item-inner',
-			text: topicLabel
-		});
-		this.allItemEls.set(topic.canvasNode.id, self);
-		self.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.clearSelection();
-			this.setActiveItem(topic.canvasNode.id);
-			if (this.canvasLeaf) {
-				this.app.workspace.setActiveLeaf(this.canvasLeaf, {
-					focus: true
-				});
-			}
-			this.canvasApiSelectAndReveal(canvas, topic.canvasNode);
-		});
-		self.addEventListener('contextmenu', (event) => {
+	handleOutlineKeydown(event) {
+		const button = event.target?.closest?.('[data-outline-action]');
+		if (!button) return;
+		const id = button.getAttribute('data-outline-id');
+		const action = button.getAttribute('data-outline-action');
+		if ((event.key === 'Enter' || event.key === ' ') &&
+			(action === 'select-node' || action === 'collapse-group')) {
 			event.preventDefault();
-			event.stopPropagation();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Copy node link')
-					.setIcon('link')
-					.onClick(() => {
-						const canvasPath = canvas.view.file.path;
-						const node = topic.canvasNode;
-						if (node.file) {
-							const vaultName = this.app.vault.getName();
-							void navigator.clipboard.writeText(
-								`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-							);
-						} else if (node.url) {
-							void navigator.clipboard.writeText(node.url);
-						} else {
-							void navigator.clipboard.writeText(
-								`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-							);
-						}
-						new import_obsidian4.Notice('Node link copied');
-					});
-			});
-			menu.showAtMouseEvent(event);
-		});
-		if (topic.children.length > 0) {
-			const childrenContainer = treeItem.createDiv({
-				cls: 'tree-item-children'
-			});
-			for (const child of topic.children) {
-				this.renderTopicItem(childrenContainer, child, canvas);
+			this.handleOutlineClick({ target: button });
+			return;
+		}
+		if (event.key === 'ArrowRight' && action === 'collapse-node' && this.collapsedNodes.has(id)) {
+			event.preventDefault();
+			this.collapsedNodes.delete(id);
+			if (this.model) this.renderModel(this.model);
+		} else if (event.key === 'ArrowLeft' && action === 'collapse-node' && !this.collapsedNodes.has(id)) {
+			event.preventDefault();
+			this.collapsedNodes.add(id);
+			if (this.model) this.renderModel(this.model);
+		}
+	}
+	selectOutlineNode(id, event = {}) {
+		const tree = this.model?.nodes.get(id);
+		const node = tree?.canvasNode;
+		const canvas = this.lastCanvas;
+		if (!tree || !node || !canvas) return;
+		if (tree.parent == null && (event.ctrlKey || event.metaKey)) {
+			if (this.selectedRoots.has(tree)) {
+				this.selectedRoots.delete(tree);
+				this.allItemEls.get(id)?.removeClass('is-selected');
+			} else {
+				this.clearSelection();
+				this.selectedRoots.add(tree);
+				this.allItemEls.get(id)?.addClass('is-selected');
 			}
+			this.allItemEls.get(id)?.setAttribute('aria-pressed', String(this.selectedRoots.has(tree)));
+			return;
 		}
+		this.clearSelection();
+		this.setActiveItem(id);
+		if (this.canvasLeaf) this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
+		if (tree.parent == null) this.selectAndZoom(canvas, node);
+		else this.canvasApiSelectAndReveal(canvas, node);
 	}
-	canvasApiSelectAndReveal(canvas, node) {
+	handleOutlineDoubleClick(event) {
+		const group = event.target?.closest?.('[data-outline-kind="group"]');
+		if (!group || !this.model) return;
+		const id = group.getAttribute('data-outline-id');
+		const record = this.model.groups.find((candidate) => candidate.node.id === id);
+		const label = group.querySelector('.tree-item-inner');
+		if (record && label) this.startGroupRename(label, record, this.lastCanvas);
+	}
+	handleOutlineContextMenu(event) {
+		const target = event.target?.closest?.('[data-outline-kind]');
+		if (!target || !this.model || !this.lastCanvas) return;
+		event.preventDefault();
+		const kind = target.getAttribute('data-outline-kind');
+		const id = target.getAttribute('data-outline-id');
+		const menu = new import_obsidian4.Menu();
+		if (kind === 'node') {
+			const node = this.model.nodes.get(id)?.canvasNode;
+			if (!node) return;
+			menu.addItem((item) => item.setTitle('Copy node link').setIcon('link').onClick(() => {
+				this.runAsync(() => this.copyNodeLink(node), 'copy node link');
+			}));
+			const tree = this.model.nodes.get(id);
+			if (tree?.parent == null) {
+				if (!this.selectedRoots.has(tree)) {
+					this.clearSelection();
+					this.selectedRoots.add(tree);
+				}
+				menu.addItem((item) => item.setTitle(`Create group (${this.selectedRoots.size} roots)`).setIcon('group').onClick(() => this.createGroupFromSelection()));
+			}
+		} else {
+			const group = this.model.groups.find((candidate) => candidate.node.id === id);
+			if (!group) return;
+			menu.addItem((item) => item.setTitle('Rename group').setIcon('pencil').onClick(() => {
+				const label = this.allTreeItems.get(id)?.querySelector('.tree-item-inner');
+				if (label) this.startGroupRename(label, group, this.lastCanvas);
+			}));
+			menu.addItem((item) => item.setTitle('Layout forest').setIcon('layout-grid').onClick(() => {
+				if (this.lastCanvas && this.onForestLayout) this.onForestLayout(this.lastCanvas, id);
+			}));
+		}
+		menu.showAtMouseEvent(event);
+	}
+	async copyNodeLink(node) {
+		const canvasPath = this.lastCanvas?.view?.file?.path || '';
+		let link = `obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${encodeURIComponent(node.id)}`;
+		if (canvasNodeFilePath(node)) {
+			const vaultName = this.app.vault.getName?.() || '';
+			link = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`;
+		} else if (canvasNodeUrl(node)) link = canvasNodeUrl(node);
+		await writeClipboardText(link);
+		new import_obsidian4.Notice('Node link copied');
+	}
+	selectAndZoom(canvas, node) {
 		canvas.selectOnly(node);
-		const pad = Math.max(40, this.zoomPadding);
-		const cx = node.x + node.width / 2;
-		const cy = node.y + node.height / 2;
+		const pad = this.zoomPadding;
 		canvas.zoomToBbox({
-			minX: cx - pad,
-			minY: cy - pad,
-			maxX: cx + pad,
-			maxY: cy + pad
+			minX: node.x + node.width / 2 - pad,
+			minY: node.y + node.height / 2 - pad,
+			maxX: node.x + node.width / 2 + pad,
+			maxY: node.y + node.height / 2 + pad
 		});
 	}
+	canvasApiSelectAndReveal(canvas, node) { this.selectAndZoom(canvas, node); }
 	clearSelection() {
-		var _a;
-		for (const root of this.selectedRoots) {
-			(_a = this.allItemEls.get(root.canvasNode.id)) == null
-				? void 0
-				: _a.removeClass('is-selected');
-		}
+		for (const root of this.selectedRoots)
+			this.allItemEls.get(root.canvasNode.id)?.removeClass('is-selected');
 		this.selectedRoots.clear();
 	}
 	setActiveItem(nodeId) {
-		var _a;
-		if (this.activeNodeId) {
-			(_a = this.allItemEls.get(this.activeNodeId)) == null
-				? void 0
-				: _a.removeClass('is-active');
-		}
+		if (this.activeNodeId && this.activeNodeId !== nodeId)
+			this.allItemEls.get(this.activeNodeId)?.removeClass('is-active');
 		this.activeNodeId = nodeId;
-		const el = this.allItemEls.get(nodeId);
-		el == null ? void 0 : el.addClass('is-active');
-		el == null ? void 0 : el.scrollIntoView({ block: 'nearest' });
+		const element = this.allItemEls.get(nodeId);
+		element?.addClass('is-active');
+		element?.setAttribute('aria-current', 'true');
+		element?.scrollIntoView({ block: 'nearest' });
 	}
 	clearActiveItem() {
-		var _a;
 		if (this.activeNodeId) {
-			(_a = this.allItemEls.get(this.activeNodeId)) == null
-				? void 0
-				: _a.removeClass('is-active');
+			this.allItemEls.get(this.activeNodeId)?.removeClass('is-active');
+			this.allItemEls.get(this.activeNodeId)?.removeAttribute('aria-current');
 		}
 		this.activeNodeId = null;
 	}
-	/**
-	 * Sync outline highlight from the current canvas selection.
-	 */
 	syncHighlightFromCanvas(canvas) {
-		if (canvas.selection.size !== 1) {
+		if (canvas !== this.lastCanvas || canvas.selection.size !== 1) {
 			this.clearActiveItem();
 			return;
 		}
 		const item = canvas.selection.values().next().value;
-		if (!item || !('nodeEl' in item)) {
-			this.clearActiveItem();
-			return;
-		}
-		const nodeId = item.id;
-		if (this.allItemEls.has(nodeId)) {
-			this.setActiveItem(nodeId);
-		} else {
-			this.clearActiveItem();
-		}
+		if (!item || !this.allItemEls.has(item.id)) this.clearActiveItem();
+		else this.setActiveItem(item.id);
 	}
 	createGroupFromSelection() {
 		const canvas = this.lastCanvas;
@@ -45934,316 +52860,181 @@ var OutlineView = class extends import_obsidian4.ItemView {
 		const allNodes = [];
 		for (const root of this.selectedRoots) {
 			allNodes.push(root.canvasNode);
-			for (const desc of getDescendants(root)) {
-				allNodes.push(desc.canvasNode);
-			}
+			for (const descendant of outlineTreeDescendants(root)) allNodes.push(descendant.canvasNode);
 		}
-		const PADDING = 20;
-		let minX = Infinity,
-			minY = Infinity,
-			maxX = -Infinity,
-			maxY = -Infinity;
-		for (const node of allNodes) {
-			minX = Math.min(minX, node.x);
-			minY = Math.min(minY, node.y);
-			maxX = Math.max(maxX, node.x + node.width);
-			maxY = Math.max(maxY, node.y + node.height);
-		}
-		minX -= PADDING;
-		minY -= PADDING;
-		maxX += PADDING;
-		maxY += PADDING;
-		const group = canvas.createGroupNode({
-			pos: { x: minX, y: minY },
-			size: { width: maxX - minX, height: maxY - minY },
-			label: ''
-		});
+		const padding = 20;
+		const minX = Math.min(...allNodes.map((node) => node.x)) - padding;
+		const minY = Math.min(...allNodes.map((node) => node.y)) - padding;
+		const maxX = Math.max(...allNodes.map((node) => node.x + node.width)) + padding;
+		const maxY = Math.max(...allNodes.map((node) => node.y + node.height)) + padding;
+		const group = canvas.createGroupNode?.({ pos: { x: minX, y: minY }, size: { width: maxX - minX, height: maxY - minY }, label: '' });
+		if (!group) return;
 		canvas.requestSave();
-		if (this.canvasLeaf) {
-			this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
-		}
+		if (this.canvasLeaf) this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
 		canvas.selectOnly(group);
-		setTimeout(() => group.startEditing(), 50);
+		this.trackSessionTimeout(() => group.startEditing?.(), 50);
 		this.clearSelection();
 	}
-	/**
-	 * Render a group as a collapsible tree-item section.
-	 */
-	renderGroup(group, canvas) {
-		const isCollapsed = this.collapsedGroups.has(group.node.id);
-		const treeItem = this.contentEl.createDiv({
-			cls: 'tree-item' + (isCollapsed ? ' is-collapsed' : '')
-		});
-		treeItem.setAttribute('data-tomindmap-collapse-id', group.node.id);
-		treeItem.setAttribute('data-tomindmap-collapse-kind', 'group');
-		const self = treeItem.createDiv({
-			cls: 'tree-item-self is-clickable tomindmap-outline-group'
-		});
-		const collapseIcon = self.createDiv({
-			cls: 'tree-item-icon collapse-icon'
-		});
-		(0, import_obsidian4.setIcon)(collapseIcon, 'right-triangle');
-		const labelContainer = self.createDiv({ cls: 'tree-item-inner' });
-		const labelSpan = labelContainer.createSpan({ text: group.label });
-		labelContainer.createSpan({
-			cls: 'tomindmap-outline-group-count',
-			text: `${group.roots.length}`
-		});
-		this.groupElMap.set(group.node.id, self);
-		self.addEventListener('dragover', (e) => {
-			if (!this.draggedRoot) return;
-			e.preventDefault();
-			self.addClass('is-drag-over');
-		});
-		self.addEventListener('dragleave', () => {
-			self.removeClass('is-drag-over');
-		});
-		self.addEventListener('drop', (e) => {
-			e.preventDefault();
-			self.removeClass('is-drag-over');
-			if (!this.draggedRoot || !this.lastCanvas) return;
-			if (this.dragSourceGroupId === group.node.id) return;
-			this.moveTreeToGroup(
-				this.draggedRoot,
-				group.node.id,
-				this.dragSourceGroupId
-			);
-			this.draggedRoot = null;
-			this.dragSourceGroupId = null;
-		});
-		let clickTimer = null;
-		self.addEventListener('click', () => {
-			if (clickTimer !== null) {
-				clearTimeout(clickTimer);
-				clickTimer = null;
-				return;
-			}
-			clickTimer = setTimeout(() => {
-				clickTimer = null;
-				if (this.collapsedGroups.has(group.node.id)) {
-					this.collapsedGroups.delete(group.node.id);
-					treeItem.removeClass('is-collapsed');
-				} else {
-					this.collapsedGroups.add(group.node.id);
-					treeItem.addClass('is-collapsed');
-				}
-			}, 250);
-		});
-		self.addEventListener('dblclick', () => {
-			if (clickTimer !== null) {
-				clearTimeout(clickTimer);
-				clickTimer = null;
-			}
-			this.startGroupRename(labelSpan, group, canvas);
-		});
-		self.addEventListener('contextmenu', (e) => {
-			e.preventDefault();
-			const menu = new import_obsidian4.Menu();
-			menu.addItem((item) => {
-				item.setTitle('Rename group')
-					.setIcon('pencil')
-					.onClick(() =>
-						this.startGroupRename(labelSpan, group, canvas)
-					);
-			});
-			menu.addItem((item) => {
-				item.setTitle('Layout forest')
-					.setIcon('layout-grid')
-					.onClick(() => {
-						if (this.lastCanvas && this.onForestLayout) {
-							this.onForestLayout(this.lastCanvas, group.node.id);
-						}
-					});
-			});
-			menu.showAtMouseEvent(e);
-		});
-		const childrenContainer = treeItem.createDiv({
-			cls: 'tree-item-children'
-		});
-		for (const root of group.roots) {
-			this.renderRootItem(
-				childrenContainer,
-				root,
-				canvas,
-				false,
-				group.node.id
-			);
-		}
+	clearOutlineDrag() {
+		this.draggedRoot = null;
+		this.dragSourceGroupId = null;
+		this.dragAllowedRoots.clear();
+		for (const element of this.groupElMap.values()) element.removeClass('is-drag-over');
+		this.contentEl.querySelector('.tomindmap-outline-ungrouped-zone')?.removeClass('is-drag-over');
 	}
-	moveTreeToGroup(root, targetGroupId, sourceGroupId) {
+	handleOutlineDragStart(event) {
+		const select = event.target?.closest?.('[data-outline-action="select-node"]');
+		const id = select?.getAttribute('data-outline-id');
+		const tree = id ? this.model?.nodes.get(id) : null;
+		if (!id || !tree || tree.parent != null || !this.dragAllowedRoots.has(id)) {
+			event.preventDefault();
+			return;
+		}
+		const group = select.closest('[data-outline-kind="group"]');
+		this.draggedRoot = tree;
+		this.dragSourceGroupId = group?.getAttribute('data-outline-id') || null;
+		select.addClass('is-dragging');
+		event.dataTransfer?.setData('text/plain', id);
+	}
+	handleOutlineDragOver(event) {
+		if (!this.draggedRoot) return;
+		const target = event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]');
+		if (!target) return;
+		event.preventDefault();
+		target.addClass('is-drag-over');
+	}
+	handleOutlineDragLeave(event) {
+		event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]')?.removeClass('is-drag-over');
+	}
+	handleOutlineDrop(event) {
+		const target = event.target?.closest?.('[data-outline-drop], [data-outline-kind="group"]');
+		if (!target || !this.draggedRoot || !this.lastCanvas) return;
+		event.preventDefault();
+		const groupId = target.getAttribute('data-outline-id') || null;
+		if (groupId === this.dragSourceGroupId) {
+			this.clearOutlineDrag();
+			return;
+		}
+		if (groupId) this.moveTreeToGroup(this.draggedRoot, groupId, this.dragSourceGroupId);
+		else this.ungroupTree(this.draggedRoot, this.dragSourceGroupId);
+		this.clearOutlineDrag();
+	}
+	moveTreeToGroup(root, targetGroupId) {
 		const canvas = this.lastCanvas;
-		if (!canvas) return;
-		const group = canvas.nodes.get(targetGroupId);
-		if (!group) return;
-		const targetX = group.x + group.width / 2 - root.canvasNode.width / 2;
-		const targetY = group.y + group.height / 2 - root.canvasNode.height / 2;
-		const dx = targetX - root.canvasNode.x;
-		const dy = targetY - root.canvasNode.y;
-		root.canvasNode.moveTo({ x: targetX, y: targetY });
-		for (const desc of getDescendants(root)) {
-			desc.canvasNode.moveTo({
-				x: desc.canvasNode.x + dx,
-				y: desc.canvasNode.y + dy
-			});
-		}
-		if (this.onForestLayout) {
-			this.onForestLayout(canvas, targetGroupId);
-			if (sourceGroupId) {
-				this.onForestLayout(canvas, sourceGroupId);
-			}
-		}
+		const group = canvas?.nodes.get(targetGroupId);
+		if (!canvas || !group) return;
+		const descendants = [root, ...outlineTreeDescendants(root)];
+		const dx = group.x + group.width / 2 - root.canvasNode.x - root.canvasNode.width / 2;
+		const dy = group.y + group.height / 2 - root.canvasNode.y - root.canvasNode.height / 2;
+		for (const tree of descendants) tree.canvasNode.moveTo({ x: tree.canvasNode.x + dx, y: tree.canvasNode.y + dy });
+		this.onForestLayout?.(canvas, targetGroupId);
+		this.refresh(canvas);
 	}
 	ungroupTree(root, sourceGroupId) {
 		const canvas = this.lastCanvas;
 		if (!canvas) return;
-		const groupNodeIds = getGroupIds(canvas);
+		const groupIds = getGroupIds(canvas);
 		let maxY = -Infinity;
-		for (const gid of groupNodeIds) {
-			const g = canvas.nodes.get(gid);
-			if (g) maxY = Math.max(maxY, g.y + g.height);
+		for (const id of groupIds) {
+			const group = canvas.nodes.get(id);
+			if (group) maxY = Math.max(maxY, group.y + group.height);
 		}
-		const MARGIN = 80;
-		const dx = 0;
-		const dy = maxY + MARGIN - root.canvasNode.y;
-		root.canvasNode.moveTo({ x: root.canvasNode.x, y: maxY + MARGIN });
-		for (const desc of getDescendants(root)) {
-			desc.canvasNode.moveTo({
-				x: desc.canvasNode.x + dx,
-				y: desc.canvasNode.y + dy
-			});
-		}
-		if (this.onForestLayout) {
-			this.onForestLayout(canvas, sourceGroupId);
-		}
+		const descendants = [root, ...outlineTreeDescendants(root)];
+		const dy = maxY + 80 - root.canvasNode.y;
+		for (const tree of descendants) tree.canvasNode.moveTo({ x: tree.canvasNode.x, y: tree.canvasNode.y + dy });
+		if (sourceGroupId) this.onForestLayout?.(canvas, sourceGroupId);
+		this.refresh(canvas);
 	}
-	startGroupRename(labelSpan, group, canvas) {
-		var _a;
-		const originalText = (_a = labelSpan.textContent) != null ? _a : '';
-		labelSpan.contentEditable = 'true';
-		labelSpan.focus();
-		const range = document.createRange();
-		range.selectNodeContents(labelSpan);
-		const sel = window.getSelection();
-		sel == null ? void 0 : sel.removeAllRanges();
-		sel == null ? void 0 : sel.addRange(range);
+	startGroupRename(label, group, canvas) {
+		const originalText = label.textContent || '';
+		label.contentEditable = 'true';
+		label.setAttribute('role', 'textbox');
+		label.setAttribute('aria-label', `Rename group ${group.label}`);
+		label.focus();
+		const range = canvas.view?.containerEl?.ownerDocument?.createRange?.() || document.createRange();
+		range.selectNodeContents?.(label);
+		const selection = label.ownerDocument?.defaultView?.getSelection?.();
+		selection?.removeAllRanges?.();
+		selection?.addRange?.(range);
 		let done = false;
-		const commit = () => {
-			var _a2;
+		const dispose = () => {
+			label.removeEventListener('keydown', onKeydown);
+			label.removeEventListener('blur', commit);
+			label.removeEventListener('click', stop);
+			this.session.disposers.delete(dispose);
+		};
+		const finish = (commitValue) => {
 			if (done) return;
 			done = true;
-			const newLabel =
-				((_a2 = labelSpan.textContent) != null ? _a2 : '').trim() ||
-				'Untitled Group';
-			labelSpan.contentEditable = 'false';
-			labelSpan.textContent = newLabel;
-			cleanup();
-			if (newLabel === originalText) return;
+			const nextLabel = commitValue ? String(label.textContent || '').trim() || 'Untitled Group' : originalText;
+			label.contentEditable = 'false';
+			label.removeAttribute('role');
+			label.removeAttribute('aria-label');
+			label.textContent = nextLabel;
+			dispose();
+			if (!commitValue || nextLabel === originalText || !canvas) return;
 			const data = canvas.getData();
-			const nodeData = data.nodes.find((n) => n.id === group.node.id);
-			if (nodeData) {
-				nodeData.label = newLabel;
-				canvas.setData(data);
+			const record = Array.isArray(data.nodes) ? data.nodes.find((item) => item.id === group.node.id) : null;
+			if (!record) return;
+			record.label = nextLabel;
+			canvas.setData(data);
+			canvas.requestSave?.();
+			this.refresh(canvas);
+		};
+		const commit = () => finish(true);
+		const cancel = () => finish(false);
+		const stop = (event) => event.stopPropagation();
+		const onKeydown = (event) => {
+			event.stopPropagation();
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				finish(true);
+			} else if (event.key === 'Escape') {
+				event.preventDefault();
+				finish(false);
 			}
 		};
-		const cancel = () => {
-			done = true;
-			labelSpan.contentEditable = 'false';
-			labelSpan.textContent = originalText;
-			cleanup();
+		label.addEventListener('keydown', onKeydown);
+		label.addEventListener('blur', commit);
+		label.addEventListener('click', stop);
+		const tracked = () => {
+			label.removeEventListener('keydown', onKeydown);
+			label.removeEventListener('blur', commit);
+			label.removeEventListener('click', stop);
 		};
-		const onKeydown = (e) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				commit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				cancel();
-			}
-		};
-		const onBlur = () => commit();
-		const onClick = (e) => e.stopPropagation();
-		const cleanup = () => {
-			labelSpan.removeEventListener('keydown', onKeydown);
-			labelSpan.removeEventListener('blur', onBlur);
-			labelSpan.removeEventListener('click', onClick);
-		};
-		labelSpan.addEventListener('keydown', onKeydown);
-		labelSpan.addEventListener('blur', onBlur);
-		labelSpan.addEventListener('click', onClick);
+		this.session.disposers.add(tracked);
 	}
-	/**
-	 * Clear the outline (no canvas active).
-	 */
+	showUnavailable(message, canvas = null) {
+		this.activateCanvasSession(canvas);
+		this.lastCanvas = canvas;
+		this.model = null;
+		this.contentEl.empty();
+		this.contentEl.setAttribute('role', 'status');
+		this.contentEl.setAttribute('aria-live', 'polite');
+		this.contentEl.createDiv({ cls: 'tomindmap-outline-empty', text: String(message || 'Map outline is unavailable') });
+	}
 	clear() {
+		this.disposeCanvasSession();
+		this.session.canvas = null;
+		this.session.generation++;
 		this.canvasLeaf = null;
 		this.lastCanvas = null;
+		this.model = null;
 		this.selectedRoots.clear();
 		this.groupElMap.clear();
 		this.allItemEls.clear();
+		this.allTreeItems.clear();
 		this.collapsedGroups.clear();
 		this.collapsedNodes.clear();
+		this.groupIds = [];
 		this.collapsibleNodeIds = [];
 		this.activeNodeId = null;
-		this.draggedRoot = null;
-		this.dragSourceGroupId = null;
+		this.contentEl.setAttribute('role', 'status');
+		this.contentEl.setAttribute('aria-live', 'polite');
 		this.contentEl.empty();
-		this.contentEl.createDiv({
-			cls: 'tomindmap-outline-empty',
-			text: 'Open a canvas to see root nodes'
-		});
+		this.contentEl.createDiv({ cls: 'tomindmap-outline-empty', text: 'Open a mind-map canvas to see its outline' });
 	}
 };
-const MARKDOWN_IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
-	'avif',
-	'bmp',
-	'gif',
-	'jpeg',
-	'jpg',
-	'png',
-	'svg',
-	'webp'
-]);
-function markdownResourceTarget(target) {
-	return String(target || '')
-		.trim()
-		.replace(/\\/g, '/')
-		.replace(/</g, '%3C')
-		.replace(/>/g, '%3E');
-}
-function markdownResourceLabel(target, alias = '') {
-	let label = String(alias || '').trim();
-	if (!label) {
-		const clean = String(target || '')
-			.split(/[?#]/)[0]
-			.replace(/\\/g, '/');
-		const basename = clean.split('/').filter(Boolean).pop() || clean;
-		try {
-			label = decodeURIComponent(basename);
-		} catch (_) {
-			label = basename;
-		}
-	}
-	return (label || 'Attachment')
-		.replace(/\\/g, '\\\\')
-		.replace(/\[/g, '\\[')
-		.replace(/\]/g, '\\]');
-}
-function isMarkdownImageTarget(target) {
-	const clean = String(target || '').split(/[?#]/)[0];
-	const extension = clean.includes('.')
-		? clean.slice(clean.lastIndexOf('.') + 1).toLowerCase()
-		: '';
-	return MARKDOWN_IMAGE_EXTENSIONS.has(extension);
-}
-function markdownResourceLink(target, alias = '', preferEmbed = false) {
-	const normalizedTarget = markdownResourceTarget(target);
-	if (!normalizedTarget) return 'Untitled';
-	const label = markdownResourceLabel(normalizedTarget, alias);
-	return preferEmbed && isMarkdownImageTarget(normalizedTarget)
-		? `![${label}](<${normalizedTarget}>)`
-		: `[${label}](<${normalizedTarget}>)`;
-}
 function canvasNodeFilePath(node) {
 	const values = [
 		node?.unknownData?.file,
@@ -46267,66 +53058,14 @@ function canvasNodeUrl(node) {
 }
 function canvasNodeMarkdownText(node) {
 	if (!node) return 'Untitled';
-	const filePath = canvasNodeFilePath(node);
-	if (filePath) return markdownResourceLink(filePath, '', true);
-	const url = canvasNodeUrl(node);
-	if (url)
-		return markdownResourceLink(
-			url,
-			MediaDrop.linkLabel(url).replace(/[\[\]]/g, ''),
-			true
-		);
-	return (
-		String(node.text || node.unknownData?.text || '').trim() || 'Untitled'
-	);
+	return MarkdownMindMapCodec.serializeTopicText({
+		...node,
+		text: node.text ?? node.unknownData?.text,
+		file: canvasNodeFilePath(node) || undefined,
+		url: canvasNodeUrl(node) || undefined
+	});
 }
-function canvasNodeContentKind(node) {
-	if (canvasNodeFilePath(node)) return 'file';
-	if (canvasNodeUrl(node)) return 'link';
-	return 'text';
-}
-function canvasNodeContentMatches(left, right) {
-	const leftKind = canvasNodeContentKind(left);
-	const rightKind = canvasNodeContentKind(right);
-	if (leftKind !== rightKind) return false;
-	if (leftKind === 'file')
-		return canvasNodeFilePath(left) === canvasNodeFilePath(right);
-	if (leftKind === 'link')
-		return canvasNodeUrl(left) === canvasNodeUrl(right);
-	const normalize = (text) =>
-		String(text || '')
-			.replace(/\r\n?/g, '\n')
-			.trim();
-	return (
-		normalize(left?.text ?? left?.unknownData?.text) ===
-		normalize(right?.text ?? right?.unknownData?.text)
-	);
-}
-function getRootTitle(text) {
-	const raw = String(text || '').trim();
-	const firstLine = raw.split('\n')[0].trim();
-	const fence = firstLine.match(/^(```|~~~)\s*([A-Za-z0-9_-]*)/);
-	if (fence) return fence[2] ? `Code · ${fence[2]}` : 'Code block';
-	const image = firstLine.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
-	if (image) return image[1] || image[2].split('/').pop() || 'Image';
-	const wikiEmbed = firstLine.match(/^!\[\[([^|\]]+)/);
-	if (wikiEmbed) return wikiEmbed[1].split('/').pop() || 'Embed';
-	if (/^\|.*\|$/.test(firstLine))
-		return (
-			firstLine
-				.replace(/^\||\|$/g, '')
-				.split('|')
-				.map((part) => part.trim())
-				.filter(Boolean)
-				.join(' · ') || 'Table'
-		);
-	return (
-		firstLine
-			.replace(/^#+\s*/, '')
-			.replace(/^[-+*]\s+/, '')
-			.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') || 'Untitled'
-	);
-}
+
 
 const TOMINMAP_TITLE_ONLY = 'tomindmapTitleOnly';
 const TOMINMAP_CARD_KIND = 'tomindmapCardKind';
@@ -46439,1701 +53178,6 @@ function serializedBranchData(canvas, branchNodes, rootNode) {
 	return { nodes, edges };
 }
 
-// src/import/markdown-mindmap.ts
-function portableTopicText(text) {
-	const value = String(text || '')
-		.trim()
-		.replace(/^\s{0,3}#{1,6}\s+/, '');
-	return value || 'Untitled';
-}
-function extractTopicIdentity(text, explicitId) {
-	let id = explicitId || null;
-	const cleaned = String(text || '')
-		.replace(
-			/<!--\s*tomindmap:id=([A-Za-z0-9_-]+)\s*-->/gi,
-			(match, foundId) => {
-				if (!id) id = foundId;
-				return '';
-			}
-		)
-		.replace(/[ \t]+\n/g, '\n')
-		.trim();
-	return { id, text: cleaned || 'Untitled' };
-}
-function frontmatterStringArray(frontmatter, property) {
-	const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const match = String(frontmatter || '').match(
-		new RegExp(`^\\s{2}${escaped}:\\s*(\\[[^\\n]*\\])\\s*$`, 'm')
-	);
-	if (!match) return [];
-	try {
-		const ids = JSON.parse(match[1]);
-		return Array.isArray(ids)
-			? ids.filter((value) => typeof value === 'string')
-			: [];
-	} catch (error) {
-		return [];
-	}
-}
-function topicIdentityKey(text) {
-	const value = getRootTitle(text)
-		.normalize('NFKC')
-		.toLowerCase()
-		.replace(/\s+/g, ' ')
-		.trim();
-	let hash = 2166136261;
-	for (let index = 0; index < value.length; index++) {
-		hash ^= value.charCodeAt(index);
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(36);
-}
-function topicIdentityLabel(text) {
-	return getRootTitle(text).normalize('NFKC').replace(/\s+/g, ' ').trim();
-}
-function topicLabelSimilarity(left, right) {
-	const normalize = (value) =>
-		String(value || '')
-			.normalize('NFKC')
-			.toLowerCase()
-			.replace(/[^\p{L}\p{N}]+/gu, ' ')
-			.trim();
-	const a = normalize(left);
-	const b = normalize(right);
-	if (!a || !b) return 0;
-	if (a === b) return 1;
-	const tokenSet = (value) => new Set(value.split(/\s+/).filter(Boolean));
-	const aTokens = tokenSet(a);
-	const bTokens = tokenSet(b);
-	let commonTokens = 0;
-	for (const token of aTokens) {
-		if (bTokens.has(token)) commonTokens++;
-	}
-	const tokenScore = commonTokens / Math.max(aTokens.size, bTokens.size, 1);
-	const bigrams = (value) => {
-		const result = [];
-		const compact = value.replace(/\s+/g, ' ');
-		for (let index = 0; index < compact.length - 1; index++)
-			result.push(compact.slice(index, index + 2));
-		return result;
-	};
-	const aBigrams = bigrams(a);
-	const bBigrams = bigrams(b);
-	const remaining = new Map();
-	for (const pair of aBigrams)
-		remaining.set(pair, (remaining.get(pair) || 0) + 1);
-	let commonBigrams = 0;
-	for (const pair of bBigrams) {
-		const count = remaining.get(pair) || 0;
-		if (count > 0) {
-			commonBigrams++;
-			remaining.set(pair, count - 1);
-		}
-	}
-	const bigramScore =
-		(2 * commonBigrams) / Math.max(1, aBigrams.length + bBigrams.length);
-	const containmentScore =
-		a.includes(b) || b.includes(a)
-			? Math.min(a.length, b.length) / Math.max(a.length, b.length)
-			: 0;
-	return Math.max(tokenScore, bigramScore, containmentScore);
-}
-function frontmatterWithTopicIds(
-	frontmatter,
-	topicIds,
-	topicKeys,
-	topicLabels
-) {
-	let value = String(frontmatter || '').trim();
-	if (!value.startsWith('---'))
-		value = value ? `---\n${value}\n---` : '---\n---';
-	const lines = value.replace(/\r\n?/g, '\n').split('\n');
-	const cleaned = [];
-	for (let index = 0; index < lines.length; index++) {
-		if (/^tomindmap:\s*$/.test(lines[index])) {
-			while (
-				index + 1 < lines.length &&
-				(/^\s+/.test(lines[index + 1]) || !lines[index + 1].trim())
-			)
-				index++;
-			continue;
-		}
-		cleaned.push(lines[index]);
-	}
-	let closing = cleaned.length - 1;
-	while (closing > 0 && cleaned[closing].trim() !== '---') closing--;
-	const metadata = [
-		'tomindmap:',
-		'  version: 1',
-		`  topicIds: ${JSON.stringify(topicIds)}`,
-		`  topicKeys: ${JSON.stringify(topicKeys)}`,
-		`  topicLabels: ${JSON.stringify(topicLabels)}`
-	];
-	cleaned.splice(closing, 0, ...metadata);
-	return cleaned.join('\n');
-}
-function markdownWithTopicMetadata(markdown, topicIds, topicKeys, topicLabels) {
-	const original = String(markdown || '');
-	const bom = original.startsWith('\uFEFF') ? '\uFEFF' : '';
-	const source = bom ? original.slice(1) : original;
-	const eol = source.includes('\r\n') ? '\r\n' : '\n';
-	const metadata = [
-		'tomindmap:',
-		'  version: 1',
-		`  topicIds: ${JSON.stringify(topicIds)}`,
-		`  topicKeys: ${JSON.stringify(topicKeys)}`,
-		`  topicLabels: ${JSON.stringify(topicLabels)}`
-	].join(eol);
-	const opening = source.match(/^---[ \t]*(\r\n|\n|\r)/);
-	if (!opening)
-		return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
-	const contentStart = opening[0].length;
-	const closingPattern = /^---[ \t]*(?:\r\n|\n|\r|$)/gm;
-	closingPattern.lastIndex = contentStart;
-	const closing = closingPattern.exec(source);
-	if (!closing)
-		return `${bom}---${eol}${metadata}${eol}---${eol}${eol}${source}`;
-	const frontmatterBody = source.slice(contentStart, closing.index);
-	const linePattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
-	const lineRecords = [];
-	let match;
-	while ((match = linePattern.exec(frontmatterBody))) {
-		if (!match[0]) break;
-		lineRecords.push({
-			start: match.index,
-			end: match.index + match[0].length,
-			text: match[0].replace(/(?:\r\n|\n|\r)$/, '')
-		});
-	}
-	const blockStartIndex = lineRecords.findIndex((line) =>
-		/^tomindmap:[ \t]*$/.test(line.text)
-	);
-	let updatedBody;
-	if (blockStartIndex >= 0) {
-		let blockEndIndex = blockStartIndex + 1;
-		while (
-			blockEndIndex < lineRecords.length &&
-			/^[ \t]+/.test(lineRecords[blockEndIndex].text)
-		)
-			blockEndIndex++;
-		const start = lineRecords[blockStartIndex].start;
-		const end =
-			blockEndIndex < lineRecords.length
-				? lineRecords[blockEndIndex].start
-				: frontmatterBody.length;
-		const replacement =
-			metadata +
-			(end > start &&
-			/(?:\r\n|\n|\r)$/.test(frontmatterBody.slice(start, end))
-				? eol
-				: '');
-		updatedBody =
-			frontmatterBody.slice(0, start) +
-			replacement +
-			frontmatterBody.slice(end);
-	} else {
-		const separator =
-			frontmatterBody.length === 0 ||
-			/(?:\r\n|\n|\r)$/.test(frontmatterBody)
-				? ''
-				: eol;
-		updatedBody = frontmatterBody + separator + metadata + eol;
-	}
-	return (
-		bom +
-		source.slice(0, contentStart) +
-		updatedBody +
-		source.slice(closing.index)
-	);
-}
-function withoutLegacyPluginComments(markdown) {
-	return String(markdown || '')
-		.replace(/[ \t]*<!--\s*tomindmap:id=[A-Za-z0-9_-]+\s*-->/gi, '')
-		.replace(
-			/^[ \t]*<!--\s*\/?tomindmap:(?:node|content)(?:\s+id=[A-Za-z0-9_-]+)?\s*-->[ \t]*(?:\r\n|\n|\r|$)/gim,
-			''
-		);
-}
-function markdownFrontmatterForCanvas(canvas, options = {}) {
-	const data = canvas.getData();
-	const stored =
-		typeof data.mindmapMarkdownFrontmatter === 'string'
-			? data.mindmapMarkdownFrontmatter.trim()
-			: '';
-	if (stored)
-		return stored.startsWith('---') ? stored : `---\n${stored}\n---`;
-	if (options.exportMarkmapFrontmatter === false) return '';
-	const title =
-		canvas.view && canvas.view.file
-			? canvas.view.file.basename
-			: 'Mind map';
-	const configuredLevel = Number(options.markmapColorFreezeLevel);
-	const freezeLevel = Math.max(
-		0,
-		Math.min(10, Number.isFinite(configuredLevel) ? configuredLevel : 2)
-	);
-	return `---\ntitle: ${JSON.stringify(title)}\nmarkmap:\n  colorFreezeLevel: ${freezeLevel}\n---`;
-}
-function isStandaloneMarkdownBlock(text) {
-	const trimmed = String(text || '').trim();
-	const lines = trimmed.split('\n');
-	return (
-		/^(```|~~~|\$\$)/.test(trimmed) ||
-		/^>\s?/.test(trimmed) ||
-		/^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) ||
-		/^!\[\[[^\]]+\]\]\s*$/.test(trimmed) ||
-		/^<(?:(?:table|pre|img|picture|audio|video|iframe|object|embed)\b)/i.test(
-			trimmed
-		) ||
-		(lines.length >= 2 &&
-			/^\s*\|.*\|\s*$/.test(lines[0]) &&
-			/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[1]))
-	);
-}
-function isStructuralListBlock(text) {
-	const trimmed = String(text || '').trim();
-	if (isMediaResourceMarkdown(trimmed)) return false;
-	return isStandaloneMarkdownBlock(trimmed);
-}
-function isMediaResourceMarkdown(text) {
-	const trimmed = String(text || '').trim();
-	return (
-		/^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed) ||
-		/^!\[\[[^\]]+\]\]\s*$/.test(trimmed)
-	);
-}
-function markmapHeadingSafe(text) {
-	const firstLine = String(text || '')
-		.trim()
-		.split('\n')[0];
-	return (
-		firstLine.length > 0 &&
-		!isStandaloneMarkdownBlock(text) &&
-		!/^(?:[-+*]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/.test(firstLine)
-	);
-}
-function markdownWithPortableCardLinks(text, idToSlug) {
-	return String(text || '')
-		.replace(
-			/obsidian:\/\/tomindmap-navigate\?canvas=[^)\s]+&id=([A-Za-z0-9_-]+)/g,
-			(match, id) => (idToSlug.has(id) ? `#${idToSlug.get(id)}` : match)
-		)
-		.replace(/!\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g, (match, target, alias) =>
-			markdownResourceLink(target, alias, true)
-		)
-		.replace(
-			/(^|[^!])\[\[([^|\]]+)(?:\|([^\]]*))?\]\]/g,
-			(match, prefix, target, alias) =>
-				`${prefix}${markdownResourceLink(target, alias, false)}`
-		);
-}
-function headingSlug(text) {
-	return (
-		getRootTitle(text)
-			.toLowerCase()
-			.normalize('NFKD')
-			.replace(/[\u0300-\u036f]/g, '')
-			.replace(/<[^>]*>/g, '')
-			.replace(/[^\p{L}\p{N}\s-]/gu, '')
-			.trim()
-			.replace(/\s+/g, '-') || 'topic'
-	);
-}
-function canvasToMindMapMarkdown(canvas, options = {}) {
-	const forest = (
-		Array.isArray(options.rootTrees)
-			? options.rootTrees
-			: buildForest(canvas)
-	)
-		.slice()
-		.sort(
-			(a, b) =>
-				a.canvasNode.y - b.canvasNode.y ||
-				a.canvasNode.x - b.canvasNode.x
-		);
-	if (forest.length === 0) return '';
-	const sortBranchChronology = (tree, isRoot = false) => {
-		tree.children = MarkdownOrder.orderChildren(
-			tree.canvasNode,
-			tree.children,
-			isRoot
-		);
-		for (const child of tree.children) sortBranchChronology(child, false);
-	};
-	for (const root of forest) sortBranchChronology(root, true);
-	const allTrees = [];
-	for (const root of forest) allTrees.push(root, ...getDescendants(root));
-	const textById = new Map(
-		allTrees.map((tree) => [
-			tree.canvasNode.id,
-			canvasNodeMarkdownText(tree.canvasNode)
-		])
-	);
-	const slugCounts = /* @__PURE__ */ new Map();
-	const idToSlug = /* @__PURE__ */ new Map();
-	for (const tree of allTrees) {
-		const base = headingSlug(textById.get(tree.canvasNode.id));
-		const count = (slugCounts.get(base) || 0) + 1;
-		slugCounts.set(base, count);
-		idToSlug.set(
-			tree.canvasNode.id,
-			count === 1 ? base : `${base}-${count}`
-		);
-	}
-	const topicIds = [];
-	const topicKeys = [];
-	const topicLabels = [];
-	const collectTopicIds = (tree) => {
-		topicIds.push(tree.canvasNode.id);
-		const text = textById.get(tree.canvasNode.id);
-		topicKeys.push(topicIdentityKey(text));
-		topicLabels.push(topicIdentityLabel(text));
-		for (const child of tree.children) collectTopicIds(child);
-	};
-	for (const root of forest) collectTopicIds(root);
-	const frontmatter =
-		options.includeFrontmatter === false
-			? ''
-			: frontmatterWithTopicIds(
-					markdownFrontmatterForCanvas(canvas, options),
-					topicIds,
-					topicKeys,
-					topicLabels
-				);
-	const lines = frontmatter ? [frontmatter, ''] : [];
-	const rawText = (tree) =>
-		markdownWithPortableCardLinks(
-			portableTopicText(textById.get(tree.canvasNode.id)),
-			idToSlug
-		);
-	const emitIndentedBlock = (text, indent) => {
-		const prefix = '  '.repeat(indent);
-		for (const line of String(text).split('\n'))
-			lines.push(`${prefix}${line}`);
-	};
-	const emitListNode = (tree, indent) => {
-		const raw = rawText(tree);
-		if (isStructuralListBlock(raw)) {
-			if (lines.length > 0 && lines[lines.length - 1] !== '')
-				lines.push('');
-			emitIndentedBlock(raw, indent);
-			if (lines[lines.length - 1] !== '') lines.push('');
-			for (const child of tree.children) emitListNode(child, indent + 1);
-			return;
-		}
-		const parts = raw.split('\n');
-		const first = parts.shift() || 'Untitled';
-		const prefix = '  '.repeat(indent);
-		const keepsOwnMarker = /^(?:[-+*]\s+\[[ xX]\]|\d+[.)]\s+)/.test(first);
-		lines.push(`${prefix}${keepsOwnMarker ? first : `- ${first}`}`);
-		if (parts.length > 0) {
-			for (const line of parts) lines.push(`${prefix}  ${line}`);
-		}
-		for (const child of tree.children) emitListNode(child, indent + 1);
-	};
-	const emitHeadingNode = (tree, level) => {
-		const raw = rawText(tree);
-		const parts = raw.split('\n');
-		const title = parts.shift() || 'Untitled';
-		lines.push('', `${'#'.repeat(level)} ${title}`);
-		if (parts.length > 0) lines.push(...parts);
-		emitHeadingChildren(tree.children, level + 1);
-	};
-	const emitHeadingChildren = (children, level) => {
-		if (children.length === 0) return;
-		const useHeadingLevel =
-			level <= 6 &&
-			children.every((child) => {
-				const raw = rawText(child);
-				return (
-					(isStructuralListBlock(raw) &&
-						child.children.length === 0) ||
-					markmapHeadingSafe(raw)
-				);
-			});
-		if (!useHeadingLevel) {
-			for (const child of children) emitListNode(child, 0);
-			return;
-		}
-		for (const child of children) {
-			const raw = rawText(child);
-			if (isStructuralListBlock(raw)) {
-				lines.push('');
-				emitIndentedBlock(raw, 0);
-				emitHeadingChildren(child.children, level + 1);
-			} else {
-				emitHeadingNode(child, level);
-			}
-		}
-	};
-	for (let i = 0; i < forest.length; i++) {
-		const root = forest[i];
-		if (i > 0) lines.push('');
-		const rootRaw = rawText(root);
-		const rootParts = rootRaw.split('\n');
-		lines.push(`# ${rootParts.shift() || 'Untitled'}`);
-		if (rootParts.length > 0) lines.push(...rootParts);
-		emitHeadingChildren(root.children, 2);
-	}
-	return lines.join('\n').trim() + '\n';
-}
-function selectedMindMapTrees(canvas) {
-	const forest = buildForest(canvas);
-	const groupIds = getGroupIds(canvas);
-	const selectedIds = new Set(
-		Array.from(canvas.selection || [])
-			.filter(
-				(item) => item && 'nodeEl' in item && !groupIds.has(item.id)
-			)
-			.map((item) => item.id)
-	);
-	if (selectedIds.size === 0) return [];
-	const treesById = new Map();
-	const stack = forest.slice();
-	while (stack.length > 0) {
-		const tree = stack.pop();
-		treesById.set(tree.canvasNode.id, tree);
-		stack.push(...tree.children);
-	}
-	return Array.from(selectedIds, (id) => treesById.get(id)).filter((tree) => {
-		if (!tree) return false;
-		for (let parent = tree.parent; parent; parent = parent.parent) {
-			if (selectedIds.has(parent.canvasNode.id)) return false;
-		}
-		return true;
-	});
-}
-function portableMindMapMarkdown(canvas, rootTrees = null) {
-	return canvasToMindMapMarkdown(canvas, {
-		includeFrontmatter: false,
-		...(rootTrees ? { rootTrees } : {})
-	});
-}
-function cleanImportedTopic(text) {
-	let value = String(text || '').trim();
-	const shaped =
-		value.match(/^[A-Za-z0-9_-]*\(\((.*)\)\)$/) ||
-		value.match(/^[A-Za-z0-9_-]*\{\{(.*)\}\}$/) ||
-		value.match(/^[A-Za-z0-9_-]*\[(.*)\]$/) ||
-		value.match(/^[A-Za-z0-9_-]*\((.*)\)$/);
-	if (shaped) value = shaped[1];
-	if (/^\[[ xX]\]\s+/.test(value)) value = `- ${value}`;
-	return value.replace(/<br\s*\/?>/gi, '\n').trim() || 'Untitled';
-}
-function parseMarkdownMindMapDocument(markdown) {
-	const roots = [];
-	const usedIds = /* @__PURE__ */ new Set();
-	const headingStack = [];
-	const listStack = [];
-	let listAnchor = null;
-	let lastNode = null;
-	let inFrontmatter = false;
-	let inFence = false;
-	let mindmapFence = false;
-	let mermaidMode = false;
-	let sawH1 = false;
-	const frontmatterLines = [];
-	const addNode = (text, parent, explicitId, source = null) => {
-		const identity = extractTopicIdentity(text, explicitId);
-		let id = identity.id || genId();
-		while (usedIds.has(id)) id = genId();
-		usedIds.add(id);
-		const cleanText = cleanImportedTopic(identity.text);
-		let type = 'text';
-		let file = null;
-		let url = null;
-		const wikiMatch = /^!\[\[([^|\]#]+)(?:[|#][^\]]*)?\]\]\s*$/.exec(
-			cleanText
-		);
-		const imageMatch =
-			/^!\[([^\]]*)\]\(\s*<([^>]+)>\s*\)\s*$/.exec(cleanText) ||
-			/^!\[([^\]]*)\]\(\s*([^\s)]+)\s*\)\s*$/.exec(cleanText);
-		const linkMatch =
-			/^\[([^\]]+)\]\(\s*<([^>]+)>\s*\)\s*$/.exec(cleanText) ||
-			/^\[([^\]]+)\]\(\s*([^\s)]+)\s*\)\s*$/.exec(cleanText);
-		const resourceMatch = imageMatch || linkMatch;
-		const resourceTarget = resourceMatch?.[2] || '';
-		if (wikiMatch) {
-			type = 'file';
-			file = wikiMatch[1];
-		} else if (
-			resourceMatch &&
-			['http:', 'https:', 'obsidian:', 'file:', 'app:'].some((proto) =>
-				resourceTarget.startsWith(proto)
-			)
-		) {
-			type = 'link';
-			url = resourceTarget;
-		} else if (
-			resourceMatch &&
-			MediaDrop.extractFilePathFromUrl(cleanText)
-		) {
-			type = 'file';
-			file = resourceTarget;
-		}
-		const node = {
-			id,
-			legacyId: identity.id ? id : null,
-			type,
-			file,
-			url,
-			text: cleanText,
-			position: 'right',
-			children: [],
-			source
-		};
-		if (parent) parent.children.push(node);
-		else roots.push(node);
-		lastNode = node;
-		return node;
-	};
-	const addIndented = (text, indent, anchor, source = null) => {
-		while (
-			listStack.length > 0 &&
-			listStack[listStack.length - 1].indent >= indent
-		)
-			listStack.pop();
-		const parent =
-			listStack.length > 0
-				? listStack[listStack.length - 1].node
-				: anchor;
-		const node = addNode(text, parent, null, source);
-		listStack.push({ indent, node });
-		return node;
-	};
-	const lines = String(markdown || '')
-		.replace(/\r\n?/g, '\n')
-		.split('\n');
-	const currentParent = () =>
-		listStack.length > 0
-			? listStack[listStack.length - 1].node
-			: listAnchor;
-	const stripCommonIndent = (blockLines) => {
-		const nonEmpty = blockLines.filter((line) => line.trim());
-		const common =
-			nonEmpty.length > 0
-				? Math.min(
-						...nonEmpty.map(
-							(line) =>
-								(line.match(/^[ \t]*/) || [''])[0].replace(
-									/\t/g,
-									'    '
-								).length
-						)
-					)
-				: 0;
-		return blockLines
-			.map((line) => line.slice(Math.min(common, line.length)))
-			.join('\n')
-			.trim();
-	};
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		if (index === 0 && line.trim() === '---') {
-			inFrontmatter = true;
-			frontmatterLines.push('---');
-			continue;
-		}
-		if (inFrontmatter) {
-			frontmatterLines.push(line);
-			if (line.trim() === '---') {
-				inFrontmatter = false;
-			}
-			continue;
-		}
-		if (/^\s*<!--\s*tomindmap:content\s*-->\s*$/.test(line)) {
-			const content = [];
-			while (
-				++index < lines.length &&
-				!/^\s*<!--\s*\/tomindmap:content\s*-->\s*$/.test(lines[index])
-			)
-				content.push(lines[index]);
-			if (lastNode && content.length > 0)
-				lastNode.text =
-					`${lastNode.text}\n${stripCommonIndent(content)}`.trim();
-			continue;
-		}
-		const portableNodeMarker = line.match(
-			/^\s*<!--\s*tomindmap:node(?:\s+id=([A-Za-z0-9_-]+))?\s*-->\s*$/
-		);
-		if (portableNodeMarker) {
-			const startLine = index;
-			const content = [];
-			while (
-				++index < lines.length &&
-				!/^\s*<!--\s*\/tomindmap:node\s*-->\s*$/.test(lines[index])
-			)
-				content.push(lines[index]);
-			const block = stripCommonIndent(content);
-			if (block)
-				addNode(block, currentParent(), portableNodeMarker[1], {
-					startLine,
-					endLine: index + 1,
-					kind: 'block',
-					indent: ''
-				});
-			continue;
-		}
-		const fenceMatch = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_-]*)/);
-		if (fenceMatch) {
-			if (!inFence) {
-				const language = fenceMatch[2].toLowerCase();
-				if (language === 'mermaid') {
-					inFence = true;
-					mindmapFence = true;
-				} else {
-					const startLine = index;
-					const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-					const removeWrapperIndent = (value) =>
-						value.startsWith(wrapperIndent)
-							? value.slice(wrapperIndent.length)
-							: value;
-					const block = [removeWrapperIndent(line)];
-					const closingFence =
-						fenceMatch[1][0] === '`'
-							? /^\s*`{3,}\s*$/
-							: /^\s*~{3,}\s*$/;
-					while (++index < lines.length) {
-						block.push(removeWrapperIndent(lines[index]));
-						if (closingFence.test(lines[index])) break;
-					}
-					addNode(block.join('\n'), currentParent(), null, {
-						startLine,
-						endLine: index + 1,
-						kind: 'block',
-						indent: wrapperIndent
-					});
-				}
-			} else {
-				inFence = false;
-				mindmapFence = false;
-				mermaidMode = false;
-				listStack.length = 0;
-			}
-			continue;
-		}
-		if (inFence && !mindmapFence) continue;
-		if (!line.trim()) continue;
-		if (line.trim().toLowerCase() === 'mindmap') {
-			mermaidMode = true;
-			listStack.length = 0;
-			listAnchor = null;
-			continue;
-		}
-		if (/^\s*\$\$\s*$/.test(line)) {
-			const startLine = index;
-			const block = [line.trim()];
-			while (++index < lines.length) {
-				block.push(lines[index]);
-				if (/^\s*\$\$\s*$/.test(lines[index])) break;
-			}
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: (line.match(/^[ \t]*/) || [''])[0]
-			});
-			continue;
-		}
-		if (
-			/^\s*\|.*\|\s*$/.test(line) &&
-			index + 1 < lines.length &&
-			/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(lines[index + 1])
-		) {
-			const startLine = index;
-			const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-			const block = [line.trimStart()];
-			while (
-				index + 1 < lines.length &&
-				/^\s*\|.*\|\s*$/.test(lines[index + 1])
-			)
-				block.push(lines[++index].trimStart());
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: wrapperIndent
-			});
-			continue;
-		}
-		if (/^\s*>\s?/.test(line)) {
-			const startLine = index;
-			const wrapperIndent = (line.match(/^[ \t]*/) || [''])[0];
-			const block = [line.trimStart()];
-			while (index + 1 < lines.length) {
-				if (/^\s*>\s?/.test(lines[index + 1])) {
-					block.push(lines[++index].trimStart());
-					continue;
-				}
-				if (
-					!lines[index + 1].trim() &&
-					index + 2 < lines.length &&
-					/^\s*>\s?/.test(lines[index + 2])
-				) {
-					block.push(lines[++index]);
-					continue;
-				}
-				break;
-			}
-			addNode(block.join('\n'), currentParent(), null, {
-				startLine,
-				endLine: index + 1,
-				kind: 'block',
-				indent: wrapperIndent
-			});
-			continue;
-		}
-		const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
-		if (heading && !mermaidMode) {
-			const level = heading[1].length;
-			if (level === 1) sawH1 = true;
-			while (
-				headingStack.length > 0 &&
-				headingStack[headingStack.length - 1].level >= level
-			)
-				headingStack.pop();
-			const parent =
-				headingStack.length > 0
-					? headingStack[headingStack.length - 1].node
-					: null;
-			const node = addNode(heading[2], parent, null, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'heading',
-				level,
-				prefix: `${heading[1]} `
-			});
-			headingStack.push({ level, node });
-			listAnchor = node;
-			listStack.length = 0;
-			continue;
-		}
-		const list = line.match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
-		if (list && !mermaidMode) {
-			const indent = list[1].replace(/\t/g, '    ').length;
-			const marker = list[2];
-			const content = list[3];
-			const preserved = /^\d/.test(marker)
-				? `${marker} ${content}`
-				: /^\[[ xX]\]\s+/.test(content)
-					? `- ${content}`
-					: content;
-			addIndented(preserved, indent, listAnchor, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'list',
-				indent: list[1],
-				marker,
-				prefix: `${list[1]}${marker} `
-			});
-			continue;
-		}
-		const leading = line.match(/^([ \t]*)(.*)$/);
-		const indent = leading[1].replace(/\t/g, '    ').length;
-		const content = leading[2].trim();
-		if (!content) continue;
-		if (mermaidMode || indent > 0) {
-			addIndented(content, indent, listAnchor, {
-				startLine: index,
-				endLine: index + 1,
-				kind: 'plain',
-				indent: leading[1],
-				prefix: leading[1]
-			});
-			if (!listAnchor && listStack.length === 1) listAnchor = null;
-			continue;
-		}
-		listStack.length = 0;
-		const parent = listAnchor;
-		const node = addNode(content, parent, null, {
-			startLine: index,
-			endLine: index + 1,
-			kind: 'plain',
-			indent: leading[1],
-			prefix: leading[1]
-		});
-		if (!parent) listAnchor = node;
-	}
-	const frontmatter = frontmatterLines.join('\n').trim();
-	const titleMatch = frontmatter.match(/^title:\s*(.+?)\s*$/m);
-	const frontmatterTitle = titleMatch
-		? titleMatch[1].trim().replace(/^["']|["']$/g, '')
-		: '';
-	if (frontmatterTitle && !sawH1 && roots.length > 0) {
-		let id = genId();
-		while (usedIds.has(id)) id = genId();
-		usedIds.add(id);
-		const syntheticRoot = {
-			id,
-			legacyId: null,
-			text: frontmatterTitle,
-			position: 'right',
-			children: roots.splice(0)
-		};
-		roots.push(syntheticRoot);
-	}
-	const metadataIds = frontmatterStringArray(frontmatter, 'topicIds').filter(
-		(id) => /^[A-Za-z0-9_-]+$/.test(id)
-	);
-	const metadataKeys = frontmatterStringArray(frontmatter, 'topicKeys');
-	const metadataLabels = frontmatterStringArray(frontmatter, 'topicLabels');
-	const orderedNodes = [];
-	const collectOrderedNodes = (node) => {
-		orderedNodes.push(node);
-		for (const child of node.children) collectOrderedNodes(child);
-	};
-	for (const root of roots) collectOrderedNodes(root);
-	const assignedIds = /* @__PURE__ */ new Set();
-	const metadataIndexByNode = /* @__PURE__ */ new Map();
-	const metadataIndexesByKey = /* @__PURE__ */ new Map();
-	for (
-		let index = 0;
-		index < Math.min(metadataIds.length, metadataKeys.length);
-		index++
-	) {
-		let indexes = metadataIndexesByKey.get(metadataKeys[index]);
-		if (!indexes) {
-			indexes = [];
-			metadataIndexesByKey.set(metadataKeys[index], indexes);
-		}
-		indexes.push(index);
-	}
-	const claimedMetadataIndexes = /* @__PURE__ */ new Set();
-	for (const node of orderedNodes) {
-		const indexes = metadataIndexesByKey.get(topicIdentityKey(node.text));
-		if (!indexes) continue;
-		const match = indexes.find(
-			(index) => !claimedMetadataIndexes.has(index)
-		);
-		if (match === void 0) continue;
-		metadataIndexByNode.set(node, match);
-		claimedMetadataIndexes.add(match);
-	}
-	const unmatchedNodes = orderedNodes.filter(
-		(node) => !metadataIndexByNode.has(node)
-	);
-	const similarityPairs = [];
-	for (const node of unmatchedNodes) {
-		for (
-			let index = 0;
-			index < Math.min(metadataIds.length, metadataLabels.length);
-			index++
-		) {
-			if (claimedMetadataIndexes.has(index)) continue;
-			const score = topicLabelSimilarity(
-				metadataLabels[index],
-				topicIdentityLabel(node.text)
-			);
-			if (score >= 0.34) similarityPairs.push({ node, index, score });
-		}
-	}
-	similarityPairs.sort(
-		(a, b) =>
-			b.score - a.score ||
-			Math.abs(orderedNodes.indexOf(a.node) - a.index) -
-				Math.abs(orderedNodes.indexOf(b.node) - b.index)
-	);
-	const similarityMatchedNodes = /* @__PURE__ */ new Set();
-	for (const pair of similarityPairs) {
-		if (
-			similarityMatchedNodes.has(pair.node) ||
-			claimedMetadataIndexes.has(pair.index)
-		)
-			continue;
-		metadataIndexByNode.set(pair.node, pair.index);
-		similarityMatchedNodes.add(pair.node);
-		claimedMetadataIndexes.add(pair.index);
-	}
-	const unmatchedMetadataIndexes = metadataIds
-		.map((_, index) => index)
-		.filter((index) => !claimedMetadataIndexes.has(index));
-	let stableIdCount = 0;
-	for (let index = 0; index < orderedNodes.length; index++) {
-		const node = orderedNodes[index];
-		let metadataIndex = metadataIndexByNode.get(node);
-		if (metadataIndex === void 0 && unmatchedMetadataIndexes.length > 0)
-			metadataIndex = unmatchedMetadataIndexes.shift();
-		let candidate =
-			node.legacyId ||
-			(metadataIndex !== void 0 ? metadataIds[metadataIndex] : null) ||
-			node.id;
-		if (
-			(node.legacyId || metadataIndex !== void 0) &&
-			!assignedIds.has(candidate)
-		)
-			stableIdCount++;
-		while (!candidate || assignedIds.has(candidate)) candidate = genId();
-		node.id = candidate;
-		delete node.legacyId;
-		assignedIds.add(candidate);
-	}
-	const metadataCurrent =
-		metadataIds.length === orderedNodes.length &&
-		metadataKeys.length === orderedNodes.length &&
-		metadataLabels.length === orderedNodes.length &&
-		orderedNodes.every(
-			(node, index) =>
-				metadataIds[index] === node.id &&
-				metadataKeys[index] === topicIdentityKey(node.text) &&
-				metadataLabels[index] === topicIdentityLabel(node.text)
-		);
-	const topicIds = orderedNodes.map((node) => node.id);
-	const topicKeys = orderedNodes.map((node) => topicIdentityKey(node.text));
-	const topicLabels = orderedNodes.map((node) =>
-		topicIdentityLabel(node.text)
-	);
-	const topicSources = orderedNodes.map((node) => ({
-		id: node.id,
-		parentId:
-			orderedNodes.find((candidate) => candidate.children.includes(node))
-				?.id || null,
-		...node.source
-	}));
-	const setPosition = (node, position) => {
-		node.position = position;
-		for (const child of node.children) setPosition(child, position);
-	};
-	for (const root of roots) {
-		const weight = (node) =>
-			1 + node.children.reduce((sum, child) => sum + weight(child), 0);
-		const weights = root.children.map(weight);
-		const total = weights.reduce((sum, value) => sum + value, 0);
-		let prefix = 0;
-		let split = root.children.length > 0 ? 1 : 0;
-		let bestDifference = Infinity;
-		for (let index = 0; index <= root.children.length; index++) {
-			const difference = Math.abs(prefix - (total - prefix));
-			if (
-				difference < bestDifference ||
-				(difference === bestDifference && index > split)
-			) {
-				bestDifference = difference;
-				split = index;
-			}
-			prefix += weights[index] || 0;
-		}
-		root.children.forEach((child, index) =>
-			setPosition(child, index < split ? 'right' : 'left')
-		);
-	}
-	return {
-		roots,
-		frontmatter,
-		stableIdCount,
-		metadataCurrent,
-		topicIds,
-		topicKeys,
-		topicLabels,
-		topicSources
-	};
-}
-function parseMarkdownMindMap(markdown) {
-	return parseMarkdownMindMapDocument(markdown).roots;
-}
-function markdownMindMapToCanvas(markdown, opts) {
-	const parsed = parseMarkdownMindMapDocument(markdown);
-	const roots = parsed.roots;
-	if (roots.length === 0) return null;
-	const nodes = [];
-	const edges = [];
-	let currentY = 0;
-	const treeGap = Math.max(120, opts.verticalGap * 6);
-	for (const root of roots) {
-		const height = layoutTree(root, 0, currentY, opts, nodes, edges);
-		currentY += height + treeGap;
-	}
-	return {
-		nodes,
-		edges,
-		frontmatter: parsed.frontmatter,
-		stableIdCount: parsed.stableIdCount,
-		metadataCurrent: parsed.metadataCurrent,
-		topicIds: parsed.topicIds,
-		topicKeys: parsed.topicKeys,
-		topicLabels: parsed.topicLabels,
-		topicSources: parsed.topicSources,
-		rootIds: roots
-			.map((_, index) => {
-				let seen = -1;
-				for (const node of nodes) {
-					if (!edges.some((edge) => edge.toNode === node.id)) {
-						seen++;
-						if (seen === index) return node.id;
-					}
-				}
-				return null;
-			})
-			.filter(Boolean)
-	};
-}
-function canvasDataAdapter(data, file) {
-	const nodeMap = /* @__PURE__ */ new Map();
-	for (const item of data.nodes || []) {
-		let text = 'Untitled';
-		if (item.type === 'group') {
-			text = item.label || 'Group';
-		} else {
-			text = canvasNodeMarkdownText(item);
-		}
-		nodeMap.set(item.id, {
-			...item,
-			text
-		});
-	}
-	const edgeMap = /* @__PURE__ */ new Map();
-	for (const item of data.edges || []) {
-		const fromNode = nodeMap.get(item.fromNode);
-		const toNode = nodeMap.get(item.toNode);
-		if (!fromNode || !toNode) continue;
-		edgeMap.set(item.id, {
-			...item,
-			from: { node: fromNode, side: item.fromSide },
-			to: { node: toNode, side: item.toSide }
-		});
-	}
-	return {
-		nodes: nodeMap,
-		edges: edgeMap,
-		getData: () => data,
-		view: { file }
-	};
-}
-function canvasDataToMindMapMarkdown(data, file, options = {}) {
-	return canvasToMindMapMarkdown(canvasDataAdapter(data, file), options);
-}
-function reconcileCanvasData(existingData, imported) {
-	const current =
-		existingData && typeof existingData === 'object' ? existingData : {};
-	const existingNodes = new Map(
-		(current.nodes || []).map((node) => [node.id, node])
-	);
-	const pendingResizeIds = new Set(
-		Array.isArray(current.mindmapPendingResize)
-			? current.mindmapPendingResize
-			: []
-	);
-	const normalizeText = (text) =>
-		String(text || '')
-			.replace(/\r\n?/g, '\n')
-			.trim();
-	const nodes = [];
-	for (const incoming of imported.nodes) {
-		const existing = existingNodes.get(incoming.id);
-		if (existing) {
-			const isMediaNode =
-				existing.type === 'file' ||
-				existing.type === 'link' ||
-				existing.file ||
-				existing.url ||
-				incoming.type === 'file' ||
-				incoming.type === 'link';
-			const contentChanged = isMediaNode
-				? !canvasNodeContentMatches(existing, incoming)
-				: normalizeText(existing.text) !== normalizeText(incoming.text);
-			if (isMediaNode) {
-				pendingResizeIds.delete(incoming.id);
-			} else if (contentChanged) {
-				pendingResizeIds.add(incoming.id);
-			} else {
-				pendingResizeIds.delete(incoming.id);
-			}
-			nodes.push({
-				...existing,
-				...incoming,
-				width: isMediaNode
-					? existing.width
-					: contentChanged
-						? incoming.width
-						: existing.width,
-				height: isMediaNode
-					? existing.height
-					: contentChanged
-						? incoming.height
-						: existing.height
-			});
-		} else {
-			if (incoming.type !== 'file' && incoming.type !== 'link')
-				pendingResizeIds.add(incoming.id);
-			nodes.push({ ...incoming });
-		}
-	}
-	const groupIds = /* @__PURE__ */ new Set();
-	for (const node of current.nodes || []) {
-		if (node.type === 'group') {
-			groupIds.add(node.id);
-			nodes.push(node);
-		}
-	}
-	const existingEdges = new Map(
-		(current.edges || []).map((edge) => [
-			`${edge.fromNode}\0${edge.toNode}`,
-			edge
-		])
-	);
-	const edges = imported.edges.map((incoming) => {
-		const existing = existingEdges.get(
-			`${incoming.fromNode}\0${incoming.toNode}`
-		);
-		return existing
-			? {
-					...incoming,
-					...existing,
-					fromNode: incoming.fromNode,
-					toNode: incoming.toNode
-				}
-			: incoming;
-	});
-	const retainedIds = new Set(nodes.map((node) => node.id));
-	for (const edge of current.edges || []) {
-		if (!groupIds.has(edge.fromNode) && !groupIds.has(edge.toNode))
-			continue;
-		if (retainedIds.has(edge.fromNode) && retainedIds.has(edge.toNode))
-			edges.push(edge);
-	}
-	const reconciled = {
-		...current,
-		nodes,
-		edges,
-		mindmap: true,
-		mindmapMarkdownFrontmatter:
-			imported.frontmatter || current.mindmapMarkdownFrontmatter || ''
-	};
-	delete reconciled.mindmapAutoAdjust;
-	const retainedTopicIds = new Set(imported.nodes.map((node) => node.id));
-	const pending = Array.from(pendingResizeIds).filter((id) =>
-		retainedTopicIds.has(id)
-	);
-	if (pending.length > 0) reconciled.mindmapPendingResize = pending;
-	else delete reconciled.mindmapPendingResize;
-	return reconciled;
-}
-function convertMarkdownAnchorsToCardLinks(nodes, canvasPath) {
-	const slugToId = /* @__PURE__ */ new Map();
-	for (const node of nodes) {
-		const slug = headingSlug(node.text);
-		if (!slugToId.has(slug)) slugToId.set(slug, node.id);
-	}
-	for (const node of nodes) {
-		node.text = String(node.text || '').replace(
-			/\]\(#([^)]+)\)/g,
-			(match, rawAnchor) => {
-				let anchor = rawAnchor;
-				try {
-					anchor = decodeURIComponent(rawAnchor);
-				} catch (error) {}
-				const targetId = slugToId.get(anchor.toLowerCase());
-				if (!targetId) return match;
-				return `](obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${targetId})`;
-			}
-		);
-	}
-}
-function canvasMatchesImportedMarkdown(canvas, imported, canvasPath) {
-	if (!imported) return false;
-	const groupIds = getGroupIds(canvas);
-	const liveNodes = Array.from(canvas.nodes.values()).filter(
-		(node) => !groupIds.has(node.id)
-	);
-	const incomingNodes = imported.nodes.map((node) => ({ ...node }));
-	convertMarkdownAnchorsToCardLinks(incomingNodes, canvasPath);
-	if (liveNodes.length !== incomingNodes.length) return false;
-	const liveById = new Map(liveNodes.map((node) => [node.id, node]));
-	for (const incoming of incomingNodes) {
-		const live = liveById.get(incoming.id);
-		if (!live || !canvasNodeContentMatches(live, incoming)) return false;
-	}
-	const topicIds = new Set(incomingNodes.map((node) => node.id));
-	const edgeKey = (edge) => `${edge.fromNode}\0${edge.toNode}`;
-	const incomingEdges = new Set(
-		imported.edges
-			.filter(
-				(edge) =>
-					topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)
-			)
-			.map(edgeKey)
-	);
-	const liveEdges = new Set(
-		(canvas.getData().edges || [])
-			.filter(
-				(edge) =>
-					topicIds.has(edge.fromNode) && topicIds.has(edge.toNode)
-			)
-			.map(edgeKey)
-	);
-	if (incomingEdges.size !== liveEdges.size) return false;
-	for (const key of incomingEdges) {
-		if (!liveEdges.has(key)) return false;
-	}
-	return true;
-}
-function canvasOrderMatchesImportedMarkdown(canvas, imported) {
-	return MarkdownOrder.orderMatches(canvas, imported, getGroupIds);
-}
-function canvasTopicPreorder(canvas) {
-  return MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
-}
-function markdownLineRecords(markdown) {
-	const source = String(markdown || '');
-	const records = [];
-	const pattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
-	let match;
-	while ((match = pattern.exec(source))) {
-		if (!match[0]) break;
-		const eolMatch = match[0].match(/(?:\r\n|\n|\r)$/);
-		records.push({
-			start: match.index,
-			contentEnd:
-				match.index +
-				match[0].length -
-				(eolMatch ? eolMatch[0].length : 0),
-			end: match.index + match[0].length
-		});
-	}
-	return records;
-}
-/**
- * Reorder existing sibling subtrees by moving their original source slices.
- * Topic text, tables, code blocks, embeds, whitespace between sibling slots,
- * and every nested source block remain byte-for-byte intact.
- */
-function reorderMarkdownTopicsPreservingSource(markdown, canvas) {
-  return MarkdownOrder.reorderPreservingSource(markdown, canvas, {
-    getGroupIds,
-    parseDocument: parseMarkdownMindMapDocument,
-    lineRecords: markdownLineRecords,
-    withMetadata: markdownWithTopicMetadata,
-    withoutLegacyComments: withoutLegacyPluginComments,
-    identityKey: topicIdentityKey,
-    identityLabel: topicIdentityLabel
-  });
-}
-function patchMarkdownFromCanvasPreservingSource(
-	markdown,
-	canvas,
-	imported,
-	canvasPath
-) {
-	if (!imported || !Array.isArray(imported.topicSources)) return null;
-	const source = String(markdown || '');
-	const sourceEol = source.includes('\r\n')
-		? '\r\n'
-		: source.includes('\r')
-			? '\r'
-			: '\n';
-	const lineRecords = markdownLineRecords(source);
-	const groupIds = getGroupIds(canvas);
-	const liveNodes = Array.from(canvas.nodes.values()).filter(
-		(node) => !groupIds.has(node.id)
-	);
-	const liveById = new Map(liveNodes.map((node) => [node.id, node]));
-	const importedNodes = imported.nodes.map((node) => ({ ...node }));
-	convertMarkdownAnchorsToCardLinks(importedNodes, canvasPath);
-	const importedById = new Map(importedNodes.map((node) => [node.id, node]));
-	const sourceById = new Map(
-		imported.topicSources.map((record) => [record.id, record])
-	);
-	const topicIds = new Set([...liveById.keys(), ...importedById.keys()]);
-	const parentMap = (edges) => {
-		const result = /* @__PURE__ */ new Map();
-		for (const edge of edges || []) {
-			if (!topicIds.has(edge.fromNode) || !topicIds.has(edge.toNode))
-				continue;
-			if (
-				result.has(edge.toNode) &&
-				result.get(edge.toNode) !== edge.fromNode
-			)
-				return null;
-			result.set(edge.toNode, edge.fromNode);
-		}
-		return result;
-	};
-	const importedParents = parentMap(imported.edges);
-	const liveParents = parentMap(canvas.getData().edges || []);
-	if (!importedParents || !liveParents) return null;
-	const commonIds = new Set(
-		[...liveById.keys()].filter((id) => importedById.has(id))
-	);
-	for (const id of commonIds) {
-		const before = importedParents.get(id) || null;
-		const after = liveParents.get(id) || null;
-		if (before !== after) return null;
-	}
-	const removedIds = [...importedById.keys()].filter(
-		(id) => !liveById.has(id)
-	);
-	const addedIds = new Set(
-		[...liveById.keys()].filter((id) => !importedById.has(id))
-	);
-	const idToSlug = /* @__PURE__ */ new Map();
-	const slugCounts = /* @__PURE__ */ new Map();
-	for (const node of liveNodes) {
-		const base = headingSlug(canvasNodeMarkdownText(node));
-		const count = (slugCounts.get(base) || 0) + 1;
-		slugCounts.set(base, count);
-		idToSlug.set(node.id, count === 1 ? base : `${base}-${count}`);
-	}
-	const portableText = (node) =>
-		markdownWithPortableCardLinks(canvasNodeMarkdownText(node), idToSlug);
-	const patches = [];
-	const rangeFor = (record) => {
-		if (
-			!record ||
-			!Number.isInteger(record.startLine) ||
-			!Number.isInteger(record.endLine)
-		)
-			return null;
-		const first = lineRecords[record.startLine];
-		const last = lineRecords[record.endLine - 1];
-		return first && last
-			? {
-					start: first.start,
-					end: last.end,
-					trailingEol: source.slice(last.contentEnd, last.end)
-				}
-			: null;
-	};
-	const renderExisting = (record, text) => {
-		const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
-		if (record.kind === 'block') {
-			const indent = record.indent || '';
-			return lines.map((line) => `${indent}${line}`).join('\n');
-		}
-		if (record.kind === 'heading') {
-			const first = lines.shift() || 'Untitled';
-			return `${record.prefix || '# '}${first}${lines.length ? `\n${lines.join('\n')}` : ''}`;
-		}
-		let first = lines.shift() || 'Untitled';
-		if (record.kind === 'list') {
-			if (/^\d/.test(record.marker || ''))
-				first = first.replace(
-					new RegExp(
-						`^${String(record.marker).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+`
-					),
-					''
-				);
-			else first = first.replace(/^[-+*]\s+/, '');
-		}
-		const continuationIndent =
-			record.kind === 'list'
-				? `${record.indent || ''}  `
-				: record.indent || '';
-		return `${record.prefix || ''}${first}${lines.length ? `\n${lines.map((line) => `${continuationIndent}${line}`).join('\n')}` : ''}`;
-	};
-	for (const id of commonIds) {
-		const live = liveById.get(id);
-		const incoming = importedById.get(id);
-		if (canvasNodeContentMatches(live, incoming)) continue;
-		const record = sourceById.get(id);
-		const range = rangeFor(record);
-		if (!range) return null;
-		patches.push({
-			...range,
-			replacement:
-				renderExisting(record, portableText(live)).replace(
-					/\n/g,
-					sourceEol
-				) + range.trailingEol
-		});
-	}
-	for (const id of removedIds) {
-		const range = rangeFor(sourceById.get(id));
-		if (!range) return null;
-		patches.push({ ...range, replacement: '' });
-	}
-	const liveChildren = /* @__PURE__ */ new Map();
-	for (const id of liveById.keys()) liveChildren.set(id, []);
-	const liveRoots = [];
-	for (const node of liveNodes) {
-		const parentId = liveParents.get(node.id);
-		if (parentId && liveChildren.has(parentId))
-			liveChildren.get(parentId).push(node);
-		else liveRoots.push(node);
-	}
-	const spatialSort = (a, b) =>
-		a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id));
-	liveRoots.sort(spatialSort);
-	const liveRootIds = new Set(liveRoots.map((node) => node.id));
-	for (const [parentId, children] of liveChildren) {
-		const parent = liveById.get(parentId);
-		liveChildren.set(
-			parentId,
-			MarkdownOrder.orderChildren(
-				parent,
-				children,
-				liveRootIds.has(parentId)
-			)
-		);
-	}
-	const addedPreorder = (node) => {
-		const result = [node.id];
-		for (const child of liveChildren.get(node.id) || []) {
-			if (addedIds.has(child.id)) result.push(...addedPreorder(child));
-		}
-		return result;
-	};
-	const renderAddedTree = (node, style) => {
-		const text = portableText(node);
-		const richBlock = isStructuralListBlock(text);
-		const lines = [];
-		let childStyle;
-		if (isMediaResourceMarkdown(text)) {
-			const indent = style.kind === 'list' ? style.indent || '' : '';
-			lines.push(`${indent}- ${text}`);
-			childStyle = { kind: 'list', indent: `${indent}  ` };
-		} else if (richBlock) {
-			lines.push(text);
-			childStyle = { kind: 'list', indent: '' };
-		} else if (style.kind === 'heading' && style.level <= 6) {
-			lines.push(`${'#'.repeat(style.level)} ${text}`);
-			childStyle =
-				style.level < 6
-					? { kind: 'heading', level: style.level + 1 }
-					: { kind: 'list', indent: '' };
-		} else {
-			const indent = style.indent || '';
-			lines.push(`${indent}- ${text}`);
-			childStyle = { kind: 'list', indent: `${indent}  ` };
-		}
-		for (const child of liveChildren.get(node.id) || []) {
-			if (addedIds.has(child.id))
-				lines.push('', renderAddedTree(child, childStyle));
-		}
-		return lines.join('\n');
-	};
-	const addedGroups = /* @__PURE__ */ new Map();
-	for (const id of addedIds) {
-		const parentId = liveParents.get(id) || null;
-		if (parentId && addedIds.has(parentId)) continue;
-		if (parentId && !importedById.has(parentId)) return null;
-		const key = parentId || '';
-		if (!addedGroups.has(key)) addedGroups.set(key, []);
-		addedGroups.get(key).push(liveById.get(id));
-	}
-	const originalOrder = (imported.topicIds || []).filter((id) =>
-		liveById.has(id)
-	);
-	const descendantsOf = (parentId) => {
-		const result = new Set([parentId]);
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const [childId, candidateParent] of importedParents) {
-				if (result.has(candidateParent) && !result.has(childId)) {
-					result.add(childId);
-					changed = true;
-				}
-			}
-		}
-		return result;
-	};
-	const subtreeRangeCache = /* @__PURE__ */ new Map();
-	const subtreeRangeFor = (id) => {
-		if (subtreeRangeCache.has(id)) return subtreeRangeCache.get(id);
-		const ranges = Array.from(descendantsOf(id))
-			.map((descendantId) => rangeFor(sourceById.get(descendantId)))
-			.filter(Boolean);
-		const range =
-			ranges.length > 0
-				? {
-						start: Math.min(
-							...ranges.map((candidate) => candidate.start)
-						),
-						end: Math.max(
-							...ranges.map((candidate) => candidate.end)
-						)
-					}
-				: null;
-		subtreeRangeCache.set(id, range);
-		return range;
-	};
-	const visualOrder = MarkdownOrder.canvasTopicPreorder(canvas, getGroupIds);
-	const visualIndex = new Map(visualOrder.map((id, index) => [id, index]));
-	const insertionPlans = [];
-	for (const [parentKey, roots] of addedGroups) {
-		const parentId = parentKey || null;
-		let style = { kind: 'heading', level: 1 };
-		if (parentId) {
-			const parentRecord = sourceById.get(parentId);
-			if (!parentRecord) return null;
-			if (
-				parentRecord.kind === 'heading' &&
-				Number(parentRecord.level) < 6
-			)
-				style = {
-					kind: 'heading',
-					level: Number(parentRecord.level) + 1
-				};
-			else
-				style = {
-					kind: 'list',
-					indent: `${parentRecord.indent || ''}  `
-				};
-		}
-		const addedRootIds = new Set(roots.map((root) => root.id));
-		const siblings = parentId
-			? liveChildren.get(parentId) || []
-			: liveRoots;
-		for (let index = 0; index < siblings.length; ) {
-			if (!addedRootIds.has(siblings[index].id)) {
-				index++;
-				continue;
-			}
-			const run = [];
-			while (
-				index < siblings.length &&
-				addedRootIds.has(siblings[index].id)
-			)
-				run.push(siblings[index++]);
-			const nextExisting =
-				siblings
-					.slice(index)
-					.find((sibling) => !addedIds.has(sibling.id)) || null;
-			const previousExisting =
-				siblings
-					.slice(0, index - run.length)
-					.reverse()
-					.find((sibling) => !addedIds.has(sibling.id)) || null;
-			let offset;
-			if (nextExisting) {
-				const nextRange = subtreeRangeFor(nextExisting.id);
-				if (!nextRange) return null;
-				offset = nextRange.start;
-			} else if (previousExisting) {
-				const previousRange = subtreeRangeFor(previousExisting.id);
-				if (!previousRange) return null;
-				offset = previousRange.end;
-			} else if (parentId) {
-				const parentRange = rangeFor(sourceById.get(parentId));
-				if (!parentRange) return null;
-				offset = parentRange.end;
-			} else {
-				offset = source.length;
-			}
-			insertionPlans.push({
-				offset,
-				desiredIndex: Math.min(
-					...run.map(
-						(root) =>
-							visualIndex.get(root.id) ?? Number.MAX_SAFE_INTEGER
-					)
-				),
-				rendered: run
-					.map((root) => renderAddedTree(root, style))
-					.join('\n\n'),
-				newIds: run.flatMap(addedPreorder)
-			});
-		}
-	}
-	insertionPlans.sort(
-		(a, b) => a.offset - b.offset || a.desiredIndex - b.desiredIndex
-	);
-	const mergedInsertionPlans = [];
-	for (const plan of insertionPlans) {
-		const previous = mergedInsertionPlans[mergedInsertionPlans.length - 1];
-		if (previous && previous.offset === plan.offset) {
-			previous.rendered += `\n${plan.rendered}`;
-			previous.newIds.push(...plan.newIds);
-		} else {
-			mergedInsertionPlans.push({ ...plan, newIds: [...plan.newIds] });
-		}
-	}
-	for (const plan of mergedInsertionPlans) {
-		const prefix =
-			plan.offset > 0 && !/[\r\n]$/.test(source.slice(0, plan.offset))
-				? sourceEol
-				: '';
-		const replacement = `${prefix}${plan.rendered.replace(/\n/g, sourceEol)}${sourceEol}`;
-		patches.push({ start: plan.offset, end: plan.offset, replacement });
-	}
-	const orderEntries = originalOrder.map((id) => ({
-		offset: rangeFor(sourceById.get(id))?.start ?? source.length,
-		inserted: false,
-		ids: [id]
-	}));
-	for (const plan of mergedInsertionPlans)
-		orderEntries.push({
-			offset: plan.offset,
-			inserted: true,
-			desiredIndex: plan.desiredIndex,
-			ids: plan.newIds
-		});
-	orderEntries.sort(
-		(a, b) =>
-			a.offset - b.offset ||
-			Number(b.inserted) - Number(a.inserted) ||
-			(a.desiredIndex ?? Number.MAX_SAFE_INTEGER) -
-				(b.desiredIndex ?? Number.MAX_SAFE_INTEGER)
-	);
-	const sourceOrder = orderEntries.flatMap((entry) => entry.ids);
-	patches.sort((a, b) => b.start - a.start || b.end - a.end);
-	for (let index = 1; index < patches.length; index++) {
-		if (patches[index - 1].start < patches[index].end) return null;
-	}
-	let patched = source;
-	for (const patch of patches)
-		patched =
-			patched.slice(0, patch.start) +
-			patch.replacement +
-			patched.slice(patch.end);
-	const metadata = {
-		topicIds: sourceOrder,
-		topicKeys: sourceOrder.map((id) =>
-			topicIdentityKey(canvasNodeMarkdownText(liveById.get(id)))
-		),
-		topicLabels: sourceOrder.map((id) =>
-			topicIdentityLabel(canvasNodeMarkdownText(liveById.get(id)))
-		)
-	};
-	const withMetadata = markdownWithTopicMetadata(
-		withoutLegacyPluginComments(patched),
-		metadata.topicIds,
-		metadata.topicKeys,
-		metadata.topicLabels
-	);
-	return addedIds.size === 0 && removedIds.length === 0
-		? reorderMarkdownTopicsPreservingSource(withMetadata, canvas)
-		: withMetadata;
-}
-function extractLocalMediaTargets(markdown) {
-	const targets = /* @__PURE__ */ new Set();
-	const add = (raw) => {
-		if (!raw) return;
-		let target = String(raw)
-			.trim()
-			.replace(/^<|>$/g, '')
-			.replace(/^["']|["']$/g, '');
-		if (
-			!target ||
-			/^(?:https?:|data:|blob:|obsidian:|mailto:|#)/i.test(target)
-		)
-			return;
-		try {
-			target = decodeURIComponent(target);
-		} catch (error) {}
-		targets.add(target);
-	};
-	let match;
-	const wikiEmbed = /!\[\[([^|\]#]+)(?:#[^|\]]*)?(?:\|[^\]]*)?\]\]/g;
-	while ((match = wikiEmbed.exec(markdown))) add(match[1]);
-	const markdownEmbed =
-		/!\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/g;
-	while ((match = markdownEmbed.exec(markdown))) add(match[1]);
-	const htmlMedia =
-		/<(?:img|audio|video|source|iframe|object|embed)\b[^>]*(?:src|data)=["']([^"']+)["'][^>]*>/gi;
-	while ((match = htmlMedia.exec(markdown))) add(match[1]);
-	const mediaLink =
-		/(?<!!)\[[^\]]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/g;
-	while ((match = mediaLink.exec(markdown))) {
-		const path = match[1].replace(/^<|>$/g, '').split(/[?#]/)[0];
-		if (
-			/\.(?:avif|bmp|gif|jpe?g|png|svg|webp|pdf|mp3|m4a|ogg|wav|flac|mp4|m4v|mov|webm|ogv)$/i.test(
-				path
-			)
-		)
-			add(match[1]);
-	}
-	return Array.from(targets);
-}
 var MarkdownMindMapModal = class extends import_obsidian4.Modal {
 	constructor(app, onImport) {
 		super(app);
@@ -48270,21 +53314,11 @@ function printableNodeSnapshot(node) {
 		const styleText = computedStyleText(originals[index]);
 		if (styleText) clones[index].setAttribute('style', styleText);
 	}
-	for (const unsafe of Array.from(
-		clone.querySelectorAll(
-			'script,style,button,.canvas-node-resizer,.canvas-node-connection-point'
-		)
-	))
-		unsafe.remove();
-	for (const element of Array.from(clone.querySelectorAll('*'))) {
-		for (const attribute of Array.from(element.attributes)) {
-			if (/^on/i.test(attribute.name))
-				element.removeAttribute(attribute.name);
-		}
-	}
+	const ownerDocument = source.ownerDocument || globalThis.document;
+	const safe = sanitizeExportElement(clone, { document: ownerDocument });
 	const sourceRect = source.getBoundingClientRect();
 	return {
-		html: clone.outerHTML,
+		html: serializeXmlSafe(safe, { document: ownerDocument }),
 		rect: sourceRect
 	};
 }
@@ -48315,6 +53349,15 @@ function edgeCurve(from, to, fromSide, toSide) {
 	const middle = (x1 + x2) / 2;
 	return `M ${x1} ${y1} C ${middle} ${y1}, ${middle} ${y2}, ${x2} ${y2}`;
 }
+function edgePath(from, to, fromSide, toSide, lineType, curve, curvature) {
+	if (lineType === 'straight' || curve === false) {
+		const [x1, y1] = edgeAnchor(from, fromSide);
+		const [x2, y2] = edgeAnchor(to, toSide);
+		return `M ${x1} ${y1} L ${x2} ${y2}`;
+	}
+	return edgeCurve(from, to, fromSide, toSide);
+}
+
 function exportMarkerId(color) {
 	return `arrow-${String(color || 'default').replace(/[^a-z0-9_-]/gi, '_')}`;
 }
@@ -48326,7 +53369,7 @@ function canvasPrintDocument(canvas, scope) {
 	if (scope === 'selection') {
 		for (const item of canvas.selection) {
 			if (typeof item === 'string') selectedIds.add(item);
-			else if (item && 'nodeEl' in item) selectedIds.add(item.id);
+			else if (item && typeof item === 'object' && 'nodeEl' in item) selectedIds.add(item.id);
 		}
 	}
 	const records = [];
@@ -48346,6 +53389,15 @@ function canvasPrintDocument(canvas, scope) {
 				domRect.top > wrapperRect.bottom)
 		)
 			continue;
+		const nodeX = Number(node.x);
+		const nodeY = Number(node.y);
+		const nodeWidth = Number(node.width);
+		const nodeHeight = Number(node.height);
+		if (
+			![nodeX, nodeY, nodeWidth, nodeHeight].every(Number.isFinite) ||
+			nodeWidth <= 0 || nodeHeight <= 0 || nodeWidth > 100000 || nodeHeight > 100000
+		)
+			continue;
 		const viewportMode = scope === 'viewport';
 		const titleOnly = !!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY];
 		const rendered =
@@ -48360,8 +53412,8 @@ function canvasPrintDocument(canvas, scope) {
 					: node.text || canvasNodeMarkdownText(nodeData);
 		const logicalScale = viewportMode
 			? 1
-			: domRect && node.width
-				? domRect.width / node.width
+			: domRect && nodeWidth
+				? domRect.width / nodeWidth
 				: 1;
 		const visualEl =
 			node.nodeEl?.querySelector?.('.canvas-node-container') ||
@@ -48375,23 +53427,34 @@ function canvasPrintDocument(canvas, scope) {
 						x:
 							(viewportMode
 								? domRect.left - wrapperRect.left
-								: node.x) +
+								: nodeX) +
 							(rendered.rect.left - domRect.left) / logicalScale,
 						y:
 							(viewportMode
 								? domRect.top - wrapperRect.top
-								: node.y) +
+								: nodeY) +
 							(rendered.rect.top - domRect.top) / logicalScale,
 						width: rendered.rect.width / logicalScale,
 						height: rendered.rect.height / logicalScale
 					}
 				: null;
+		const cardState = [
+			canvas.selection?.has?.(node) ? 'selected' : '',
+			node.isEditing ? 'editing' : '',
+			titleOnly ? 'linked' : '',
+			canvasNodeUnknownData(node).collapsed ? 'collapsed' : '',
+			Array.isArray(data.mindmapMissingMedia?.[node.id]) &&
+			data.mindmapMissingMedia[node.id].length > 0
+				? 'missing-media'
+				: ''
+		].filter(Boolean).join(' ');
 		records.push({
 			id: node.id,
-			x: viewportMode ? domRect.left - wrapperRect.left : node.x,
-			y: viewportMode ? domRect.top - wrapperRect.top : node.y,
-			width: viewportMode ? domRect.width : node.width,
-			height: viewportMode ? domRect.height : node.height,
+			state: cardState,
+			x: viewportMode ? domRect.left - wrapperRect.left : nodeX,
+			y: viewportMode ? domRect.top - wrapperRect.top : nodeY,
+			width: viewportMode ? domRect.width : nodeWidth,
+			height: viewportMode ? domRect.height : nodeHeight,
 			text: displayText,
 			renderedHtml: rendered?.html || '',
 			contentRect,
@@ -48415,18 +53478,55 @@ function canvasPrintDocument(canvas, scope) {
 	}
 	if (records.length === 0) return null;
 	const byId = new Map(records.map((record) => [record.id, record]));
+	const viewportEndpoint = (node, side) => {
+		const rect = node?.nodeEl?.getBoundingClientRect?.();
+		const record = rect
+			? {
+					x: rect.left - wrapperRect.left,
+					y: rect.top - wrapperRect.top,
+					width: rect.width,
+					height: rect.height
+				}
+			: node;
+		const [x, y] = edgeAnchor(record, side);
+		return {
+			x: Math.max(0, Math.min(wrapperRect.width, x)),
+			y: Math.max(0, Math.min(wrapperRect.height, y)),
+			width: 0,
+			height: 0
+		};
+	};
 	const edges = [];
 	for (const edge of data.edges || []) {
-		const from = byId.get(edge.fromNode);
-		const to = byId.get(edge.toNode);
-		if (from && to)
+		let from = byId.get(edge.fromNode);
+		let to = byId.get(edge.toNode);
+		if (from && to) {
 			edges.push({
 				from,
 				to,
+				id: edge.id,
+				label: edge.label,
 				color: edge.color || '',
 				fromSide: edge.fromSide,
-				toSide: edge.toSide
+				toSide: edge.toSide,
+				fromEnd: edge.fromEnd,
+				toEnd: edge.toEnd,
+				lineType: edge.lineType,
+				curve: edge.curve,
+				curvature: edge.curvature
 			});
+			continue;
+		}
+		if (scope !== 'viewport' || (!from && !to)) continue;
+		from ||= viewportEndpoint(canvas.nodes.get(edge.fromNode), edge.fromSide);
+		to ||= viewportEndpoint(canvas.nodes.get(edge.toNode), edge.toSide);
+		edges.push({
+			from,
+			to,
+			color: edge.color || '',
+			fromSide: edge.fromSide,
+			toSide: edge.toSide
+		});
 	}
 	let minX;
 	let minY;
@@ -48438,10 +53538,16 @@ function canvasPrintDocument(canvas, scope) {
 		maxX = wrapperRect.width;
 		maxY = wrapperRect.height;
 	} else {
-		minX = Math.min(...records.map((record) => record.x));
-		minY = Math.min(...records.map((record) => record.y));
-		maxX = Math.max(...records.map((record) => record.x + record.width));
-		maxY = Math.max(...records.map((record) => record.y + record.height));
+		minX = Infinity;
+		minY = Infinity;
+		maxX = -Infinity;
+		maxY = -Infinity;
+		for (const record of records) {
+			minX = Math.min(minX, record.x);
+			minY = Math.min(minY, record.y);
+			maxX = Math.max(maxX, record.x + record.width);
+			maxY = Math.max(maxY, record.y + record.height);
+		}
 	}
 	const padding =
 		scope === 'viewport'
@@ -48465,9 +53571,18 @@ function canvasPrintDocument(canvas, scope) {
 	const colorOf = (value, fallback) =>
 		palette[value] || (/^#|^rgb|^hsl/.test(value) ? value : fallback);
 	const edgeSvg = edges
-		.map(({ from, to, color, fromSide, toSide }) => {
+		.map(({ from, to, color, fromSide, toSide, fromEnd, toEnd, lineType, curve, curvature, label }) => {
 			const stroke = colorOf(color, '#94a3b8');
-			return `<path d="${edgeCurve(from, to, fromSide, toSide)}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2" marker-end="url(#${exportMarkerId(color)})"/>`;
+			const path = edgePath(from, to, fromSide, toSide, lineType, curve, curvature);
+			const marker = exportMarkerId(color);
+			const start = fromEnd === 'arrow' ? ` marker-start="url(#${marker})"` : '';
+			const end = toEnd !== 'none' ? ` marker-end="url(#${marker})"` : '';
+			const [x1, y1] = edgeAnchor(from, fromSide);
+			const [x2, y2] = edgeAnchor(to, toSide);
+			const labelMarkup = label
+				? `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 4}" text-anchor="middle" font-size="12" fill="${escapeXml(stroke)}">${escapeXml(label)}</text>`
+				: '';
+			return `<path d="${path}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2"${start}${end}/>${labelMarkup}`;
 		})
 		.join('');
 	const wrapperStyle =
@@ -48490,9 +53605,17 @@ function canvasPrintDocument(canvas, scope) {
 				background,
 				accent
 			);
-			const stroke = paint.stroke;
+			let stroke = paint.stroke;
+			let stateStrokeWidth = record.strokeWidth;
+			if (record.state.split(/\s+/).includes('selected')) {
+				stroke = '#2563eb';
+				stateStrokeWidth = Math.max(3, record.strokeWidth + 1);
+			} else if (record.state.split(/\s+/).includes('missing-media')) {
+				stroke = '#dc2626';
+			}
+			const stateAttribute = ` data-tomindmap-card-state="${escapeXml(record.state)}"`;
 			if (record.group) {
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(getRootTitle(record.text))}</text></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(MarkdownMindMapCodec.topicTitle(record.text))}</text></g>`;
 			}
 			const fontSize = record.fontSize;
 			if (record.renderedHtml) {
@@ -48523,7 +53646,7 @@ function canvasPrintDocument(canvas, scope) {
 					width: record.width,
 					height: record.height
 				};
-				return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
 			}
 			const lines = wrapSvgText(record.text, record.width, fontSize);
 			const lineHeight = record.lineHeight;
@@ -48539,7 +53662,7 @@ function canvasPrintDocument(canvas, scope) {
 						`<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
 				)
 				.join('');
-			return `<g><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${record.strokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
+			return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
 		})
 		.join('');
 	const title =
@@ -48709,114 +53832,439 @@ function mindMapPdfBytes(jpeg) {
 }
 
 // <tomindmap:module freemind>
-var { freemindToCanvas, layoutTree, parseFreeMindXml } = (() => {
+var {
+  DEFAULT_FREEMIND_BUDGETS,
+  FREEMIND_REASON,
+  decodeFreeMind,
+  freemindToCanvas,
+  layoutTree,
+  parseFreeMindXml
+} = (() => {
+  "use strict";
   const module = { exports: {} };
   const exports = module.exports;
 
-  function parseFreeMindXml(xml) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xml, "text/xml");
-    const errorNode = doc.querySelector("parsererror");
-    if (errorNode)
-      return [];
-    const mapEl = doc.querySelector("map");
-    if (!mapEl)
-      return [];
+
+  const DEFAULT_FREEMIND_BUDGETS = Object.freeze({
+    maxFileBytes: 5 * 1024 * 1024,
+    maxNodes: 20000,
+    maxDepth: 20000
+  });
+
+  const FREEMIND_REASON = Object.freeze({
+    INVALID_INPUT: "invalid-input",
+    INVALID_BUDGET: "invalid-budget",
+    FILE_BYTE_BUDGET: "file-byte-budget",
+    NODE_BUDGET: "node-budget",
+    DEPTH_BUDGET: "depth-budget",
+    EXTERNAL_ENTITY: "external-entity",
+    PARSER_UNAVAILABLE: "parser-unavailable",
+    MALFORMED: "malformed",
+    LAYOUT: "layout"
+  });
+
+  const DEFAULT_LAYOUT_OPTIONS = Object.freeze({
+    nodeWidth: 240,
+    nodeHeight: 60,
+    maxNodeHeight: 300,
+    horizontalGap: 80,
+    verticalGap: 20
+  });
+
+  let utf8Encoder;
+
+  function byteLength(value) {
+    if (typeof TextEncoder === "function") {
+      if (!utf8Encoder) utf8Encoder = new TextEncoder();
+      return utf8Encoder.encode(value).length;
+    }
+    let bytes = 0;
+    for (let index = 0; index < value.length; index++) {
+      const code = value.codePointAt(index);
+      if (code <= 0x7f) bytes += 1;
+      else if (code <= 0x7ff) bytes += 2;
+      else if (code <= 0xffff) bytes += 3;
+      else {
+        bytes += 4;
+        index++;
+      }
+    }
+    return bytes;
+  }
+
+  function failure(reason, details) {
+    return details ? { ok: false, reason, ...details } : { ok: false, reason };
+  }
+
+  function success(value) {
+    return { ok: true, value };
+  }
+
+  function numberBudget(value) {
+    if (value === undefined) return null;
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) return undefined;
+    return number;
+  }
+
+  function resolveBudgets(options) {
+    const source = options && typeof options === "object" ? options : {};
+    const nested = source.budgets && typeof source.budgets === "object"
+      ? source.budgets
+      : source.limits && typeof source.limits === "object"
+        ? source.limits
+        : {};
+    const values = {
+      maxFileBytes: source.maxFileBytes ?? source.maxBytes ?? nested.maxFileBytes ?? nested.maxBytes,
+      maxNodes: source.maxNodes ?? source.maxTopics ?? nested.maxNodes ?? nested.maxTopics,
+      maxDepth: source.maxDepth ?? nested.maxDepth
+    };
+    const resolved = {};
+    for (const [name, fallback] of Object.entries(DEFAULT_FREEMIND_BUDGETS)) {
+      const candidate = values[name];
+      if (candidate === undefined) {
+        resolved[name] = fallback;
+        continue;
+      }
+      const number = numberBudget(candidate);
+      if (number === undefined) return failure(FREEMIND_REASON.INVALID_BUDGET, { budget: name });
+      resolved[name] = number;
+    }
+    return success(resolved);
+  }
+
+  function normalizedLayoutOptions(options) {
+    const source = options && typeof options === "object" ? options : {};
+    const result = { ...DEFAULT_LAYOUT_OPTIONS };
+    for (const [key, value] of Object.entries(source)) {
+      if (!(key in DEFAULT_LAYOUT_OPTIONS) || value === undefined) continue;
+      const number = Number(value);
+      const minimum = key === "horizontalGap" || key === "verticalGap" ? 0 : 1;
+      if (!Number.isFinite(number) || number < minimum)
+        throw new Error("FreeMind layout options must be finite bounds");
+      result[key] = number;
+    }
+    return result;
+  }
+
+  function localName(element) {
+    return String(element?.tagName || element?.nodeName || element?.localName || "")
+      .split(":")
+      .pop()
+      .toLowerCase();
+  }
+
+  function childElements(element) {
+    const children = element?.children || element?.childNodes || [];
+    return Array.from(children);
+  }
+
+  function isTopicElement(element) {
+    const name = localName(element);
+    return name === "node" || name === "x-coggle-rootnode";
+  }
+
+  function hasParserError(document) {
+    try {
+      if (typeof document?.querySelector === "function" && document.querySelector("parsererror")) {
+        return true;
+      }
+      if (typeof document?.getElementsByTagName === "function" && document.getElementsByTagName("parsererror").length > 0) {
+        return true;
+      }
+    } catch (_error) {
+      return true;
+    }
+    return false;
+  }
+
+  function findMap(document) {
+    try {
+      if (typeof document?.querySelector === "function") {
+        const map = document.querySelector("map");
+        if (map) return map;
+      }
+      if (typeof document?.getElementsByTagName === "function") {
+        return document.getElementsByTagName("map")[0] || null;
+      }
+    } catch (_error) {
+      return null;
+    }
+    return null;
+  }
+
+  function parseFreeMindDocument(xml, options) {
+    if (typeof xml !== "string") return failure(FREEMIND_REASON.INVALID_INPUT);
+    const budgetResult = resolveBudgets(options);
+    if (!budgetResult.ok) return budgetResult;
+    const budgets = budgetResult.value;
+    const fileBytes = byteLength(xml);
+    if (fileBytes > budgets.maxFileBytes) {
+      return failure(FREEMIND_REASON.FILE_BYTE_BUDGET, {
+        bytes: fileBytes,
+        maxFileBytes: budgets.maxFileBytes
+      });
+    }
+    const hasEntityDeclaration = /<!\s*ENTITY\b/i.test(xml);
+    const hasExternalDoctype = /<!\s*DOCTYPE\b[^>]*\b(?:SYSTEM|PUBLIC)\b/i.test(xml);
+    if (hasEntityDeclaration || hasExternalDoctype) {
+      return failure(FREEMIND_REASON.EXTERNAL_ENTITY);
+    }
+    const Parser = options?.DOMParser || options?.domParser || options?.parser || globalThis.DOMParser;
+    let parser;
+    try {
+      parser = typeof Parser === "function" ? new Parser() : Parser;
+    } catch (_error) {
+      return failure(FREEMIND_REASON.PARSER_UNAVAILABLE);
+    }
+    if (!parser || typeof parser.parseFromString !== "function") {
+      return failure(FREEMIND_REASON.PARSER_UNAVAILABLE);
+    }
+    let document;
+    try {
+      document = parser.parseFromString(xml, "text/xml");
+    } catch (_error) {
+      return failure(FREEMIND_REASON.MALFORMED);
+    }
+    if (!document || hasParserError(document)) return failure(FREEMIND_REASON.MALFORMED);
+    const map = findMap(document);
+    if (!map) return failure(FREEMIND_REASON.MALFORMED);
+
     const roots = [];
-    for (const child of Array.from(mapEl.children)) {
-      if (child.tagName === "node" || child.tagName === "x-coggle-rootnode") {
-        roots.push(parseNode(child, "right"));
+    let nodeCount = 0;
+    let maxDepth = 0;
+    const rootElements = childElements(map).filter(isTopicElement);
+    for (const rootElement of rootElements) {
+      if (nodeCount >= budgets.maxNodes) {
+        return failure(FREEMIND_REASON.NODE_BUDGET, {
+          nodes: nodeCount + 1,
+          maxNodes: budgets.maxNodes
+        });
+      }
+      if (1 > budgets.maxDepth) {
+        return failure(FREEMIND_REASON.DEPTH_BUDGET, { depth: 1, maxDepth: budgets.maxDepth });
+      }
+      const root = {
+        text: rootElement.getAttribute("TEXT") || "Untitled",
+        position: rootElement.getAttribute("POSITION") === "left" ? "left" : "right",
+        children: []
+      };
+      nodeCount++;
+      maxDepth = 1;
+      roots.push(root);
+      const stack = [{ element: rootElement, node: root, depth: 1, index: 0 }];
+      const childStack = new Map([[rootElement, childElements(rootElement)]]);
+      while (stack.length > 0) {
+        const frame = stack[stack.length - 1];
+        const children = childStack.get(frame.element) || [];
+        if (frame.index >= children.length) {
+          stack.pop();
+          continue;
+        }
+        const childElement = children[frame.index++];
+        if (!isTopicElement(childElement)) continue;
+        const depth = frame.depth + 1;
+        if (depth > budgets.maxDepth) {
+          return failure(FREEMIND_REASON.DEPTH_BUDGET, {
+            depth,
+            maxDepth: budgets.maxDepth
+          });
+        }
+        if (nodeCount >= budgets.maxNodes) {
+          return failure(FREEMIND_REASON.NODE_BUDGET, {
+            nodes: nodeCount + 1,
+            maxNodes: budgets.maxNodes
+          });
+        }
+        const child = {
+          text: childElement.getAttribute("TEXT") || "Untitled",
+          position: childElement.getAttribute("POSITION") === "left"
+            ? "left"
+            : childElement.getAttribute("POSITION") === "right"
+              ? "right"
+              : frame.node.position,
+          children: []
+        };
+        nodeCount++;
+        maxDepth = Math.max(maxDepth, depth);
+        frame.node.children.push(child);
+        childStack.set(childElement, childElements(childElement));
+        stack.push({ element: childElement, node: child, depth, index: 0 });
       }
     }
-    return roots;
+    return success({ roots, nodeCount, maxDepth });
   }
-  function parseNode(el, inheritedPosition) {
-    const text = el.getAttribute("TEXT") || "Untitled";
-    const posAttr = el.getAttribute("POSITION");
-    const position = posAttr === "left" ? "left" : posAttr === "right" ? "right" : inheritedPosition;
-    const children = [];
-    for (const child of Array.from(el.children)) {
-      if (child.tagName === "node" || child.tagName === "x-coggle-rootnode") {
-        children.push(parseNode(child, position));
-      }
+
+  function parseFreeMindXml(xml, options) {
+    try {
+      const parsed = parseFreeMindDocument(xml, options);
+      return parsed.ok ? parsed.value.roots : [];
+    } catch (_error) {
+      return [];
     }
-    return { text, position, children };
   }
+
   function estimateNodeHeight(text, nodeWidth, minHeight, maxHeight) {
     const AVG_CHAR_WIDTH = 8;
     const LINE_HEIGHT = 22;
     const PADDING = 20;
     const charsPerLine = Math.max(1, Math.floor((nodeWidth - PADDING) / AVG_CHAR_WIDTH));
-    const paragraphs = text.split("\n");
+    const paragraphs = String(text ?? "").split("\n");
     let totalLines = 0;
-    for (const para of paragraphs) {
-      if (para.length === 0) {
-        totalLines += 1;
-      } else {
-        totalLines += Math.ceil(para.length / charsPerLine);
-      }
+    for (const paragraph of paragraphs) {
+      if (paragraph.length === 0) totalLines += 1;
+      else totalLines += Math.ceil(paragraph.length / charsPerLine);
     }
     const estimated = totalLines * LINE_HEIGHT + PADDING;
     return Math.min(Math.max(estimated, minHeight), maxHeight);
   }
+
   function nodeHeight(node, opts) {
     return estimateNodeHeight(node.text, opts.nodeWidth, opts.nodeHeight, opts.maxNodeHeight);
   }
-  function subtreeHeight(node, opts) {
-    if (node.children.length === 0)
-      return nodeHeight(node, opts);
+
+  function groupHeight(children, opts, heights) {
+    if (children.length === 0) return 0;
     let total = 0;
-    for (let i = 0; i < node.children.length; i++) {
-      if (i > 0)
-        total += opts.verticalGap;
-      total += subtreeHeight(node.children[i], opts);
-    }
-    return Math.max(nodeHeight(node, opts), total);
-  }
-  function groupHeight(children, opts) {
-    if (children.length === 0)
-      return 0;
-    let total = 0;
-    for (let i = 0; i < children.length; i++) {
-      if (i > 0)
-        total += opts.verticalGap;
-      total += subtreeHeight(children[i], opts);
+    for (let index = 0; index < children.length; index++) {
+      if (index > 0) total += opts.verticalGap;
+      const child = children[index];
+      const measured = heights?.get(child);
+      total += measured === undefined ? measureSubtreeHeights([child], opts).get(child) : measured;
     }
     return total;
   }
-  function layoutTree(root, startX, startY, opts, nodes, edges) {
-    const rootH = nodeHeight(root, opts);
-    const rootId = root.id || genId();
-    if (root.type === "file" || root.file) {
-      nodes.push({ id: rootId, type: "file", file: root.file || root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
-    } else if (root.type === "link" || root.url) {
-      nodes.push({ id: rootId, type: "link", url: root.url || root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
-    } else {
-      nodes.push({ id: rootId, type: "text", text: root.text, x: startX, y: startY, width: opts.nodeWidth, height: rootH });
+
+  function measureSubtreeHeights(roots, opts) {
+    const heights = new Map();
+    const visiting = new Set();
+    const stack = [];
+    for (let index = roots.length - 1; index >= 0; index--) {
+      stack.push({ node: roots[index], index: 0 });
     }
-    if (root.children.length === 0)
-      return rootH;
-    const rightChildren = root.children.filter((c) => c.position === "right");
-    const leftChildren = root.children.filter((c) => c.position === "left");
-    const rootCy = startY + rootH / 2;
-    layoutSide(rootId, rightChildren, "right", startX, rootCy, opts, nodes, edges);
-    layoutSide(rootId, leftChildren, "left", startX, rootCy, opts, nodes, edges);
-    const rightH = groupHeight(rightChildren, opts);
-    const leftH = groupHeight(leftChildren, opts);
-    return Math.max(rootH, rightH, leftH);
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const node = frame.node;
+      if (heights.has(node)) {
+        stack.pop();
+        visiting.delete(node);
+        continue;
+      }
+      if (visiting.has(node)) {
+        heights.set(node, nodeHeight(node, opts));
+        stack.pop();
+        visiting.delete(node);
+        continue;
+      }
+      visiting.add(node);
+      const children = node.children || [];
+      if (frame.index < children.length) {
+        stack.push({ node: children[frame.index++], index: 0 });
+        continue;
+      }
+      let total = 0;
+      for (let index = 0; index < children.length; index++) {
+        if (index > 0) total += opts.verticalGap;
+        total += heights.get(children[index]) ?? nodeHeight(children[index], opts);
+      }
+      heights.set(node, Math.max(nodeHeight(node, opts), total));
+      stack.pop();
+      visiting.delete(node);
+    }
+    return heights;
   }
-  function layoutSide(parentId, children, side, parentX, parentCy, opts, nodes, edges) {
-    if (children.length === 0)
-      return;
-    const totalH = groupHeight(children, opts);
-    let childY = parentCy - totalH / 2;
+
+  function emitNode(node, id, x, y, opts, nodes) {
+    const height = nodeHeight(node, opts);
+    if (node.type === "file" || node.file) {
+      nodes.push({ id, type: "file", file: node.file || node.text, x, y, width: opts.nodeWidth, height });
+    } else if (node.type === "link" || node.url) {
+      nodes.push({ id, type: "link", url: node.url || node.text, x, y, width: opts.nodeWidth, height });
+    } else {
+      nodes.push({ id, type: "text", text: node.text, x, y, width: opts.nodeWidth, height });
+    }
+    return height;
+  }
+
+  function layoutBranch(node, x, y, side, opts, nodes, edges, heights) {
+    const rootId = node.id || genId();
+    const tasks = [{ kind: "node", node, id: rootId, x, y, side }];
+    while (tasks.length > 0) {
+      const task = tasks.pop();
+      if (task.kind === "edge") {
+        edges.push({
+          id: genId(),
+          fromNode: task.parentId,
+          fromSide: task.fromSide,
+          fromEnd: "none",
+          toNode: task.childId,
+          toSide: task.toSide,
+          toEnd: "arrow"
+        });
+        continue;
+      }
+      const height = emitNode(task.node, task.id, task.x, task.y, opts, nodes);
+      const children = task.node.children || [];
+      if (children.length === 0) continue;
+      const fromSide = task.side === "right" ? "right" : "left";
+      const toSide = task.side === "right" ? "left" : "right";
+      const totalHeight = groupHeight(children, opts, heights);
+      let childY = task.y + height / 2 - totalHeight / 2;
+      const placements = [];
+      for (const child of children) {
+        const childHeight = heights.get(child) ?? measureSubtreeHeights([child], opts).get(child);
+        const childNodeY = childY + childHeight / 2 - nodeHeight(child, opts) / 2;
+        const childSide = child.position === "left" || child.position === "right"
+          ? child.position
+          : task.side;
+        const childX = childSide === "right"
+          ? task.x + opts.nodeWidth + opts.horizontalGap
+          : task.x - opts.nodeWidth - opts.horizontalGap;
+        placements.push({
+          node: child,
+          id: child.id || genId(),
+          x: childX,
+          y: childNodeY,
+          side: childSide,
+          height: childHeight
+        });
+        childY += childHeight + opts.verticalGap;
+      }
+      for (let index = placements.length - 1; index >= 0; index--) {
+        const placement = placements[index];
+        tasks.push({
+          kind: "edge",
+          parentId: task.id,
+          childId: placement.id,
+          fromSide,
+          toSide
+        });
+        tasks.push({
+          kind: "node",
+          node: placement.node,
+          id: placement.id,
+          x: placement.x,
+          y: placement.y,
+          side: placement.side
+        });
+      }
+    }
+    return rootId;
+  }
+
+  function layoutSide(parentId, children, side, parentX, parentCy, opts, nodes, edges, heights) {
+    if (children.length === 0) return;
+    const totalHeight = groupHeight(children, opts, heights);
+    let childY = parentCy - totalHeight / 2;
     const fromSide = side === "right" ? "right" : "left";
     const toSide = side === "right" ? "left" : "right";
-    const childX = side === "right" ? parentX + opts.nodeWidth + opts.horizontalGap : parentX - opts.nodeWidth - opts.horizontalGap;
+    const childX = side === "right"
+      ? parentX + opts.nodeWidth + opts.horizontalGap
+      : parentX - opts.nodeWidth - opts.horizontalGap;
     for (const child of children) {
-      const childH = subtreeHeight(child, opts);
-      const childNodeY = childY + childH / 2 - nodeHeight(child, opts) / 2;
-      const childId = layoutBranch(child, childX, childNodeY, side, opts, nodes, edges);
+      const childHeight = heights.get(child) ?? measureSubtreeHeights([child], opts).get(child);
+      const childNodeY = childY + childHeight / 2 - nodeHeight(child, opts) / 2;
+      const childId = layoutBranch(child, childX, childNodeY, side, opts, nodes, edges, heights);
       edges.push({
         id: genId(),
         fromNode: parentId,
@@ -48826,59 +54274,90 @@ var { freemindToCanvas, layoutTree, parseFreeMindXml } = (() => {
         toSide,
         toEnd: "arrow"
       });
-      childY += childH + opts.verticalGap;
+      childY += childHeight + opts.verticalGap;
     }
   }
-  function layoutBranch(node, x, y, side, opts, nodes, edges) {
-    const h = nodeHeight(node, opts);
-    const id = node.id || genId();
-    if (node.type === "file" || node.file) {
-      nodes.push({ id, type: "file", file: node.file || node.text, x, y, width: opts.nodeWidth, height: h });
-    } else if (node.type === "link" || node.url) {
-      nodes.push({ id, type: "link", url: node.url || node.text, x, y, width: opts.nodeWidth, height: h });
-    } else {
-      nodes.push({ id, type: "text", text: node.text, x, y, width: opts.nodeWidth, height: h });
-    }
-    if (node.children.length === 0)
-      return id;
-    const fromSide = side === "right" ? "right" : "left";
-    const toSide = side === "right" ? "left" : "right";
-    const childX = side === "right" ? x + opts.nodeWidth + opts.horizontalGap : x - opts.nodeWidth - opts.horizontalGap;
-    const totalH = groupHeight(node.children, opts);
-    let childY = y + h / 2 - totalH / 2;
-    for (const child of node.children) {
-      const childH = subtreeHeight(child, opts);
-      const childNodeY = childY + childH / 2 - nodeHeight(child, opts) / 2;
-      const childId = layoutBranch(child, childX, childNodeY, side, opts, nodes, edges);
-      edges.push({
-        id: genId(),
-        fromNode: id,
-        fromSide,
-        fromEnd: "none",
-        toNode: childId,
-        toSide,
-        toEnd: "arrow"
-      });
-      childY += childH + opts.verticalGap;
-    }
-    return id;
+
+  function layoutTree(root, startX, startY, inputOptions, nodes, edges, suppliedHeights) {
+    const opts = normalizedLayoutOptions(inputOptions);
+    const outputNodes = Array.isArray(nodes) ? nodes : [];
+    const outputEdges = Array.isArray(edges) ? edges : [];
+    const heights = suppliedHeights || measureSubtreeHeights([root], opts);
+    const rootHeight = nodeHeight(root, opts);
+    const rootId = root.id || genId();
+    emitNode(root, rootId, startX, startY, opts, outputNodes);
+    const children = root.children || [];
+    if (children.length === 0) return rootHeight;
+    const rightChildren = children.filter((child) => child.position === "right");
+    const leftChildren = children.filter((child) => child.position === "left");
+    const rootCy = startY + rootHeight / 2;
+    layoutSide(rootId, rightChildren, "right", startX, rootCy, opts, outputNodes, outputEdges, heights);
+    layoutSide(rootId, leftChildren, "left", startX, rootCy, opts, outputNodes, outputEdges, heights);
+    return Math.max(rootHeight, groupHeight(rightChildren, opts, heights), groupHeight(leftChildren, opts, heights));
   }
-  function freemindToCanvas(xml, opts) {
-    const roots = parseFreeMindXml(xml);
-    if (roots.length === 0)
-      return null;
+
+  /**
+   * Decode and lay out a FreeMind document at the single bounded import seam.
+   * `options` carries the optional XML parser adapter plus explicit file-byte,
+   * topic-count, and depth budgets. The legacy Canvas-shaped adapter remains
+   * `freemindToCanvas` below.
+   *
+   * @returns {{ok:true,value:object}|{ok:false,reason:string}}
+   */
+  function decodeFreeMind(xml, options = {}) {
+    let parsed;
+    try {
+      parsed = parseFreeMindDocument(xml, options);
+    } catch (_error) {
+      return failure(FREEMIND_REASON.MALFORMED);
+    }
+    if (!parsed.ok) return parsed;
+    const roots = parsed.value.roots;
+    if (roots.length === 0) {
+      return success({ roots, nodes: [], edges: [], mindmap: true, nodeCount: 0, maxDepth: 0 });
+    }
+    let layoutOptions;
+    let heights;
     const nodes = [];
     const edges = [];
     let currentY = 0;
-    const treeGap = opts.verticalGap * 4;
-    for (const root of roots) {
-      const height = layoutTree(root, 0, currentY, opts, nodes, edges);
-      currentY += height + treeGap;
+    let treeGap = 0;
+    try {
+      layoutOptions = normalizedLayoutOptions(options);
+      heights = measureSubtreeHeights(roots, layoutOptions);
+      treeGap = layoutOptions.verticalGap * 4;
+      for (const root of roots) {
+        const height = layoutTree(root, 0, currentY, layoutOptions, nodes, edges, heights);
+        currentY += height + treeGap;
+      }
+    } catch (_error) {
+      return failure(FREEMIND_REASON.LAYOUT);
     }
-    return { nodes, edges, mindmap: true };
+    return success({
+      roots,
+      nodes,
+      edges,
+      mindmap: true,
+      nodeCount: parsed.value.nodeCount,
+      maxDepth: parsed.value.maxDepth
+    });
   }
 
-  module.exports = { freemindToCanvas, layoutTree, parseFreeMindXml };
+  function freemindToCanvas(xml, options = {}) {
+    const decoded = decodeFreeMind(xml, options);
+    if (!decoded.ok || decoded.value.roots.length === 0) return null;
+    const { roots: _roots, nodeCount: _nodeCount, maxDepth: _maxDepth, ...canvas } = decoded.value;
+    return canvas;
+  }
+
+  module.exports = {
+    DEFAULT_FREEMIND_BUDGETS,
+    FREEMIND_REASON,
+    decodeFreeMind,
+    freemindToCanvas,
+    layoutTree,
+    parseFreeMindXml
+  };
   return module.exports;
 })();
 // </tomindmap:module freemind>
@@ -48889,16 +54368,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		super(...arguments);
 		this.settings = DEFAULT_SETTINGS;
 		this.liveSizing = new LiveSizingController(this, getGroupIds);
+		this.canvasDecorationState = new WeakMap();
+		this.groupAnimationVersions = new WeakMap();
+		this.canvasGestureOwners = new Set();
+		this.canvasGeneration = 0;
 		this.cleanupClickHandler = null;
-		this.cleanupDragHandler = null;
-		this.cleanupSubtreeDragHandler = null;
 		this.cleanupGroupDragHandler = null;
 		this.cleanupTouchHandler = null;
 		this.touchController = null;
 		this.autoResizeHandle = null;
 		this.interceptedCanvas = null;
 		this.toggleBtnEl = null;
-		this.mediaBtnEl = null;
 		this.cleanupToggleHandler = null;
 		this.cleanupCardSelectionHandler = null;
 		this.cleanupCardDoubleClickHandler = null;
@@ -48914,8 +54394,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.pendingTimers = /* @__PURE__ */ new Set();
 		this.pendingRafs = /* @__PURE__ */ new Set();
 		this.pendingObservers = /* @__PURE__ */ new Set();
-		/** Cleanup for the current render-aware import sizing pass. */
-		this.renderResizeQueueCleanup = null;
 		/** Original canvas methods for unwrapping on cleanup. */
 		this.origCanvasMethods = {};
 		/** Set to true on unload to prevent deferred callbacks from running. */
@@ -48926,12 +54404,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.navSkipTracking = false;
 		this.lastNavCanvas = null;
 		this.cleanupNavHandler = null;
-		this.markdownSyncIndex = /* @__PURE__ */ new Map();
+		this.markdownOwnership = createMarkdownSyncOwnership();
+		this.markdownSyncIndex = new MarkdownSyncIndex();
+		this.markdownSyncCoordinator = new MarkdownSyncCoordinator();
+		this.verifiedMarkdownLinks = new Map();
+		this.verifiedParentLinks = new Map();
 		this.markdownSyncTimers = /* @__PURE__ */ new Map();
 		this.markdownModifyTimers = /* @__PURE__ */ new Map();
 		this.markdownWriteGuards = /* @__PURE__ */ new Map();
 		this.markdownWriteGuardTimers = /* @__PURE__ */ new Map();
 		this.markdownOrderDirty = /* @__PURE__ */ new WeakSet();
+		this.persistenceQueue = Promise.resolve();
 		this.syncApplyingCanvas = /* @__PURE__ */ new WeakSet();
 		this.localCanvasMutations = /* @__PURE__ */ new WeakSet();
 		this.immediateMarkdownWrites = /* @__PURE__ */ new WeakMap();
@@ -48984,7 +54467,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.keyboardHandler.zoomPadding = this.settings.navigationZoomPadding;
 		this.keyboardHandler.onFindRequested = (canvas) => {
-			void this.showOutline(canvas, true);
+			this.runAsync(() => this.showOutline(canvas, true), 'show outline');
 		};
 		this.keyboardHandler.register();
 		this.registerDomEvent(
@@ -49187,7 +54670,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const tree = findTreeForNode(forest, node.id);
 				if (!tree || tree.children.length === 0) return false;
 				if (checking) return true;
-				void this.convertTopicToCleanNotes(canvas, node, true);
+				this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, true), 'convert topic to clean notes');
 			}
 		});
 		this.addCommand({
@@ -49200,7 +54683,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const node = this.canvasApi.getSelectedNode(canvas);
 				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
 				if (checking) return true;
-				void this.convertTopicToCleanNotes(canvas, node, false);
+				this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 			}
 		});
 		this.addCommand({
@@ -49218,7 +54701,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				)
 					return false;
 				if (checking) return true;
-				void this.convertLinkedNodeToNormalTopic(canvas, node);
+				this.runAsync(() => this.convertLinkedNodeToNormalTopic(canvas, node), 'convert linked node to normal topic');
 			}
 		});
 		this.addCommand({
@@ -49231,7 +54714,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const node = this.canvasApi.getSelectedNode(canvas);
 				if (!node || !nodeIsConvertibleTopic(canvas, node)) return false;
 				if (checking) return true;
-				void this.convertTopicToNestedMindMap(canvas, node);
+				this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map');
 			}
 		});
 		this.addCommand({
@@ -49244,7 +54727,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const parent = canvas.getData?.()?.[TOMINMAP_PARENT];
 				if (!parent?.canvas || !parent?.nodeId) return false;
 				if (checking) return true;
-				void this.openParentMindMap(canvas, parent);
+				this.runAsync(() => this.openParentMindMap(canvas, parent), 'open parent mind map');
 			}
 		});
 		this.registerEvent(
@@ -49259,7 +54742,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.registerView(OUTLINE_VIEW_TYPE, (leaf) => new OutlineView(leaf));
 		this.app.workspace.onLayoutReady(() => {
-			void this.rebuildMarkdownSyncIndex();
+			this.runAsync(() => this.rebuildMarkdownSyncIndex(), 'rebuild markdown sync index');
 			const view = this.app.workspace.getActiveViewOfType(
 				import_obsidian5.ItemView
 			);
@@ -49395,19 +54878,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!(file instanceof import_obsidian5.TFile)) return;
 				if (
 					file.extension === 'md' &&
-					this.markdownSyncIndex.has(file.path)
+					this.markdownSyncIndex.canvasesFor(file.path).length > 0
 				)
 					this.scheduleMarkdownToCanvas(file);
 			})
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
-				void this.handleSyncedFileRename(file, oldPath);
+				this.runAsync(() => this.handleSyncedFileRename(file, oldPath), 'handle synced file rename');
 			})
 		);
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
-				void this.handleSyncedFileDelete(file);
+				this.runAsync(() => this.handleSyncedFileDelete(file), 'handle synced file delete');
 			})
 		);
 		this.registerEvent(
@@ -49417,20 +54900,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					item.setTitle('Copy node link')
 						.setIcon('link')
 						.onClick(() => {
-							const canvasPath = node.canvas.view.file.path;
-							if (node.file) {
-								const vaultName = this.app.vault.getName();
-								void navigator.clipboard.writeText(
-									`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`
-								);
-							} else if (node.url) {
-								void navigator.clipboard.writeText(node.url);
-							} else {
-								void navigator.clipboard.writeText(
-									`obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`
-								);
-							}
-							new import_obsidian5.Notice('Node link copied');
+							this.runAsync(async () => {
+								const canvasPath = node.canvas?.view?.file?.path || '';
+								let link;
+								if (canvasNodeFilePath(node)) {
+									const vaultName = this.app.vault.getName?.() || '';
+									link = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(canvasNodeFilePath(node))}`;
+								} else if (canvasNodeUrl(node)) link = canvasNodeUrl(node);
+								else link = `obsidian://tomindmap-navigate?canvas=${encodeURIComponent(canvasPath)}&id=${node.id}`;
+								await writeClipboardText(link);
+								new import_obsidian5.Notice('Node link copied');
+							}, 'copy node link');
 						});
 				});
 				if (canvas && this.isMindmapCanvas(canvas))
@@ -49452,9 +54932,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						conversionTree && conversionTree.children.length > 0
 					);
 					const convertWithSubtree = () =>
-						void this.convertTopicToCleanNotes(canvas, node, true);
+						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, true), 'convert topic to clean notes');
 					const convertWithoutSubtree = () =>
-						void this.convertTopicToCleanNotes(canvas, node, false);
+						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 					if (hasBranch) {
 						menu.addItem((item) => {
 							item.setTitle('Convert to file with subtree')
@@ -49728,7 +55208,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas || buildForest(canvas).length === 0) return false;
 				if (checking) return true;
-				void this.copyMindMapMarkdown(canvas);
+				this.runAsync(() => this.copyMindMapMarkdown(canvas), 'copy mind map markdown');
 			}
 		});
 		this.addCommand({
@@ -49786,7 +55266,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const nodes = Array.from(canvas.nodes.values()).filter(
 					(node) => !groupIds.has(node.id)
 				);
-				void this.validateMediaLinks(canvas, nodes, true);
+				this.runAsync(() => this.validateMediaLinks(canvas, nodes, true), 'validate media links');
 			}
 		});
 		this.addCommand({
@@ -49856,21 +55336,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.navSkipTracking = false;
 	}
-	onunload() {
+	async onunload() {
 		this.unloaded = true;
 		if (this.canvasLifecycleTimer !== null) {
 			clearTimeout(this.canvasLifecycleTimer);
 			this.canvasLifecycleTimer = null;
 		}
-		void flushCanvasView(this.interceptedCanvas, this.app.vault).catch(
-			(error) => {
-				console.error(
-					'ToMindMap: could not flush the active Canvas during unload',
-					error
-				);
-			}
-		);
-		this.cancelPendingAsync();
+		const canvas = this.interceptedCanvas;
+		this.disposeCanvasGestures('unload');
+		const drainMarkdownSync = this.markdownSyncCoordinator.flushAll()
+			.then(() => this.markdownSyncCoordinator.dispose())
+			.then((result) => {
+				if (!result.ok) console.warn('ToMindMap: Markdown sync did not drain during unload', result);
+			})
+			.catch((error) => console.warn('ToMindMap: Markdown coordinator unload failed', error));
+		await drainMarkdownSync;
+		try { await this.persistenceQueue; } catch (_) {}
+		try {
+			await flushCanvasView(canvas, this.app.vault);
+		} catch (error) {
+			console.error(
+				'ToMindMap: could not flush the active Canvas during unload',
+				error
+			);
+		}
+		this.cancelPendingAsync(canvas);
+		this.disposeCanvasDecorations(canvas);
 		for (const id of this.markdownSyncTimers.values()) clearTimeout(id);
 		this.markdownSyncTimers.clear();
 		for (const id of this.markdownModifyTimers.values()) clearTimeout(id);
@@ -49883,18 +55374,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupClickHandler) {
 			this.cleanupClickHandler();
 			this.cleanupClickHandler = null;
-		}
-		if (this.cleanupDragHandler) {
-			this.cleanupDragHandler();
-			this.cleanupDragHandler = null;
-		}
-		if (this.cleanupSubtreeDragHandler) {
-			this.cleanupSubtreeDragHandler();
-			this.cleanupSubtreeDragHandler = null;
-		}
-		if (this.cleanupGroupDragHandler) {
-			this.cleanupGroupDragHandler();
-			this.cleanupGroupDragHandler = null;
 		}
 		if (this.cleanupGroupBoundsHandler) {
 			this.cleanupGroupBoundsHandler();
@@ -49915,10 +55394,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupMediaDropHandler) {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
-		}
-		if (this.cleanupNodeDragReparentHandler) {
-			this.cleanupNodeDragReparentHandler();
-			this.cleanupNodeDragReparentHandler = null;
 		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
@@ -49957,10 +55432,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.toggleBtnEl.remove();
 			this.toggleBtnEl = null;
 		}
-		if (this.mediaBtnEl) {
-			this.mediaBtnEl.remove();
-			this.mediaBtnEl = null;
-		}
 	}
 	/**
 	 * Called when the active leaf changes — set up canvas-specific UI.
@@ -49993,6 +55464,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			? this.markdownSyncTimers.get(previousCanvasPath)
 			: null;
 		if (previousCanvas) {
+			this.disposeCanvasGestures('leaf-change');
+			this.cancelPendingAsync(previousCanvas);
+			this.disposeCanvasDecorations(previousCanvas);
 			void flushCanvasView(previousCanvas, this.app.vault).catch(
 				(error) => {
 					console.error(
@@ -50001,29 +55475,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 				}
 			);
+			if (pendingMarkdownWrite) {
+				clearTimeout(pendingMarkdownWrite);
+				this.markdownSyncTimers.delete(previousCanvasPath);
+				this.runAsync(() => this.flushCanvasToMarkdown(previousCanvas), 'flush canvas to markdown');
+			}
 		}
-		if (previousCanvas && pendingMarkdownWrite) {
-			clearTimeout(pendingMarkdownWrite);
-			this.markdownSyncTimers.delete(previousCanvasPath);
-			void this.flushCanvasToMarkdown(previousCanvas);
-		}
-		this.cancelPendingAsync();
 		this.unwrapCanvasMethods();
 		if (this.cleanupClickHandler) {
 			this.cleanupClickHandler();
 			this.cleanupClickHandler = null;
-		}
-		if (this.cleanupDragHandler) {
-			this.cleanupDragHandler();
-			this.cleanupDragHandler = null;
-		}
-		if (this.cleanupSubtreeDragHandler) {
-			this.cleanupSubtreeDragHandler();
-			this.cleanupSubtreeDragHandler = null;
-		}
-		if (this.cleanupGroupDragHandler) {
-			this.cleanupGroupDragHandler();
-			this.cleanupGroupDragHandler = null;
 		}
 		if (this.cleanupGroupBoundsHandler) {
 			this.cleanupGroupBoundsHandler();
@@ -50044,10 +55505,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupMediaDropHandler) {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
-		}
-		if (this.cleanupNodeDragReparentHandler) {
-			this.cleanupNodeDragReparentHandler();
-			this.cleanupNodeDragReparentHandler = null;
 		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
@@ -50094,14 +55551,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.toggleBtnEl.remove();
 				this.toggleBtnEl = null;
 			}
-			if (this.mediaBtnEl) {
-				this.mediaBtnEl.remove();
-				this.mediaBtnEl = null;
-			}
 			this.hideOutline();
 			return;
 		}
 		const canvasData = canvas.getData();
+		this.captureCanvasDecorations(canvas);
 		if (this.isMindmapCanvas(canvas)) {
 			MindmapActions.syncCollapsedVisibility(canvas);
 			this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
@@ -50125,16 +55579,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		this.injectToggleButton(canvas);
 		const onCardPointerDown = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			if (event.button !== 0) return;
-			const target = event.target;
-			if (
-				target?.closest?.(
-					'.canvas-node-connection-point, .canvas-node-resizer, .canvas-node-resizers'
-				)
-			)
-				return;
-			const node = findNodeFromEvent(canvas, event);
+			const node = isPrimaryCardGesture(event, {
+				isEnabled: () => this.isMindmapCanvas(canvas),
+				findNode: (pointerEvent) => findNodeFromEvent(canvas, pointerEvent),
+				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
+			});
 			if (!node) return;
 			canvas.selectOnly(node);
 			canvas.requestFrame();
@@ -50178,45 +55627,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 		this.cleanupKeyboardHandler =
 			this.keyboardHandler.attachToCanvas(canvas);
-		this.cleanupTouchHandler = null;
-		if (this.isTouchUiEnabled()) {
-			this.touchController = new TouchControlsController({
-				canvas,
-				actions: this.keyboardHandler,
-				Menu: import_obsidian5.Menu,
-				setIcon: import_obsidian5.setIcon,
-				isEnabled: () =>
-					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
-				isTopicNode: (node) =>
-					nodeIsConvertibleTopic(canvas, node) ||
-					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
-				onDoubleTap: (node) => {
-					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
-					const file = this.app.vault.getAbstractFileByPath(
-						canvasNodeFilePath(node)
-					);
-					if (!(file instanceof import_obsidian5.TFile)) return false;
-					void this.app.workspace.getLeaf(false).openFile(file);
-					return true;
-				},
-				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
-				buildMenuItems: (menu, node) => {
-					this.app.workspace.trigger('canvas:node-menu', menu, node);
-				}
-			});
-			this.cleanupTouchHandler = this.touchController.attach();
-		}
+		this.syncCanvasBindings(canvas);
 		this.cleanupClickHandler = this.navigation.registerClickHandler(canvas);
 		// Card movement, subtree movement, attachment preview, and commit are
 		// deliberately owned by registerNodeDragReparentHandler. Multiple gesture
 		// owners used to race each other and could save a transient preview.
-		this.cleanupDragHandler = null;
-		this.cleanupSubtreeDragHandler = null;
 		this.cleanupGroupDragHandler = registerGroupDragHandler(
 			canvas,
 			this.canvasApi,
 			() => this.isMindmapCanvas(canvas)
 		);
+		this.canvasGestureOwners.add(this.cleanupGroupDragHandler);
 		const onDragEnd = () => {
 			if (this.isMindmapCanvas(canvas))
 				this.trackedRaf(() => this.updateGroupBounds(canvas));
@@ -50413,21 +55834,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: [];
 			const checkboxIndex = nodeCheckboxes.indexOf(target);
 			if (checkboxIndex < 0) return;
-			let seen = -1;
-			let changed = false;
-			const updated = node.text.replace(
-				/^(\s*[-+*]\s+\[)([ xX])(\])/gm,
-				(match, prefix, state, suffix) => {
-					seen++;
-					if (seen !== checkboxIndex) return match;
-					changed = true;
-					return `${prefix}${state.toLowerCase() === 'x' ? ' ' : 'x'}${suffix}`;
-				}
+			const toggled = MarkdownMindMapCodec.toggleTopicCheckbox(
+				node.text,
+				checkboxIndex
 			);
-			if (!changed) return;
+			if (!toggled.changed) return;
 			event.preventDefault();
 			event.stopImmediatePropagation();
-			node.setText(updated);
+			node.setText(toggled.text);
 			canvas.requestSave();
 			this.waitForPreview(node, () => {
 				if (
@@ -50461,15 +55875,39 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				target.getAttribute('src') ||
 				target.getAttribute('data') ||
 				'embedded media';
-			node.nodeEl.addClass('tomindmap-missing-media');
-			node.nodeEl.setAttribute(
-				'data-tomindmap-missing-media',
-				`Could not load: ${source}`
-			);
-			if (typeof node.setColor === 'function') node.setColor('1');
+			const data = canvas.getData();
+			const markers = {
+				...(data.mindmapMissingMedia && typeof data.mindmapMissingMedia === 'object'
+					? data.mindmapMissingMedia
+					: {})
+			};
+			const missing = Array.isArray(markers[node.id]) ? markers[node.id].slice() : [];
+			if (!missing.includes(source)) missing.push(source);
+			markers[node.id] = missing;
+			data.mindmapMissingMedia = markers;
+			canvas.setData(data);
+			this.applyMissingMediaMarkers(canvas);
+			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+				this.branchColors.applyColors(canvas);
+			canvas.requestSave();
+		};
+		const onMediaLoad = (event) => {
+			if (!this.isMindmapCanvas(canvas)) return;
+			const node = findNodeFromEvent(canvas, event);
+			if (!node) return;
+			const data = canvas.getData();
+			const markers = data.mindmapMissingMedia;
+			if (!markers || !Array.isArray(markers[node.id])) return;
+			delete markers[node.id];
+			data.mindmapMissingMedia = markers;
+			canvas.setData(data);
+			this.applyMissingMediaMarkers(canvas);
+			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+				this.branchColors.applyColors(canvas);
 			canvas.requestSave();
 		};
 		canvas.wrapperEl.addEventListener('error', onMediaLoadError, true);
+		canvas.wrapperEl.addEventListener('load', onMediaLoad, true);
 		this.cleanupRichContentHandler = () => {
 			canvas.wrapperEl.removeEventListener(
 				'click',
@@ -50481,10 +55919,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				onMediaLoadError,
 				true
 			);
+			canvas.wrapperEl.removeEventListener(
+				'load',
+				onMediaLoad,
+				true
+			);
 		};
 		this.cleanupMediaDropHandler = this.registerMediaDropHandler(canvas);
 		this.cleanupNodeDragReparentHandler =
 			this.registerNodeDragReparentHandler(canvas);
+		this.canvasGestureOwners.add(this.cleanupNodeDragReparentHandler);
 		const handleEditExit = (canvas2, editedNode) => {
 				const finalized = removeEmptyNodeOnEditExit(
 					canvas2,
@@ -50508,13 +55952,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							focus,
 							this.settings.navigationZoomPadding
 						);
-					void this.flushCanvasToMarkdown(canvas2);
+					this.runAsync(() => this.flushCanvasToMarkdown(canvas2), 'flush canvas to markdown');
 					return true;
 				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (!this.isMindmapCanvas(canvas2)) return;
-					void this.renameCanvasFromRootTopic(canvas2, editedNode);
+					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
 					if (!this.isAutoAdjustCanvas(canvas2)) return;
 					this.resizeNodesWhenRendered(
 						canvas2,
@@ -50537,31 +55981,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			(_a2 = this.autoResizeHandle) == null ? void 0 : _a2.finalizeNode();
 		};
 		this.keyboardHandler.onAfterFinishEditing = handleEditExit;
-		if (this.settings.mouseNavigation) {
-			const onPointerDown = (e) => {
-				if (e.button === 3) {
-					e.preventDefault();
-					e.stopImmediatePropagation();
-					this.navigateBack(canvas);
-				}
-				if (e.button === 4) {
-					e.preventDefault();
-					e.stopImmediatePropagation();
-					this.navigateForward(canvas);
-				}
-			};
-			canvas.wrapperEl.addEventListener(
-				'pointerdown',
-				onPointerDown,
-				true
-			);
-			this.cleanupNavHandler = () =>
-				canvas.wrapperEl.removeEventListener(
-					'pointerdown',
-					onPointerDown,
-					true
-				);
-		}
 		if (this.settings.autoColor && this.isMindmapCanvas(canvas)) {
 			this.branchColors.applyColors(canvas);
 		}
@@ -50648,7 +56067,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					structuralReflowQueued = false;
 					if (!this.isMindmapCanvas(canvas)) return;
 					pruneEmptyLeafTopics(canvas, this.canvasApi);
-					this.layoutEngine.layout(canvas);
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.layoutEngine.layout(canvas, { preserveRootSides: true });
 					this.updateGroupBounds(canvas);
 					canvas.requestSave();
 				});
@@ -50687,11 +56107,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.liveSizing.getPreviewSizer(node);
 				}
 			};
-			refreshPreviewGeometry();
+			const refreshCanvasDecorations = () => {
+				refreshPreviewGeometry();
+				if (this.isMindmapCanvas(canvas)) {
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
+				}
+			};
+			refreshCanvasDecorations();
 			if (typeof MutationObserver !== 'undefined' && canvas.wrapperEl) {
-				const previewObserver = new MutationObserver(
-					refreshPreviewGeometry
-				);
+				let previewRefreshQueued = false;
+				const previewObserver = new MutationObserver(() => {
+					if (previewRefreshQueued) return;
+					previewRefreshQueued = true;
+					this.trackedRaf(() => {
+						previewRefreshQueued = false;
+						if (
+							this.interceptedCanvas !== canvas ||
+							!this.isMindmapCanvas(canvas)
+						) return;
+						refreshCanvasDecorations();
+					});
+				});
 				previewObserver.observe(canvas.wrapperEl, {
 					childList: true,
 					subtree: true
@@ -50745,28 +56182,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.hideOutline();
 		}
 		this.trackedTimeout(() => this.ensureRootTopic(canvas), 120);
-		const canvasFile = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (canvasFile && markdownPath) {
-			this.indexMarkdownLink(canvasFile.path, markdownPath);
-			const source = this.app.vault.getAbstractFileByPath(markdownPath);
-			if (source instanceof import_obsidian5.TFile) {
+		const canvasFile = canvas.view?.file;
+		if (canvasFile) {
+			void (async () => {
+				const owned = await this.resolveMarkdownLinkForCanvas(canvas);
+				if (!owned.ok) return;
+				const source = owned.link.file;
+				if (!(source instanceof import_obsidian5.TFile)) return;
 				const canvasModified = Number(canvasFile.stat?.mtime || 0);
 				const markdownModified = Number(source.stat?.mtime || 0);
 				if (canvasModified > markdownModified) {
-					this.trackedTimeout(
-						() => void this.flushCanvasToMarkdown(canvas),
-						80
-					);
+					this.trackedTimeout(() => { void this.flushCanvasToMarkdown(canvas).catch(() => {}); }, 80);
 				} else {
-					this.trackedTimeout(
-						() => void this.syncMarkdownFileToCanvases(source),
-						80
-					);
+					this.trackedTimeout(() => { void this.syncMarkdownFileToCanvases(source).catch(() => {}); }, 80);
 				}
-			} else {
-				void this.detachMarkdownSync(canvas, false);
-			}
+			})().catch((error) => console.warn('ToMindMap: could not initialize owned sync', error));
 		}
 	}
 	refreshOutline(canvas) {
@@ -50794,90 +56224,80 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * Collect a node and all its descendants via BFS.
 	 */
 	collectSubtreeNodes(canvas, root) {
-		const result = [root];
-		const visited = /* @__PURE__ */ new Set([root.id]);
-		const queue = [root.id];
-		for (let cursor = 0; cursor < queue.length; cursor++) {
-			const id = queue[cursor];
-			for (const edge of this.canvasApi.getOutgoingEdges(canvas, id)) {
-				const childId = edge.to.node.id;
-				if (!visited.has(childId)) {
-					visited.add(childId);
-					result.push(edge.to.node);
-					queue.push(childId);
-				}
-			}
-		}
-		return result;
+		if (!root) return [];
+		return [root, ...this.canvasApi.getDescendantNodes(canvas, root)];
 	}
 	/**
 	 * Recalculate bounds for all groups to tightly fit their contained subtrees.
 	 * A root node belongs to a group if its center is inside the group's current bounds.
 	 */
 	updateGroupBounds(canvas) {
-		var _a;
 		const PADDING = 20;
 		const groupIds = getGroupIds(canvas);
 		if (groupIds.size === 0) return;
-		let changed = false;
-		for (const groupId of groupIds) {
-			const group = canvas.nodes.get(groupId);
-			if (!group) continue;
-			const gx = group.x;
-			const gy = group.y;
-			const gw = group.width;
-			const gh = group.height;
-			const contained = /* @__PURE__ */ new Set();
-			for (const node of canvas.nodes.values()) {
-				if (groupIds.has(node.id)) continue;
-				const cx = node.x + node.width / 2;
-				const cy = node.y + node.height / 2;
-				if (cx >= gx && cx <= gx + gw && cy >= gy && cy <= gy + gh) {
-					for (const n of this.collectSubtreeNodes(canvas, node)) {
-						contained.add(n);
-					}
-				}
+		const graph = this.canvasApi.getGraphQuery?.(canvas) || {
+			visibleForest: () => buildForest(canvas, { includeHidden: false }),
+			descendantsOf: (root) => this.collectSubtreeNodes(canvas, root).slice(1)
+		};
+		const groups = Array.from(groupIds, (id) => canvas.nodes.get(id)).filter(Boolean);
+		const contained = new Map(groups.map((group) => [group.id, new Set()]));
+		for (const root of graph.visibleForest()) {
+			const node = root.canvasNode;
+			const centerX = node.x + node.width / 2;
+			const centerY = node.y + node.height / 2;
+			let owner = null;
+			for (const group of groups) {
+				if (
+					centerX < group.x || centerX > group.x + group.width ||
+					centerY < group.y || centerY > group.y + group.height
+				) continue;
+				if (
+					!owner ||
+					group.width * group.height < owner.width * owner.height
+				) owner = group;
 			}
-			if (contained.size === 0) continue;
-			let minX = Infinity,
-				minY = Infinity,
-				maxX = -Infinity,
-				maxY = -Infinity;
-			for (const node of contained) {
+			if (!owner) continue;
+			contained.get(owner.id).add(node);
+			for (const descendant of graph.descendantsOf(node))
+				contained.get(owner.id).add(descendant);
+		}
+		let changed = false;
+		for (const group of groups) {
+			const nodes = contained.get(group.id);
+			if (!nodes || nodes.size === 0) continue;
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const node of nodes) {
 				minX = Math.min(minX, node.x);
 				minY = Math.min(minY, node.y);
 				maxX = Math.max(maxX, node.x + node.width);
 				maxY = Math.max(maxY, node.y + node.height);
 			}
-			const newX = minX - PADDING;
-			const newY = minY - PADDING;
-			const newW = maxX - minX + PADDING * 2;
-			const newH = maxY - minY + PADDING * 2;
-			if (newX !== gx || newY !== gy || newW !== gw || newH !== gh) {
-				(_a = group.nodeEl) == null
-					? void 0
-					: _a.addClass('mindmap-group-animating');
-				group.moveAndResize({
-					x: newX,
-					y: newY,
-					width: newW,
-					height: newH
-				});
-				changed = true;
-			}
-		}
-		if (changed) {
-			canvas.requestSave();
+			const next = {
+				x: minX - PADDING,
+				y: minY - PADDING,
+				width: maxX - minX + PADDING * 2,
+				height: maxY - minY + PADDING * 2
+			};
+			if (
+				next.x === group.x && next.y === group.y &&
+				next.width === group.width && next.height === group.height
+			) continue;
+			group.nodeEl?.addClass('mindmap-group-animating');
+			group.moveAndResize(next);
+			const version = (this.groupAnimationVersions.get(group) || 0) + 1;
+			this.groupAnimationVersions.set(group, version);
 			this.trackedTimeout(() => {
-				var _a2;
-				for (const groupId of groupIds) {
-					const group = canvas.nodes.get(groupId);
-					(_a2 = group == null ? void 0 : group.nodeEl) == null
-						? void 0
-						: _a2.removeClass('mindmap-group-animating');
-				}
+				if (this.groupAnimationVersions.get(group) !== version) return;
+				if (this.interceptedCanvas !== canvas || !this.isMindmapCanvas(canvas))
+					return;
+				group.nodeEl?.removeClass('mindmap-group-animating');
 			}, 260);
+			changed = true;
 		}
+		if (changed) canvas.requestSave();
 	}
 	getPreviewSizer(node) {
 		return this.liveSizing.getPreviewSizer(node);
@@ -50891,438 +56311,226 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * can make that subtree overlap its siblings. Other root maps stay untouched.
 	 */
 	relayoutAffectedBranches(canvas, nodes, layoutOptions = {}) {
-		const forest = buildForest(canvas);
-		const rootIds = /* @__PURE__ */ new Set();
-		for (const node of nodes) {
-			let tree = findTreeForNode(forest, node.id);
-			if (!tree) continue;
-			while (tree.parent) tree = tree.parent;
-			rootIds.add(tree.canvasNode.id);
-		}
+		const rootIds = new Set(
+			nodes
+				.map((node) => this.canvasApi.getAffectedRootNode(canvas, node))
+				.filter(Boolean)
+				.map((root) => root.id)
+		);
 		for (const rootId of rootIds)
 			this.layoutEngine.layoutChildren(canvas, rootId, null, layoutOptions);
 		this.updateGroupBounds(canvas);
 	}
-	handleAutoAdjustDrag(canvas, node) {
-		if (!this.isMindmapCanvas(canvas) || !this.isAutoAdjustCanvas(canvas))
-			return;
-		this.reflowCompleteCanvas(canvas);
-	}
-	reflowCompleteCanvas(canvas) {
-		reflowCanvasAfterMove(canvas, {
-			isMindmap: (candidate) => this.isMindmapCanvas(candidate),
-			layout: this.layoutEngine,
-			updateGroups: (candidate) => this.updateGroupBounds(candidate),
-			autoColor: () => this.settings.autoColor,
-			colors: this.branchColors,
-			markOrderDirty: (candidate) =>
-				this.markMarkdownOrderDirty(candidate)
-		});
+	applyStructuralMutation(canvas, changedNodes = [], options = {}) {
+		if (!canvas || !this.isMindmapCanvas(canvas))
+			return { ok: false, reason: 'ineligible', rootIds: [] };
+		this.canvasApi.invalidateEdgeIndex();
+		MindmapActions.syncCollapsedVisibility(canvas);
+		this.markMarkdownOrderDirty(canvas);
+		const rootIds = [...new Set(
+			changedNodes
+				.map((node) => this.canvasApi.getAffectedRootNode(canvas, node))
+				.filter(Boolean)
+				.map((root) => root.id)
+		)];
+		if (options.layout !== false) {
+			if (rootIds.length > 0) {
+				for (const rootId of rootIds)
+					this.layoutEngine.layoutChildren(canvas, rootId, null, options.layoutOptions || {});
+			} else {
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
+			}
+		}
+		if (this.settings.autoColor && options.color !== false)
+			this.branchColors.applyColors(canvas);
+		this.updateGroupBounds(canvas);
+		this.updateNodeTypeAttributes(canvas);
+		if (options.save !== false) canvas.requestSave();
+		return { ok: true, rootIds };
 	}
 	getAutoNodeSize(node) {
 		return this.liveSizing.measure(node);
-	}
-	/**
-	 * Resize text cards in both dimensions for automatic mindmap layout.
-	 */
-	resizeNodes(canvas, nodes) {
-		return this.liveSizing.resizeNodes(canvas, nodes);
 	}
 	/**
 	 * Render Markdown off-screen so virtualized Canvas cards can be measured
 	 * before they have ever appeared in the viewport.
 	 */
 	async measureMarkdownNodesOffscreen(canvas, nodes, isCurrent) {
-		var _a, _b, _c;
-		const MarkdownRenderer = import_obsidian5.MarkdownRenderer;
-		const Component = import_obsidian5.Component;
 		if (
-			typeof document === 'undefined' ||
-			!document.body ||
-			!MarkdownRenderer ||
-			typeof MarkdownRenderer.renderMarkdown !== 'function' ||
-			!Component
-		)
-			return /* @__PURE__ */ new Map();
+			typeof document === 'undefined' || !document.body ||
+			typeof import_obsidian5.MarkdownRenderer?.renderMarkdown !== 'function' ||
+			!import_obsidian5.Component
+		) return new Map();
 		let host = null;
 		let component = null;
-		const sourcePath =
-			this.getMarkdownSyncPath(canvas.getData()) ||
-			((_b = (_a = canvas.view) == null ? void 0 : _a.file) == null
-				? void 0
-				: _b.path) ||
-			'';
-		const minWidth = Math.max(
-			80,
-			Math.min(this.settings.minNodeWidth, this.settings.maxNodeWidth)
-		);
+		const sourcePath = this.verifiedMarkdownLinks.get(canvas.view?.file?.path)?.path || canvas.view?.file?.path || '';
+		const minWidth = Math.max(80, Math.min(this.settings.minNodeWidth, this.settings.maxNodeWidth));
 		const maxWidth = Math.max(minWidth, this.settings.maxNodeWidth);
 		const fallbackHeight = this.settings.defaultNodeHeight;
 		const maxHeight = this.settings.maxNodeHeight;
-		const entries = [];
-		const findCalibrationNode = () =>
-			Array.from(canvas.nodes.values()).find((node) => {
-				const sizer = this.liveSizing.getPreviewSizer(node);
-				const preview =
-					sizer == null
-						? void 0
-						: sizer.closest('.markdown-preview-view');
-				return !!(preview && preview.parentElement && node.contentEl);
-			}) || null;
-		const waitForCalibrationNode = () =>
-			new Promise((resolve) => {
-				let settled = false;
-				let observer = null;
-				let interval = null;
-				let timeout = null;
-				const finish = (node) => {
-					if (settled) return;
-					settled = true;
-					if (observer) observer.disconnect();
-					if (interval !== null) clearInterval(interval);
-					if (timeout !== null) clearTimeout(timeout);
-					resolve(node);
-				};
-				const check = () => {
-					if (!isCurrent()) {
-						finish(null);
-						return;
-					}
-					const node = findCalibrationNode();
-					if (node) finish(node);
-				};
-				if (
-					canvas.wrapperEl &&
-					typeof MutationObserver !== 'undefined'
-				) {
-					observer = new MutationObserver(check);
-					observer.observe(canvas.wrapperEl, {
-						childList: true,
-						subtree: true
-					});
+		const findCalibrationNode = () => Array.from(canvas.nodes.values()).find((node) => {
+			const sizer = this.liveSizing.getPreviewSizer(node);
+			const preview = sizer?.closest?.('.markdown-preview-view');
+			return Boolean(preview?.parentElement && node.contentEl);
+		}) || null;
+		const waitForCalibrationNode = () => new Promise((resolve) => {
+			let settled = false;
+			let observer = null;
+			let interval = null;
+			let timeout = null;
+			const finish = (node) => {
+				if (settled) return;
+				settled = true;
+				observer?.disconnect();
+				if (interval !== null) clearInterval(interval);
+				if (timeout !== null) clearTimeout(timeout);
+				resolve(node);
+			};
+			const check = () => {
+				if (!isCurrent()) return finish(null);
+				const node = findCalibrationNode();
+				if (node) finish(node);
+			};
+			if (canvas.wrapperEl && typeof MutationObserver !== 'undefined') {
+				observer = new MutationObserver(check);
+				observer.observe(canvas.wrapperEl, { childList: true, subtree: true });
+			}
+			interval = setInterval(check, 80);
+			timeout = setTimeout(() => finish(null), 1200);
+			check();
+		});
+		const nextFrame = () => new Promise((resolve) => {
+			const frameWindow = host?.ownerDocument?.defaultView;
+			if (typeof frameWindow?.requestAnimationFrame === 'function') frameWindow.requestAnimationFrame(() => resolve());
+			else if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+			else setTimeout(resolve, 0);
+		});
+		const makeInert = (element) => {
+			element.setAttribute?.('inert', '');
+			element.setAttribute?.('aria-hidden', 'true');
+			for (const media of [element, ...(element.querySelectorAll?.('iframe,object,embed,video,audio,img') || [])]) {
+				if (media.tagName === 'IFRAME') {
+					media.setAttribute('sandbox', '');
+					media.setAttribute('loading', 'lazy');
+				} else if (media.tagName === 'VIDEO' || media.tagName === 'AUDIO') {
+					media.setAttribute('preload', 'none');
+					media.setAttribute('controls', 'false');
+					media.setAttribute('autoplay', 'false');
 				}
-				interval = setInterval(check, 80);
-				timeout = setTimeout(() => finish(null), 1200);
-				check();
-			});
+			}
+		};
 		try {
-			// Canvas virtualizes Markdown previews. Wait for one genuine renderer,
-			// then use its own document so theme CSS, fonts and wrapping are exact.
-			const calibrationNode =
-				findCalibrationNode() || (await waitForCalibrationNode());
-			if (!calibrationNode) return /* @__PURE__ */ new Map();
-			const calibrationSizer =
-				this.liveSizing.getPreviewSizer(calibrationNode);
-			const measurementDocument =
-				(calibrationSizer == null
-					? void 0
-					: calibrationSizer.ownerDocument) || document;
-			if (!measurementDocument.body) return /* @__PURE__ */ new Map();
-			const calibrationCard = calibrationSizer.closest(
-				'.markdown-preview-view'
-			);
+			const calibrationNode = findCalibrationNode() || await waitForCalibrationNode();
+			if (!calibrationNode) return new Map();
+			const calibrationSizer = this.liveSizing.getPreviewSizer(calibrationNode);
+			const measurementDocument = calibrationSizer?.ownerDocument || document;
+			if (!measurementDocument.body) return new Map();
+			const calibrationCard = calibrationSizer.closest('.markdown-preview-view');
 			const calibrationEmbedContent = calibrationCard.parentElement;
-			const calibrationContent =
-				calibrationCard.closest('.canvas-node-content') ||
-				calibrationNode.contentEl;
-			if (!calibrationEmbedContent || !calibrationContent)
-				return /* @__PURE__ */ new Map();
-			const calibrationChromeHeight =
-				this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
-			const calibrationChromeWidth =
-				this.liveSizing.getPreviewChromeWidth(calibrationNode) || 0;
+			const calibrationContent = calibrationCard.closest('.canvas-node-content') || calibrationNode.contentEl;
+			if (!calibrationEmbedContent || !calibrationContent) return new Map();
+			const calibrationChromeHeight = this.liveSizing.getPreviewChromeHeight(calibrationNode) || 0;
+			const calibrationChromeWidth = this.liveSizing.getPreviewChromeWidth(calibrationNode) || 0;
 			host = measurementDocument.createElement('div');
 			host.className = 'tomindmap-measurement-host';
-			Object.assign(host.style, {
-				position: 'fixed',
-				left: '-100000px',
-				top: '0',
-				visibility: 'hidden',
-				pointerEvents: 'none',
-				display: 'block'
-			});
+			Object.assign(host.style, { position: 'fixed', left: '-100000px', top: '0', visibility: 'hidden', pointerEvents: 'none', display: 'block' });
 			measurementDocument.body.appendChild(host);
-			component = new Component();
-			if (typeof component.load === 'function') component.load();
-			const nextFrame = () =>
-				new Promise((resolve) => {
-					const frameWindow = measurementDocument.defaultView;
-					if (
-						frameWindow &&
-						typeof frameWindow.requestAnimationFrame === 'function'
-					)
-						frameWindow.requestAnimationFrame(() => resolve());
-					else if (typeof requestAnimationFrame === 'function')
-						requestAnimationFrame(() => resolve());
-					else setTimeout(resolve, 0);
-				});
-			const batchSize = 32;
-			for (let start = 0; start < nodes.length; start += batchSize) {
-				if (!isCurrent()) return /* @__PURE__ */ new Map();
-				const batch = nodes.slice(start, start + batchSize);
-				await Promise.all(
-					batch.map(async (node) => {
-						const estimated = this.getAutoNodeSize(node);
-						const targetWidth = Math.max(
-							minWidth,
-							Math.min(
-								maxWidth,
-								Math.max(Number(node.width) || 0, estimated.width)
-							)
-						);
-						const initialHeight = String(node.text || '').trim()
-							? Math.max(1, Number(estimated.floorHeight) || 0)
-							: fallbackHeight;
-						const shell = measurementDocument.createElement('div');
-						shell.className =
-							'canvas-node tomindmap-measurement-node';
-						Object.assign(shell.style, {
-							position: 'relative',
-							display: 'block',
-							width: `${targetWidth}px`,
-							height: 'auto',
-							minHeight: '0',
-							overflow: 'visible'
-						});
-						shell.style.setProperty(
-							'--canvas-node-width',
-							`${targetWidth}px`
-						);
-						const content = calibrationContent.cloneNode(false);
-						content.removeAttribute('id');
-						content.removeAttribute('style');
-						content.classList.add(
-							'canvas-node-content',
-							'markdown-embed'
-						);
-						Object.assign(content.style, {
-							width: '100%',
-							height: 'auto',
-							minHeight: '0',
-							overflow: 'visible',
-							position: 'relative'
-						});
-						const embedContent =
-							calibrationEmbedContent.cloneNode(false);
-						embedContent.removeAttribute('id');
-						embedContent.removeAttribute('style');
-						embedContent.classList.add('markdown-embed-content');
-						embedContent.style.height = 'auto';
-						embedContent.style.minHeight = '0';
-						embedContent.style.overflow = 'visible';
-						const card = calibrationCard
-							? calibrationCard.cloneNode(false)
-							: measurementDocument.createElement('div');
-						card.removeAttribute('id');
-						card.removeAttribute('style');
-						card.classList.add(
-							'markdown-preview-view',
-							'markdown-rendered'
-						);
-						card.style.height = 'auto';
-						card.style.minHeight = '0';
-						card.style.overflow = 'visible';
-						const sizer = calibrationSizer.cloneNode(false);
-						sizer.removeAttribute('id');
-						sizer.removeAttribute('style');
-						sizer.classList.add('markdown-preview-sizer');
-						sizer.style.boxSizing = 'border-box';
-						sizer.style.height = 'auto';
-						sizer.style.minHeight = '0';
-						sizer.style.overflow = 'visible';
-						sizer.style.padding = 'var(--size-4-1)';
-						card.appendChild(sizer);
-						embedContent.appendChild(card);
-						content.appendChild(embedContent);
-						shell.appendChild(content);
-						host.appendChild(shell);
-						await MarkdownRenderer.renderMarkdown(
-							String(node.text || ''),
-							sizer,
-							sourcePath,
-							component
-						);
-						this.liveSizing.applyPreviewGeometry(sizer);
-						entries.push({
-							node,
-							shell,
-							card,
-							content,
-							embedContent,
-							sizer,
-							estimated,
-							targetWidth,
-							targetHeight: initialHeight
-						});
-					})
-				);
-				await nextFrame();
-			}
-			if ((_c = measurementDocument.fonts) == null ? void 0 : _c.ready) {
-				await Promise.race([
-					measurementDocument.fonts.ready,
-					new Promise((resolve) => setTimeout(resolve, 500))
-				]);
-			}
-			await nextFrame();
-			if (!isCurrent()) return /* @__PURE__ */ new Map();
-			// Tables deliberately clip/wrap their cells at the current card width,
-			// which hides their intrinsic width from ordinary scroll measurements.
-			// Probe rigid content at max-content in the hidden clone, then restore
-			// normal Canvas wrapping before the final height pass.
-			const probedStyles = [];
-			const probeStyle = (element, declarations) => {
-				probedStyles.push([element, element.getAttribute('style')]);
-				for (const [property, value] of declarations)
-					element.style.setProperty(property, value, 'important');
-			};
-			for (const entry of entries) {
-				const { shell, content, embedContent, card, sizer, estimated } =
-					entry;
-				for (const element of Array.from(
-					sizer.querySelectorAll('table')
-				)) {
-					probeStyle(element, [
-						['width', 'max-content'],
-						['max-width', 'none'],
-						['table-layout', 'auto']
-					]);
-					for (const cell of Array.from(
-						element.querySelectorAll('th, td')
-					)) {
-						probeStyle(cell, [
-							['max-width', 'none'],
-							['white-space', 'nowrap'],
-							['overflow', 'visible'],
-							['text-overflow', 'clip']
-						]);
+			component = new import_obsidian5.Component();
+			component.load?.();
+			if (measurementDocument.fonts?.ready)
+				await Promise.race([measurementDocument.fonts.ready, new Promise((resolve) => setTimeout(resolve, 500))]);
+			const result = new Map();
+			for (const node of nodes) {
+				if (!isCurrent()) return result;
+				let shell = null;
+				try {
+					const estimated = this.getAutoNodeSize(node);
+					const targetWidth = Math.max(minWidth, Math.min(maxWidth, Math.max(Number(node.width) || 0, estimated.width)));
+					const initialHeight = String(node.text || '').trim() ? Math.max(1, Number(estimated.floorHeight) || 0) : fallbackHeight;
+					shell = measurementDocument.createElement('div');
+					shell.className = 'canvas-node tomindmap-measurement-node';
+					Object.assign(shell.style, { position: 'relative', display: 'block', width: `${targetWidth}px`, height: 'auto', minHeight: '0', overflow: 'visible' });
+					shell.style.setProperty('--canvas-node-width', `${targetWidth}px`);
+					const content = calibrationContent.cloneNode(false);
+					content.removeAttribute('id');
+					content.removeAttribute('style');
+					content.classList.add('canvas-node-content', 'markdown-embed');
+					Object.assign(content.style, { width: '100%', height: 'auto', minHeight: '0', overflow: 'visible', position: 'relative' });
+					const embedContent = calibrationEmbedContent.cloneNode(false);
+					embedContent.removeAttribute('id');
+					embedContent.removeAttribute('style');
+					embedContent.classList.add('markdown-embed-content');
+					Object.assign(embedContent.style, { height: 'auto', minHeight: '0', overflow: 'visible' });
+					const card = calibrationCard.cloneNode(false);
+					card.removeAttribute('id');
+					card.removeAttribute('style');
+					card.classList.add('markdown-preview-view', 'markdown-rendered');
+					Object.assign(card.style, { height: 'auto', minHeight: '0', overflow: 'visible' });
+					const sizer = calibrationSizer.cloneNode(false);
+					sizer.removeAttribute('id');
+					sizer.removeAttribute('style');
+					sizer.classList.add('markdown-preview-sizer');
+					Object.assign(sizer.style, { boxSizing: 'border-box', height: 'auto', minHeight: '0', overflow: 'visible', padding: 'var(--size-4-1)' });
+					card.appendChild(sizer);
+					embedContent.appendChild(card);
+					content.appendChild(embedContent);
+					shell.appendChild(content);
+					makeInert(shell);
+					host.appendChild(shell);
+					await import_obsidian5.MarkdownRenderer.renderMarkdown(String(node.text || ''), sizer, sourcePath, component);
+					this.liveSizing.applyPreviewGeometry(sizer);
+					await nextFrame();
+					const probed = [];
+					const probe = (element, declarations) => {
+						probed.push([element, element.getAttribute('style')]);
+						for (const [property, value] of declarations) element.style.setProperty(property, value, 'important');
+					};
+					for (const table of sizer.querySelectorAll('table')) {
+						probe(table, [['width', 'max-content'], ['max-width', 'none'], ['table-layout', 'auto']]);
+						for (const cell of table.querySelectorAll('th, td'))
+							probe(cell, [['max-width', 'none'], ['white-space', 'nowrap'], ['overflow', 'visible'], ['text-overflow', 'clip']]);
 					}
+					await nextFrame();
+					let intrinsicWidth = estimated.contentKind === 'text' ? this.liveSizing.measureIntrinsicWidth(sizer) + calibrationChromeWidth : 0;
+					for (const element of [sizer, ...sizer.querySelectorAll('*')]) {
+						const tagName = String(element.tagName || '').toLowerCase();
+						const clientWidth = Number(element.clientWidth || 0);
+						const scrollWidth = Number(element.scrollWidth || 0);
+						if (clientWidth > 0 && scrollWidth > clientWidth + 1) intrinsicWidth = Math.max(intrinsicWidth, targetWidth + scrollWidth - clientWidth);
+						if (/^(?:table|img|video|audio|iframe|embed|object)$/.test(tagName)) intrinsicWidth = Math.max(intrinsicWidth, Number(element.scrollWidth || 0) + Math.max(0, targetWidth - Number(card.clientWidth || 0)), Number(element.offsetWidth || 0) + Math.max(0, targetWidth - Number(card.clientWidth || 0)));
+					}
+					for (const [element, styleText] of probed) {
+						if (styleText === null) element.removeAttribute('style');
+						else element.setAttribute('style', styleText);
+					}
+					let width = estimated.contentKind === 'text' ? Math.min(maxWidth, Math.max(minWidth, estimated.width)) : Math.min(maxWidth, Math.max(minWidth, estimated.width, Math.ceil(intrinsicWidth / 10) * 10 || 0));
+					shell.style.width = `${width}px`;
+					shell.style.setProperty('--canvas-node-width', `${width}px`);
+					for (let pass = 0; pass < 4; pass++) {
+						await nextFrame();
+						const overflow = this.liveSizing.measureHorizontalOverflow(card);
+						if (overflow <= 0 || width >= maxWidth) break;
+						const nextWidth = Math.min(maxWidth, width + Math.ceil(overflow));
+						if (nextWidth <= width) break;
+						width = nextWidth;
+						shell.style.width = `${width}px`;
+						shell.style.setProperty('--canvas-node-width', `${width}px`);
+					}
+					const intrinsicHeight = this.liveSizing.measureIntrinsicHeight(sizer);
+					const oneLineHeight = this.liveSizing.minimumTextHeight(sizer);
+					const height = Math.min(maxHeight, Math.max(oneLineHeight, intrinsicHeight || this.liveSizing.measureContentHeight(sizer) || fallbackHeight) + calibrationChromeHeight);
+					if (isCurrent()) result.set(node.id, { width: Math.round(width), height });
+				} finally {
+					shell?.remove();
 				}
-			}
-			if (probedStyles.length > 0) await nextFrame();
-			for (const entry of entries) {
-				const { card, sizer, estimated } = entry;
-				let intrinsicWidth =
-					estimated.contentKind === 'text'
-						? this.liveSizing.measureIntrinsicWidth(sizer) +
-							calibrationChromeWidth
-						: 0;
-				for (const element of [
-					sizer,
-					...Array.from(sizer.querySelectorAll('*'))
-				]) {
-					const tagName = String(element.tagName || '').toLowerCase();
-					const clientWidth = Number(element.clientWidth || 0);
-					const scrollWidth = Number(element.scrollWidth || 0);
-					if (clientWidth > 0 && scrollWidth > clientWidth + 1)
-						intrinsicWidth = Math.max(
-							intrinsicWidth,
-							entry.targetWidth + scrollWidth - clientWidth
-						);
-					if (
-						/^(?:table|img|video|audio|iframe|embed|object)$/.test(
-							tagName
-						)
-					)
-						intrinsicWidth = Math.max(
-							intrinsicWidth,
-							Number(element.scrollWidth || 0) +
-								Math.max(
-									0,
-									entry.targetWidth -
-										Number(card.clientWidth || 0)
-								),
-							Number(element.offsetWidth || 0) +
-								Math.max(
-									0,
-									entry.targetWidth -
-										Number(card.clientWidth || 0)
-								)
-						);
-				}
-				entry.intrinsicWidth = intrinsicWidth;
-			}
-			for (const [element, styleText] of probedStyles) {
-				if (styleText === null) element.removeAttribute('style');
-				else element.setAttribute('style', styleText);
-			}
-			for (const entry of entries) {
-				const { estimated, shell } = entry;
-				const width = estimated.contentKind === 'text'
-					? Math.min(maxWidth, Math.max(minWidth, estimated.width))
-					: Math.min(
-							maxWidth,
-							Math.max(
-								minWidth,
-								estimated.width,
-								Math.ceil(entry.intrinsicWidth / 10) * 10 || 0
-							)
-						);
-				entry.targetWidth = width;
-				shell.style.width = `${width}px`;
-				shell.style.setProperty('--canvas-node-width', `${width}px`);
-			}
-			// Resolve any remaining horizontal overflow after restoring the real
-			// wrapping rules. All cards advance together, so this remains batched.
-			for (let pass = 0; pass < 4; pass++) {
-				await nextFrame();
-				let grew = false;
-				for (const entry of entries) {
-					const overflow = this.liveSizing.measureHorizontalOverflow(
-						entry.card
-					);
-					if (overflow <= 0 || entry.targetWidth >= maxWidth)
-						continue;
-					const nextWidth = Math.min(
-						maxWidth,
-						entry.targetWidth + Math.ceil(overflow)
-					);
-					if (nextWidth <= entry.targetWidth) continue;
-					entry.targetWidth = nextWidth;
-					entry.shell.style.width = `${nextWidth}px`;
-					entry.shell.style.setProperty(
-						'--canvas-node-width',
-						`${nextWidth}px`
-					);
-					grew = true;
-				}
-				if (!grew) break;
-			}
-			await nextFrame();
-			const result = /* @__PURE__ */ new Map();
-			for (const { node, estimated, targetWidth, sizer } of entries) {
-				const width = Math.min(
-					maxWidth,
-					Math.max(
-						minWidth,
-						Math.round(targetWidth || estimated.width)
-					)
-				);
-				const intrinsicHeight =
-					this.liveSizing.measureIntrinsicHeight(sizer);
-				const oneLineHeight = this.liveSizing.minimumTextHeight(sizer);
-				const height = Math.min(
-					maxHeight,
-					Math.max(
-						oneLineHeight,
-						intrinsicHeight ||
-							this.liveSizing.measureContentHeight(sizer) ||
-							fallbackHeight
-					) + calibrationChromeHeight
-				);
-				result.set(node.id, { width, height });
 			}
 			return result;
 		} catch (error) {
-			console.error(
-				'ToMindMap: off-screen Markdown measurement failed',
-				error
-			);
-			return /* @__PURE__ */ new Map();
+			console.error('ToMindMap: off-screen Markdown measurement failed', error);
+			return new Map();
 		} finally {
-			if (component && typeof component.unload === 'function')
-				component.unload();
-			if (host) host.remove();
+			component?.unload?.();
+			host?.remove();
 		}
 	}
 	/**
@@ -51331,19 +56539,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * in one shared observer/timer queue and perform one coalesced final layout.
 	 */
 	resizeNodesWhenRendered(canvas, nodes, onSettled, layoutOptions = {}) {
+		if (!canvas || !this.isMindmapCanvas(canvas)) {
+			const result = {
+				status: SIZING_STATUS.CANCELLED,
+				canvas,
+				requestedIds: [],
+				measurements: new Map()
+			};
+			onSettled?.(result);
+			return Promise.resolve(result);
+		}
 		return this.liveSizing.resizeNodesWhenRendered(
 			canvas,
 			nodes,
 			onSettled,
 			layoutOptions
 		);
-	}
-	/**
-	 * After a width change, use the re-rendered preview for a precise height and
-	 * reflow only the roots that contained adjusted nodes.
-	 */
-	resizeNodesRetry(canvas, nodes) {
-		return this.liveSizing.resizeNodesRetry(canvas, nodes);
 	}
 	finishInsertNode(canvas, newNode, nearNode) {
 		if (this.isAutoAdjustCanvas(canvas) && this.isMindmapCanvas(canvas)) {
@@ -51359,11 +56570,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.branchColors.applyColors(canvas);
 		}
 		this.updateGroupBounds(canvas);
-		this.canvasApi.selectAndEdit(
-			canvas,
-			newNode,
-			this.settings.navigationZoomPadding
-		);
+		this.selectAndEditTracked(canvas, newNode, this.settings.navigationZoomPadding);
 	}
 	async showOutline(canvas, focusSearch = false) {
 		let leaf =
@@ -51403,6 +56610,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		(_a = parent.selectTab) == null ? void 0 : _a.call(parent, leaf);
 	}
+	decodeMarkdownDocument(markdown, options = {}) {
+		return MarkdownMindMapCodec.decodeMarkdownMindMap(markdown, {
+			budgets: MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS,
+			...options
+		});
+	}
+	layoutMarkdownDocument(markdown, options = {}) {
+		return MarkdownMindMapCodec.layoutMarkdownMindMap(markdown, {
+			...this.markdownLayoutOptions(),
+			...options,
+			layout: layoutTree
+		});
+	}
+	encodeMarkdownDocument(canvas, options = {}) {
+		return MarkdownMindMapCodec.encodeMindMapMarkdown(canvas, {
+			...this.settings,
+			...options
+		});
+	}
 	markdownLayoutOptions() {
 		return {
 			nodeWidth: this.settings.defaultNodeWidth,
@@ -51415,6 +56641,206 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	getMarkdownSyncPath(data) {
 		const sync = data && data.mindmapMarkdownSync;
 		return sync && typeof sync.path === 'string' ? sync.path : '';
+	}
+	async confirmLegacyLink(kind, link) {
+		const target = kind === 'parent' ? link?.canvas : link?.path;
+		return new Promise((resolve) => {
+			const modal = new import_obsidian5.Modal(this.app);
+			let settled = false;
+			const finish = (value) => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+				modal.close();
+			};
+			modal.onOpen = () => {
+				modal.contentEl.empty();
+				modal.contentEl.createEl('h2', { text: 'Confirm legacy mind-map link' });
+				modal.contentEl.createEl('p', {
+					text: `Allow ToMindMap to claim ${target || 'this untrusted link'}? A private ownership record and target metadata will be written only after confirmation.`
+				});
+				const actions = modal.contentEl.createDiv({ cls: 'modal-button-container' });
+				const cancel = actions.createEl('button', { text: 'Cancel' });
+				const confirm = actions.createEl('button', { text: 'Adopt link', cls: 'mod-cta' });
+				cancel.addEventListener('click', () => finish(false));
+				confirm.addEventListener('click', () => finish(true));
+			};
+			modal.open();
+		});
+	}
+	restoreOwnershipSnapshot(records = []) {
+		const previousPaths = new Set(records.map((record) => record.canvasPath));
+		for (const canvasPath of new Set(this.markdownOwnership.records.map((record) => record.canvasPath))) {
+			if (!previousPaths.has(canvasPath)) this.markdownOwnership.removeCanvas(canvasPath);
+		}
+		for (const record of records) this.markdownOwnership.upsert(record, { replaceExisting: true });
+	}
+	restoreOwnershipRecords(canvasPath, records = []) {
+		this.markdownOwnership.removeCanvas(canvasPath);
+		for (const record of records) this.markdownOwnership.upsert(record, { replaceExisting: true });
+	}
+	async resolveMarkdownLinkForCanvas(canvas, { confirmLegacy = false } = {}) {
+		const data = canvas?.getData?.() || {};
+		const rawLink = data.mindmapMarkdownSync;
+		const canvasPath = canvas?.view?.file?.path;
+		if (!rawLink || !canvasPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		let resolved = await resolveMarkdownSyncLink(
+			rawLink,
+			canvasPath,
+			this.markdownOwnership,
+			this.app.vault
+		);
+		if (!resolved.ok && resolved.reason === LINK_REASON.NEEDS_CONFIRMATION && confirmLegacy) {
+			if (!(await this.confirmLegacyLink('markdown', rawLink)))
+				return resolved;
+			const adopted = await adoptMarkdownSyncLink(
+				rawLink,
+				canvasPath,
+				this.markdownOwnership,
+				this.app.vault,
+				{ confirmed: true }
+			);
+			if (!adopted.ok) return adopted;
+			const before = await this.app.vault.cachedRead(adopted.targetPatch.file);
+			const previousRecords = this.markdownOwnership.recordsForCanvas(canvasPath);
+			const previousLink = data.mindmapMarkdownSync;
+			let targetPatched = false;
+			try {
+				await this.app.vault.process(adopted.targetPatch.file, (current) => {
+					if (current !== before) throw new Error('Markdown target changed during adoption');
+					targetPatched = true;
+					return adopted.targetPatch.markdown;
+				});
+				const saved = this.markdownOwnership.upsert(adopted.registryRecord);
+				if (!saved.ok) throw new Error('Ownership registry rejected the adoption');
+				await this.persistPluginData();
+				data.mindmapMarkdownSync = adopted.link;
+				canvas.setData(data);
+				canvas.requestSave();
+				await flushCanvasView(canvas, this.app.vault);
+				if (!this.indexMarkdownLink(canvasPath, adopted.link.path)) {
+					throw new Error('Markdown sync index is full');
+				}
+				this.verifiedMarkdownLinks.set(canvasPath, adopted.link);
+				resolved = { ok: true, link: adopted.link };
+			} catch (error) {
+				if (targetPatched) {
+					try {
+						await this.app.vault.process(adopted.targetPatch.file, (current) =>
+							current === adopted.targetPatch.markdown ? before : current
+						);
+					} catch (_) {}
+				}
+				this.restoreOwnershipRecords(canvasPath, previousRecords);
+				try { await this.persistPluginData(); } catch (_) {}
+				try {
+					data.mindmapMarkdownSync = previousLink;
+					canvas.setData(data);
+					canvas.requestSave?.();
+					await flushCanvasView(canvas, this.app.vault);
+				} catch (_) {}
+				console.warn('ToMindMap: legacy Markdown adoption was not completed', error);
+				return { ok: false, reason: LINK_REASON.FAILED, error };
+			}
+		}
+		if (resolved.ok) {
+			if (!this.indexMarkdownLink(canvasPath, resolved.link.path))
+				return { ok: false, reason: LINK_REASON.FAILED };
+			this.verifiedMarkdownLinks.set(canvasPath, resolved.link);
+		}
+		return resolved;
+	}
+	async resolveParentLinkForCanvas(canvas, parentLink, { confirmLegacy = false } = {}) {
+		const childPath = canvas?.view?.file?.path;
+		if (!parentLink || !childPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		let resolved = await resolveParentLink(
+			parentLink,
+			childPath,
+			this.markdownOwnership,
+			this.app.vault
+		);
+		if (!resolved.ok && resolved.reason === LINK_REASON.NEEDS_CONFIRMATION && confirmLegacy) {
+			if (!(await this.confirmLegacyLink('parent', parentLink))) return resolved;
+			const adopted = await adoptParentLink(
+				parentLink,
+				childPath,
+				this.markdownOwnership,
+				this.app.vault,
+				{ confirmed: true }
+			);
+			if (!adopted.ok) return adopted;
+			const parentOpen = this.getOpenCanvasByPath(adopted.targetPatch.canvas);
+			const applyParentPatch = (raw) => {
+				const parentData = JSON.parse(raw);
+				const card = (parentData.nodes || []).find((node) => node.id === adopted.targetPatch.nodeId);
+				if (!card) return raw;
+				card.unknownData = adopted.targetPatch.unknownDataPatch;
+				return JSON.stringify(parentData, null, '\t');
+			};
+			const before = await this.app.vault.cachedRead(adopted.targetPatch.file);
+			const previousRecords = this.markdownOwnership.recordsForCanvas(childPath);
+			const childDataBefore = JSON.parse(JSON.stringify(canvas.getData()));
+			const parentDataBefore = parentOpen?.getData?.();
+			const parentCardBefore = parentOpen?.nodes?.get(adopted.targetPatch.nodeId)?.unknownData;
+			let parentPatched = false;
+			let parentAfter = null;
+			try {
+				if (parentOpen) {
+					const parentData = parentOpen.getData();
+					const card = parentOpen.nodes.get(adopted.targetPatch.nodeId);
+					if (!card) throw new Error('Parent card disappeared');
+					card.unknownData = adopted.targetPatch.unknownDataPatch;
+					parentOpen.setData(parentData);
+					parentOpen.requestSave();
+					await flushCanvasView(parentOpen, this.app.vault);
+					parentPatched = true;
+				} else {
+					await this.app.vault.process(adopted.targetPatch.file, (raw) => {
+						if (raw !== before) throw new Error('Parent Canvas changed during adoption');
+						parentPatched = true;
+						parentAfter = applyParentPatch(raw);
+						return parentAfter;
+					});
+				}
+				const saved = this.markdownOwnership.upsert(adopted.registryRecord);
+				if (!saved.ok) throw new Error('Ownership registry rejected the adoption');
+				await this.persistPluginData();
+				const childData = canvas.getData();
+				childData.mindmapParent = adopted.link;
+				canvas.setData(childData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+				resolved = { ok: true, link: adopted.link };
+			} catch (error) {
+				if (parentPatched && !parentOpen) {
+					try {
+						await this.app.vault.process(adopted.targetPatch.file, (current) =>
+							current === parentAfter ? before : current
+						);
+					} catch (_) {}
+				}
+				if (parentOpen && parentDataBefore) {
+					try {
+						parentOpen.setData(parentDataBefore);
+						if (parentOpen.nodes?.has(adopted.targetPatch.nodeId))
+							parentOpen.nodes.get(adopted.targetPatch.nodeId).unknownData = parentCardBefore;
+						parentOpen.requestSave?.();
+						await flushCanvasView(parentOpen, this.app.vault);
+					} catch (_) {}
+				}
+				try {
+					canvas.setData(childDataBefore);
+					canvas.requestSave?.();
+					await flushCanvasView(canvas, this.app.vault);
+				} catch (_) {}
+				this.restoreOwnershipRecords(childPath, previousRecords);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: legacy parent-link adoption was not completed', error);
+				return { ok: false, reason: LINK_REASON.FAILED, error };
+			}
+		}
+		if (resolved.ok) this.verifiedParentLinks.set(childPath, resolved.link);
+		return resolved;
 	}
 	getOpenCanvasByPath(path) {
 		for (const leaf of this.app.workspace.getLeavesOfType('canvas')) {
@@ -51430,92 +56856,86 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		return null;
 	}
 	getIndexedMarkdownPath(canvasPath) {
-		for (const [markdownPath, canvasPaths] of this.markdownSyncIndex) {
-			if (canvasPaths.has(canvasPath)) return markdownPath;
-		}
-		return '';
+		return this.markdownSyncIndex.markdownFor(canvasPath);
 	}
 	indexMarkdownLink(canvasPath, markdownPath) {
-		this.unindexCanvas(canvasPath);
-		if (!markdownPath) return;
-		let canvasPaths = this.markdownSyncIndex.get(markdownPath);
-		if (!canvasPaths) {
-			canvasPaths = /* @__PURE__ */ new Set();
-			this.markdownSyncIndex.set(markdownPath, canvasPaths);
-		}
-		canvasPaths.add(canvasPath);
+		if (!canvasPath || !markdownPath) return false;
+		const previous = this.markdownSyncIndex.markdownFor(canvasPath);
+		const linked = this.markdownSyncIndex.link(canvasPath, markdownPath);
+		if (!linked && previous) this.markdownSyncIndex.link(canvasPath, previous);
+		return linked;
 	}
 	unindexCanvas(canvasPath) {
-		for (const [markdownPath, canvasPaths] of this.markdownSyncIndex) {
-			canvasPaths.delete(canvasPath);
-			if (canvasPaths.size === 0)
-				this.markdownSyncIndex.delete(markdownPath);
-		}
+		return this.markdownSyncIndex.unlink(canvasPath);
+	}
+	captureIndexSnapshot() {
+		return Array.from(this.markdownSyncIndex.markdownByCanvas.entries());
+	}
+	restoreIndexSnapshot(snapshot) {
+		this.markdownSyncIndex.clear();
+		for (const [canvasPath, markdownPath] of snapshot)
+			this.markdownSyncIndex.link(canvasPath, markdownPath);
 	}
 	async rebuildMarkdownSyncIndex() {
 		this.markdownSyncIndex.clear();
-		const canvasFiles = this.app.vault
-			.getFiles()
-			.filter((file) => file.extension === 'canvas');
-		await Promise.all(
-			canvasFiles.map(async (file) => {
+		if (!this.markdownOwnership?.isValid?.()) return 0;
+		const files = (this.app.vault.getFiles?.() || [])
+			.filter((file) => file instanceof import_obsidian5.TFile && file.extension === 'canvas')
+			.slice(0, 5000);
+		let indexed = 0;
+		for (let start = 0; start < files.length; start += 16) {
+			const batch = files.slice(start, start + 16);
+			const results = await Promise.all(batch.map(async (file) => {
 				try {
-					const data = JSON.parse(
-						await this.app.vault.cachedRead(file)
+					const data = JSON.parse(await this.app.vault.cachedRead(file));
+					const rawLink = data?.mindmapMarkdownSync;
+					if (!rawLink || typeof rawLink !== 'object') return false;
+					const resolved = await resolveMarkdownSyncLink(
+						rawLink,
+						file.path,
+						this.markdownOwnership,
+						this.app.vault
 					);
-					const markdownPath = this.getMarkdownSyncPath(data);
-					if (markdownPath)
-						this.indexMarkdownLink(file.path, markdownPath);
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not inspect sync metadata in ${file.path}`,
-						error
-					);
+					if (!resolved.ok) return false;
+					return this.indexMarkdownLink(file.path, resolved.link.path);
+				} catch (_) {
+					return false;
 				}
-			})
-		);
+			}));
+			for (const result of results) if (result) indexed++;
+		}
+		return indexed;
 	}
 	scheduleCanvasToMarkdown(canvas) {
 		if (this.syncApplyingCanvas.has(canvas)) return;
-		const file = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (!file || !markdownPath) return;
-		// A local Canvas mutation is newer than any queued Markdown reapply.
-		// Cancel that stale direction before it can reconcile the just-added node
-		// out of the Canvas during the 350ms Canvas-to-Markdown debounce.
-		const pendingMarkdownApply =
-			this.markdownModifyTimers.get(markdownPath);
-		if (pendingMarkdownApply !== undefined) {
-			clearTimeout(pendingMarkdownApply);
-			this.markdownModifyTimers.delete(markdownPath);
-		}
-		const previous = this.markdownSyncTimers.get(file.path);
-		if (previous) clearTimeout(previous);
-		const timer = setTimeout(() => {
-			this.markdownSyncTimers.delete(file.path);
-			void this.writeCanvasToLinkedMarkdown(canvas);
-		}, 350);
-		this.markdownSyncTimers.set(file.path, timer);
+		void (async () => {
+			try {
+				const resolved = await this.resolveMarkdownLinkForCanvas(canvas);
+				if (!resolved.ok) return;
+				const file = canvas.view?.file;
+				if (!file) return;
+				const path = resolved.link.path;
+				const pending = this.markdownModifyTimers.get(path);
+				if (pending !== undefined) {
+					clearTimeout(pending);
+					this.markdownModifyTimers.delete(path);
+				}
+				void this.markdownSyncCoordinator.schedule(path, () =>
+					this.writeCanvasToLinkedMarkdown(canvas, resolved.link)
+				);
+			} catch (error) {
+				console.warn('ToMindMap: could not schedule Canvas-to-Markdown sync', error);
+			}
+		})();
 	}
-	flushCanvasToMarkdown(canvas) {
+	async flushCanvasToMarkdown(canvas) {
 		const file = canvas?.view?.file;
-		if (!file || !this.getMarkdownSyncPath(canvas.getData()))
-			return Promise.resolve();
-		const pending = this.markdownSyncTimers.get(file.path);
-		if (pending !== void 0) {
-			clearTimeout(pending);
-			this.markdownSyncTimers.delete(file.path);
-		}
-		const previous =
-			this.immediateMarkdownWrites.get(canvas) || Promise.resolve();
-		const write = previous
-			.catch(() => {})
-			.then(() => this.writeCanvasToLinkedMarkdown(canvas));
-		this.immediateMarkdownWrites.set(canvas, write);
-		return write.finally(() => {
-			if (this.immediateMarkdownWrites.get(canvas) === write)
-				this.immediateMarkdownWrites.delete(canvas);
-		});
+		if (!file) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const resolved = await this.resolveMarkdownLinkForCanvas(canvas);
+		if (!resolved.ok) return resolved;
+		return this.markdownSyncCoordinator.flush(resolved.link.path, () =>
+			this.writeCanvasToLinkedMarkdown(canvas, resolved.link)
+		);
 	}
 	markMarkdownOrderDirty(canvas) {
 		if (canvas) this.markdownOrderDirty.add(canvas);
@@ -51549,213 +56969,191 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				changed = current !== content;
 				return changed ? content : current;
 			});
-			if (conflicted)
-				throw new Error(
-					`"${file.path}" changed while ToMindMap was preparing an update`
-				);
+			if (conflicted) {
+				this.clearMarkdownWriteGuard(file.path);
+				return { ok: false, reason: LINK_REASON.CONFLICT };
+			}
 			if (!changed) this.clearMarkdownWriteGuard(file.path);
+			return { ok: true };
 		} catch (error) {
 			this.clearMarkdownWriteGuard(file.path);
-			throw error;
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
-	async writeCanvasToLinkedMarkdown(canvas) {
-		const canvasFile = canvas.view && canvas.view.file;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
-		if (!canvasFile || !markdownPath) return;
-		const source = this.app.vault.getAbstractFileByPath(markdownPath);
+	async writeCanvasToLinkedMarkdown(canvas, resolvedLink = null) {
+		const canvasPath = canvas?.view?.file?.path;
+		if (!canvasPath) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(canvasFile instanceof import_obsidian5.TFile))
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		const owned = resolvedLink || await this.resolveMarkdownLinkForCanvas(canvas);
+		if (!owned?.ok) return owned || { ok: false, reason: LINK_REASON.NO_LINK };
+		const source = owned.link.file;
+		const markdownPath = owned.link.path;
 		if (!(source instanceof import_obsidian5.TFile)) {
 			await this.detachMarkdownSync(canvas, false);
-			new import_obsidian5.Notice(
-				'Markdown sync detached because the linked file no longer exists'
-			);
-			return;
+			new import_obsidian5.Notice('Markdown sync detached because the linked file no longer exists');
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
 		}
 		const groupIds = getGroupIds(canvas);
-		const topicNodes = Array.from(canvas.nodes.values()).filter(
-			(node) => !groupIds.has(node.id)
-		);
-		if (topicNodes.some((node) => node.isEditing)) return;
+		const topicNodes = Array.from(canvas.nodes.values()).filter((node) => !groupIds.has(node.id));
+		if (topicNodes.some((node) => node.isEditing))
+			return { ok: false, reason: LINK_REASON.EDITING };
 		let finalizedBlankTopic = false;
 		for (const node of topicNodes) {
-			if (isTextTopicCard(node, groupIds) && !node.text.trim()) {
-				node.setText('Untitled');
+			if (isTextTopicCard(node, groupIds) && !String(node.text || '').trim()) {
+				node.setText?.('Untitled');
 				finalizedBlankTopic = true;
 			}
 		}
 		if (finalizedBlankTopic) canvas.requestSave();
 		try {
 			const current = await this.app.vault.read(source);
-			const imported = markdownMindMapToCanvas(
-				current,
-				this.markdownLayoutOptions()
-			);
-			const graphMatches = imported
-				? canvasMatchesImportedMarkdown(
-						canvas,
-						imported,
-						canvasFile.path
-					)
-				: false;
-			const orderMatches = imported
-				? canvasOrderMatchesImportedMarkdown(canvas, imported)
-				: false;
+			const decoded = this.layoutMarkdownDocument(current, this.markdownLayoutOptions());
+			if (!decoded.ok) {
+				new import_obsidian5.Notice(`Markdown sync skipped: ${decoded.reason}`);
+				return;
+			}
+			const imported = decoded.value;
+			const graphMatches = MarkdownMindMapCodec.canvasMatchesDocument(canvas, imported, canvasFile.path);
+			const orderMatches = MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, imported);
 			const orderWasChangedInCanvas = this.markdownOrderDirty.has(canvas);
-			const requiresOrderUpdate =
-				graphMatches && !orderMatches && orderWasChangedInCanvas;
 			let markdown;
-			if (
-				imported &&
-				graphMatches &&
-				(orderMatches || !orderWasChangedInCanvas)
-			) {
-				markdown = markdownWithTopicMetadata(
-					withoutLegacyPluginComments(current),
-					imported.topicIds || [],
-					imported.topicKeys || [],
-					imported.topicLabels || []
+			if (graphMatches && (orderMatches || !orderWasChangedInCanvas)) {
+				markdown = MarkdownMindMapCodec.markdownWithTopicMetadata(
+					MarkdownMindMapCodec.withoutLegacyPluginComments(current),
+					{
+						topicIds: imported.topicIds || [],
+						topicKeys: imported.topicKeys || [],
+						topicLabels: imported.topicLabels || []
+					}
 				);
 			} else {
-				try {
-					markdown = patchMarkdownFromCanvasPreservingSource(
-						current,
-						canvas,
-						imported,
-						canvasFile.path
-					);
-					const patchedImport = markdown
-						? markdownMindMapToCanvas(
-								markdown,
-								this.markdownLayoutOptions()
-							)
-						: null;
+				const plan = MarkdownMindMapCodec.planMarkdownSourceUpdate(
+					current,
+					canvas,
+					imported,
+					canvasFile.path
+				);
+				if (plan.ok) {
+					const patched = this.layoutMarkdownDocument(plan.value.markdown, this.markdownLayoutOptions());
 					if (
-						!patchedImport ||
-						!canvasMatchesImportedMarkdown(
-							canvas,
-							patchedImport,
-							canvasFile.path
-						) ||
-						(requiresOrderUpdate &&
-							!canvasOrderMatchesImportedMarkdown(
-								canvas,
-								patchedImport
-							))
-					) {
-						markdown =
-							requiresOrderUpdate && graphMatches
-								? markdownWithTopicMetadata(
-										withoutLegacyPluginComments(current),
-										imported.topicIds || [],
-										imported.topicKeys || [],
-										imported.topicLabels || []
-									)
-								: null;
-					}
-				} catch (error) {
-					console.warn(
-						'ToMindMap: localized Markdown update failed; using readable structural fallback',
-						error
-					);
-					markdown = null;
+						patched.ok &&
+						MarkdownMindMapCodec.canvasMatchesDocument(canvas, patched.value, canvasFile.path) &&
+						(!orderWasChangedInCanvas || MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, patched.value))
+					) markdown = plan.value.markdown;
 				}
-				if (!markdown)
-					markdown = canvasToMindMapMarkdown(canvas, this.settings);
+				if (!markdown) {
+					const encoded = this.encodeMarkdownDocument(canvas, this.settings);
+					if (!encoded.ok) {
+						new import_obsidian5.Notice(`Could not encode the mind map: ${encoded.reason}`);
+						return { ok: false, reason: encoded.reason };
+					}
+					markdown = encoded.value.markdown;
+				}
 			}
 			if (markdown && orderWasChangedInCanvas) {
-				try {
-					const ordered = reorderMarkdownTopicsPreservingSource(
-						markdown,
-						canvas
-					);
-					const orderedImport = markdownMindMapToCanvas(
-						ordered,
-						this.markdownLayoutOptions()
-					);
+				const ordered = MarkdownMindMapCodec.planMarkdownTopicReorder(markdown, canvas);
+				if (ordered.ok) {
+					const verified = this.layoutMarkdownDocument(ordered.value.markdown, this.markdownLayoutOptions());
 					if (
-						orderedImport &&
-						canvasMatchesImportedMarkdown(
-							canvas,
-							orderedImport,
-							canvasFile.path
-						) &&
-						canvasOrderMatchesImportedMarkdown(
-							canvas,
-							orderedImport
-						)
-					)
-						markdown = ordered;
-				} catch (error) {
-					console.warn(
-						'ToMindMap: visual chronology could not be applied losslessly',
-						error
-					);
+						verified.ok &&
+						MarkdownMindMapCodec.canvasMatchesDocument(canvas, verified.value, canvasFile.path) &&
+						MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, verified.value)
+					) markdown = ordered.value.markdown;
 				}
 			}
-			const verified = markdownMindMapToCanvas(
-				markdown,
-				this.markdownLayoutOptions()
-			);
-			if (
-				!verified ||
-				!canvasMatchesImportedMarkdown(
-					canvas,
-					verified,
-					canvasFile.path
-				)
-			)
-				console.warn(
-					'ToMindMap: Markdown was written with the readable structural fallback because exact graph verification was unavailable'
-				);
-			await this.writeMarkdownFile(source, markdown, current);
-			this.indexMarkdownLink(canvasFile.path, source.path);
+			const verified = this.layoutMarkdownDocument(markdown || '', this.markdownLayoutOptions());
+			if (!verified.ok || !MarkdownMindMapCodec.canvasMatchesDocument(canvas, verified.value, canvasFile.path))
+				console.warn('ToMindMap: Markdown verification was unavailable; preserving the readable fallback');
+			const written = await this.writeMarkdownFile(source, markdown, current);
+			if (!written.ok) return written;
+			if (!this.indexMarkdownLink(canvasFile.path, source.path))
+				return { ok: false, reason: LINK_REASON.FAILED };
 			this.markdownOrderDirty.delete(canvas);
+			return { ok: true, link: owned.link };
 		} catch (error) {
 			console.error('ToMindMap: Canvas to Markdown sync failed', error);
-			new import_obsidian5.Notice(
-				'Markdown sync could not access the linked file'
-			);
+			new import_obsidian5.Notice('Markdown sync could not access the linked file');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
 	async attachMarkdownSync(canvas) {
-		const canvasFile = canvas.view && canvas.view.file;
-		if (!canvasFile) return;
-		const markdown = canvasToMindMapMarkdown(canvas, this.settings);
+		const canvasFile = canvas?.view?.file;
+		if (!canvasFile) return { ok: false, reason: LINK_REASON.NO_LINK };
+		const encoded = this.encodeMarkdownDocument(canvas, this.settings);
+		if (!encoded.ok) {
+			new import_obsidian5.Notice(`Could not encode the mind map: ${encoded.reason}`);
+			return encoded;
+		}
+		const markdown = encoded.value.markdown;
 		if (!markdown.trim()) {
-			new import_obsidian5.Notice(
-				'Add at least one topic before enabling Markdown sync'
-			);
-			return;
+			new import_obsidian5.Notice('Add at least one topic before enabling Markdown sync');
+			return { ok: false, reason: LINK_REASON.NO_PENDING };
 		}
-		const folder =
-			canvasFile.parent && canvasFile.parent.path
-				? `${canvasFile.parent.path}/`
-				: '';
-		const stem = `${canvasFile.basename} Mindmap`;
-		let markdownPath = `${folder}${stem}.md`;
-		let counter = 2;
-		while (this.app.vault.getAbstractFileByPath(markdownPath)) {
-			markdownPath = `${folder}${stem} ${counter}.md`;
-			counter++;
-		}
+		const folder = canvasFile.parent?.path || '';
+		const markdownPath = allocateFilePath(
+			folder,
+			`${canvasFile.basename} Mindmap`,
+			'md',
+			(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+		);
+		const syncId = createSyncId();
+		const issued = this.markdownOwnership.issueRecord({
+			canvasPath: canvasFile.path,
+			kind: 'markdown',
+			targetPath: markdownPath,
+			syncId,
+			nodeId: null
+		});
+		if (!syncId || !issued.ok) return issued;
+		const patched = patchSyncIdOwnership(markdown, issued.record.syncId);
+		if (!patched.ok) return patched;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const previousRecords = this.markdownOwnership.recordsForCanvas(canvasFile.path);
+		const previousIndexedPath = this.getIndexedMarkdownPath(canvasFile.path);
+		let created = null;
 		try {
-			this.setMarkdownWriteGuard(markdownPath, markdown);
-			const created = await this.app.vault.create(markdownPath, markdown);
+			created = await this.app.vault.create(markdownPath, patched.markdown);
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			await this.persistPluginData();
+			const link = {
+				path: created.path,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			};
 			const data = canvas.getData();
-			data.mindmapMarkdownSync = { path: created.path };
+			data.mindmapMarkdownSync = link;
 			canvas.setData(data);
-			this.indexMarkdownLink(canvasFile.path, created.path);
 			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
+			if (!this.indexMarkdownLink(canvasFile.path, created.path))
+				throw new Error('Markdown sync index is full');
+			this.verifiedMarkdownLinks.set(canvasFile.path, link);
 			new import_obsidian5.Notice(`Syncing with "${created.path}"`);
+			return { ok: true, link };
 		} catch (error) {
-			this.clearMarkdownWriteGuard(markdownPath);
-			console.error(
-				'ToMindMap: could not create Markdown sync file',
-				error
-			);
-			new import_obsidian5.Notice(
-				'Could not create the Markdown sync file'
-			);
+			this.restoreOwnershipRecords(canvasFile.path, previousRecords);
+			if (previousIndexedPath) this.markdownSyncIndex.link(canvasFile.path, previousIndexedPath);
+			else this.unindexCanvas(canvasFile.path);
+			this.verifiedMarkdownLinks.delete(canvasFile.path);
+			try { await this.persistPluginData(); } catch (_) {}
+			try {
+				const currentData = canvas.getData?.();
+				if (currentData && typeof currentData === 'object')
+					delete currentData.mindmapMarkdownSync;
+				canvas.setData({ ...beforeData });
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			if (created) {
+				try { await this.app.vault.delete(created); } catch (_) {}
+			}
+			console.error('ToMindMap: could not create Markdown sync file', error);
+			new import_obsidian5.Notice('Could not create the Markdown sync file');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
 	async detachMarkdownSync(canvas, showNotice = true) {
@@ -51765,7 +57163,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!oldPath) return;
 		delete data.mindmapMarkdownSync;
 		canvas.setData(data);
-		if (canvasFile) this.unindexCanvas(canvasFile.path);
+		if (canvasFile) {
+			this.unindexCanvas(canvasFile.path);
+			const parentRecords = this.markdownOwnership.recordsForCanvas(canvasFile.path)
+				.filter((record) => record.kind === 'parent');
+			this.markdownOwnership.removeCanvas(canvasFile.path);
+			for (const record of parentRecords)
+				this.markdownOwnership.upsert(record, { replaceExisting: true });
+			if (this.markdownSyncIndex.canvasesFor(oldPath).length === 0)
+				this.markdownSyncCoordinator.detach(oldPath);
+			this.verifiedMarkdownLinks.delete(canvasFile.path);
+			await this.persistPluginData();
+		}
 		canvas.requestSave();
 		if (showNotice)
 			new import_obsidian5.Notice(
@@ -51773,152 +57182,230 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 	}
 	scheduleMarkdownToCanvas(file) {
-		const previous = this.markdownModifyTimers.get(file.path);
-		if (previous) clearTimeout(previous);
-		const timer = setTimeout(() => {
-			this.markdownModifyTimers.delete(file.path);
-			void this.syncMarkdownFileToCanvases(file);
-		}, 300);
-		this.markdownModifyTimers.set(file.path, timer);
+		void this.markdownSyncCoordinator.schedule(file.path, () =>
+			this.syncMarkdownFileToCanvases(file)
+		);
 	}
 	async syncMarkdownFileToCanvases(file) {
-		let markdown;
-		try {
-			markdown = await this.app.vault.read(file);
-		} catch (error) {
-			return;
-		}
-		if (this.markdownWriteGuards.get(file.path) === markdown) {
-			this.clearMarkdownWriteGuard(file.path);
-			return;
-		}
-		const linkedCanvases = Array.from(
-			this.markdownSyncIndex.get(file.path) || []
-		);
-		if (linkedCanvases.length === 0) return;
-		let imported = markdownMindMapToCanvas(
-			markdown,
-			this.markdownLayoutOptions()
-		);
-		if (!imported)
-			imported = {
-				nodes: [],
-				edges: [],
-				frontmatter: '',
-				rootIds: [],
-				topicIds: [],
-				topicKeys: [],
-				topicLabels: [],
-				stableIdCount: 0,
-				metadataCurrent: false
-			};
+		const linkedCanvases = this.markdownSyncIndex.canvasesFor(file.path);
+		if (linkedCanvases.length === 0) return { ok: true, skipped: true };
+		const entries = [];
 		for (const canvasPath of linkedCanvases) {
 			const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
 			if (!(canvasFile instanceof import_obsidian5.TFile)) {
 				this.unindexCanvas(canvasPath);
 				continue;
 			}
-			const openCanvas = this.getOpenCanvasByPath(canvasPath);
-			if (openCanvas) {
-				await this.applyMarkdownToLiveCanvas(
-					openCanvas,
-					markdown,
-					imported
+			try {
+				const raw = await this.app.vault.cachedRead(canvasFile);
+				const data = JSON.parse(raw);
+				const rawLink = data?.mindmapMarkdownSync;
+				if (!rawLink || typeof rawLink !== 'object') continue;
+				const owned = await resolveMarkdownSyncLink(
+					rawLink,
+					canvasPath,
+					this.markdownOwnership,
+					this.app.vault
 				);
-			} else {
-				await this.app.vault.process(canvasFile, (raw) => {
-					try {
-						const current = JSON.parse(raw);
-						const incoming = {
-							...imported,
-							nodes: imported.nodes.map((node) => ({ ...node })),
-							edges: imported.edges.map((edge) => ({ ...edge }))
-						};
-						convertMarkdownAnchorsToCardLinks(
-							incoming.nodes,
-							canvasPath
-						);
-						const adapter = canvasDataAdapter(current, canvasFile);
-						if (
-							canvasMatchesImportedMarkdown(
-								adapter,
-								incoming,
-								canvasPath
-							) &&
-							canvasOrderMatchesImportedMarkdown(
-								adapter,
-								incoming
-							)
-						)
-							return raw;
-						const updated = reconcileCanvasData(current, incoming);
-						updated.mindmapMarkdownSync = { path: file.path };
-						return JSON.stringify(updated, null, '	');
-					} catch (error) {
-						console.error(
-							`ToMindMap: could not sync ${canvasPath}`,
-							error
-						);
-						return raw;
-					}
+				if (!owned.ok) continue;
+				entries.push({
+					canvasPath,
+					canvasFile,
+					openCanvas: this.getOpenCanvasByPath(canvasPath),
+					data,
+					canvasRaw: raw,
+					link: owned.link
 				});
+			} catch (_) {
+				// A missing/malformed Canvas is isolated from the other reverse routes.
 			}
 		}
-		const preserved = markdownWithTopicMetadata(
-			withoutLegacyPluginComments(markdown),
-			imported.topicIds || [],
-			imported.topicKeys || [],
-			imported.topicLabels || []
+		if (entries.length === 0) return { ok: true, skipped: true };
+		let markdown;
+		try {
+			markdown = await this.app.vault.read(file);
+		} catch (_) {
+			return { ok: false, reason: LINK_REASON.FAILED };
+		}
+		if (this.markdownWriteGuards.get(file.path) === markdown) {
+			this.clearMarkdownWriteGuard(file.path);
+			return { ok: true };
+		}
+		const decoded = this.layoutMarkdownDocument(markdown, this.markdownLayoutOptions());
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Markdown sync skipped: ${decoded.reason}`);
+			return decoded;
+		}
+		const imported = decoded.value;
+		const failures = [];
+		let retry = false;
+		for (const entry of entries) {
+			try {
+				// Re-read and re-resolve after the asynchronous Markdown read. A
+				// detached, renamed, or replaced link must never receive this
+				// snapshot based on its old index entry.
+				const currentRaw = entry.openCanvas
+					? JSON.stringify(entry.openCanvas.getData())
+					: await this.app.vault.cachedRead(entry.canvasFile);
+				const currentData = entry.openCanvas
+					? entry.openCanvas.getData()
+					: JSON.parse(currentRaw);
+				const currentLink = currentData?.mindmapMarkdownSync;
+				const currentOwned = currentLink
+					? await resolveMarkdownSyncLink(
+							currentLink,
+							entry.canvasPath,
+							this.markdownOwnership,
+							this.app.vault
+						)
+					: { ok: false, reason: LINK_REASON.NO_LINK };
+				if (
+					!currentOwned.ok ||
+					currentOwned.link.path !== entry.link.path ||
+					currentOwned.link.proof !== entry.link.proof
+				) {
+					retry = true;
+					failures.push({ canvasPath: entry.canvasPath, reason: LINK_REASON.CONFLICT });
+					continue;
+				}
+				entry.link = currentOwned.link;
+				const incoming = {
+					...imported,
+					nodes: MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+						imported.nodes.map((node) => ({ ...node })),
+						entry.canvasPath
+					),
+					edges: imported.edges.map((edge) => ({ ...edge }))
+				};
+				if (entry.openCanvas) {
+					const result = await this.applyMarkdownToLiveCanvas(
+						entry.openCanvas,
+						markdown,
+						incoming,
+						entry.link
+					);
+					if (!result?.ok) {
+						const reason = result?.reason || LINK_REASON.FAILED;
+						retry = retry || reason === LINK_REASON.EDITING || reason === LINK_REASON.CONFLICT;
+						failures.push({ canvasPath: entry.canvasPath, reason, error: result?.error });
+					}
+					continue;
+				}
+				let processConflict = false;
+				await this.app.vault.process(entry.canvasFile, (raw) => {
+					if (raw !== currentRaw) {
+						processConflict = true;
+						return raw;
+					}
+					const current = JSON.parse(raw);
+					const adapter = MarkdownMindMapCodec.canvasDataAdapter(current, entry.canvasFile);
+					const matches =
+						MarkdownMindMapCodec.canvasMatchesDocument(adapter, incoming, entry.canvasPath) &&
+						MarkdownMindMapCodec.canvasOrderMatchesDocument(adapter, incoming);
+					const updated = matches
+						? current
+						: MarkdownMindMapCodec.reconcileCanvasData(current, incoming);
+					updated.mindmapMarkdownSync = entry.link;
+					return JSON.stringify(updated, null, '\t');
+				});
+				if (processConflict) {
+					retry = true;
+					failures.push({ canvasPath: entry.canvasPath, reason: LINK_REASON.CONFLICT });
+				}
+			} catch (error) {
+				retry = retry || error?.reason === LINK_REASON.CONFLICT;
+				failures.push({ canvasPath: entry.canvasPath, reason: error?.reason || LINK_REASON.FAILED, error });
+			}
+		}
+		if (failures.length > 0)
+			return { ok: false, reason: retry ? LINK_REASON.CONFLICT : LINK_REASON.FAILED, failures };
+		const preserved = MarkdownMindMapCodec.markdownWithTopicMetadata(
+			MarkdownMindMapCodec.withoutLegacyPluginComments(markdown),
+			{
+				topicIds: imported.topicIds || [],
+				topicKeys: imported.topicKeys || [],
+				topicLabels: imported.topicLabels || []
+			}
 		);
-		if (preserved !== markdown)
-			await this.writeMarkdownFile(file, preserved, markdown);
+		if (preserved !== markdown) {
+			const written = await this.writeMarkdownFile(file, preserved, markdown);
+			if (!written.ok) return written;
+		}
+		return { ok: true };
 	}
-	async applyMarkdownToLiveCanvas(canvas, markdown, prepared) {
+	async applyMarkdownToLiveCanvas(canvas, markdown, prepared, ownedLink = null) {
 		const canvasFile = canvas.view && canvas.view.file;
-		if (!canvasFile) return;
+		if (!canvasFile) return { ok: false, reason: LINK_REASON.NO_LINK };
+		if (!ownedLink?.path || !ownedLink?.proof)
+			return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
 		// A native file drop copies data into the vault before the Canvas card can
 		// be imported. Never let an older Markdown snapshot reconcile during that
 		// asynchronous window, or while its Canvas-to-Markdown save is queued.
 		if (
 			this.localCanvasMutations.has(canvas) ||
-			this.markdownSyncTimers.has(canvasFile.path)
+			this.markdownSyncTimers.has(canvasFile.path) ||
+			this.markdownSyncCoordinator.entries?.get(ownedLink.path)?.pending
 		) {
-			return;
+			return { ok: false, reason: LINK_REASON.EDITING };
 		}
-		const imported = prepared
-			? {
-					...prepared,
-					nodes: prepared.nodes.map((node) => ({ ...node })),
-					edges: prepared.edges.map((edge) => ({ ...edge }))
-				}
-			: markdownMindMapToCanvas(
-					markdown,
-					this.markdownLayoutOptions()
-				) || { nodes: [], edges: [], frontmatter: '', rootIds: [] };
-		convertMarkdownAnchorsToCardLinks(imported.nodes, canvasFile.path);
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const currentLink = beforeData?.mindmapMarkdownSync;
+		const currentOwned = currentLink
+			? await resolveMarkdownSyncLink(
+					currentLink,
+					canvasFile.path,
+					this.markdownOwnership,
+					this.app.vault
+				)
+			: { ok: false, reason: LINK_REASON.UNOWNED_LINK };
 		if (
-			canvasMatchesImportedMarkdown(canvas, imported, canvasFile.path) &&
-			canvasOrderMatchesImportedMarkdown(canvas, imported)
+			!currentOwned.ok ||
+			currentOwned.link.path !== ownedLink.path ||
+			currentOwned.link.proof !== ownedLink.proof
+		)
+			return { ok: false, reason: LINK_REASON.CONFLICT };
+		ownedLink = currentOwned.link;
+		let imported;
+		if (prepared) {
+			imported = {
+				...prepared,
+				nodes: prepared.nodes.map((node) => ({ ...node })),
+				edges: prepared.edges.map((edge) => ({ ...edge }))
+			};
+		} else {
+			const decoded = this.layoutMarkdownDocument(
+				markdown,
+				this.markdownLayoutOptions()
+			);
+			if (!decoded.ok) return decoded;
+			imported = decoded.value;
+		}
+		imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+			imported.nodes,
+			canvasFile.path
+		);
+		if (
+			MarkdownMindMapCodec.canvasMatchesDocument(canvas, imported, canvasFile.path) &&
+			MarkdownMindMapCodec.canvasOrderMatchesDocument(canvas, imported)
 		) {
 			if (this.isMindmapCanvas(canvas)) {
 				this.layoutEngine.layout(canvas);
 				this.updateGroupBounds(canvas);
 			}
 			this.refreshOutline(canvas);
-			return;
+			return { ok: true, unchanged: true };
 		}
 		const selected =
 			canvas.selection && canvas.selection.size === 1
 				? canvas.selection.values().next().value
 				: null;
-		const linkedPath = this.getMarkdownSyncPath(canvas.getData());
-		const reconciled = reconcileCanvasData(canvas.getData(), imported);
+		const reconciled = MarkdownMindMapCodec.reconcileCanvasData(canvas.getData(), imported);
 		const pendingResizeIds = new Set(
 			Array.isArray(reconciled.mindmapPendingResize)
 				? reconciled.mindmapPendingResize
 				: []
 		);
-		reconciled.mindmapMarkdownSync = { path: linkedPath };
+		reconciled.mindmapMarkdownSync = ownedLink;
 		this.syncApplyingCanvas.add(canvas);
 		try {
 			canvas.setData(reconciled);
@@ -51954,99 +57441,280 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.settings.navigationZoomPadding
 				);
 			this.refreshOutline(canvas);
+			return { ok: true };
+		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				this.canvasApi.invalidateEdgeIndex();
+				if (this.isMindmapCanvas(canvas)) MindmapActions.syncCollapsedVisibility(canvas);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		} finally {
 			this.syncApplyingCanvas.delete(canvas);
 		}
 	}
-	async updateCanvasSyncMetadata(canvasPath, markdownPath) {
+	async snapshotCanvasState(canvasPath) {
+		const open = this.getOpenCanvasByPath(canvasPath);
+		if (open) return { canvasPath, open, data: JSON.parse(JSON.stringify(open.getData())) };
+		const file = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(file instanceof import_obsidian5.TFile)) return { canvasPath, file: null, raw: null };
+		return { canvasPath, file, raw: await this.app.vault.cachedRead(file) };
+	}
+	async restoreCanvasState(snapshot) {
+		if (!snapshot) return;
+		try {
+			if (snapshot.open) {
+				snapshot.open.setData(snapshot.data);
+				snapshot.open.requestSave?.();
+				await flushCanvasView(snapshot.open, this.app.vault);
+				return;
+			}
+			if (snapshot.file && typeof snapshot.raw === 'string') {
+				await this.app.vault.process(snapshot.file, (current) =>
+					current === snapshot.raw ? current : snapshot.raw
+				);
+			}
+		} catch (_) {}
+	}
+	async updateCanvasLinkMetadata(canvasPath, kind, link) {
+		const key = kind === 'parent' ? 'mindmapParent' : 'mindmapMarkdownSync';
+		const openCanvas = this.getOpenCanvasByPath(canvasPath);
+		if (openCanvas) {
+			const data = openCanvas.getData();
+			if (link) data[key] = link;
+			else delete data[key];
+			openCanvas.setData(data);
+			openCanvas.requestSave();
+			await flushCanvasView(openCanvas, this.app.vault);
+			return { ok: true };
+		}
+		const file = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (!(file instanceof import_obsidian5.TFile)) return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		let changed = false;
+		await this.app.vault.process(file, (raw) => {
+			try {
+				const data = JSON.parse(raw);
+				if (link) data[key] = link;
+				else delete data[key];
+				changed = true;
+				return JSON.stringify(data, null, '\t');
+			} catch (_) {
+				return raw;
+			}
+		});
+		return changed ? { ok: true } : { ok: false, reason: LINK_REASON.FAILED };
+	}
+	async updateCanvasSyncMetadata(canvasPath, markdownLink, { expectedRaw = null, expectedData = null } = {}) {
+		const link = markdownLink && typeof markdownLink === 'object'
+			? { ...markdownLink }
+			: null;
 		const openCanvas = this.getOpenCanvasByPath(canvasPath);
 		if (openCanvas) {
 			this.syncApplyingCanvas.add(openCanvas);
 			try {
 				const data = openCanvas.getData();
-				if (markdownPath)
-					data.mindmapMarkdownSync = { path: markdownPath };
+				if (expectedData !== null && JSON.stringify(data) !== expectedData) {
+					const error = new Error('Canvas changed during sync metadata update');
+					error.reason = LINK_REASON.CONFLICT;
+					throw error;
+				}
+				if (link) data.mindmapMarkdownSync = link;
 				else delete data.mindmapMarkdownSync;
 				openCanvas.setData(data);
 				openCanvas.requestSave();
+				await flushCanvasView(openCanvas, this.app.vault);
 			} finally {
 				this.syncApplyingCanvas.delete(openCanvas);
 			}
-			return;
+			return { ok: true };
 		}
 		const canvasFile = this.app.vault.getAbstractFileByPath(canvasPath);
-		if (!(canvasFile instanceof import_obsidian5.TFile)) return;
+		if (!(canvasFile instanceof import_obsidian5.TFile))
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
+		let changed = false;
 		await this.app.vault.process(canvasFile, (raw) => {
+			if (expectedRaw !== null && raw !== expectedRaw) {
+				const error = new Error('Canvas changed during sync metadata update');
+				error.reason = LINK_REASON.CONFLICT;
+				throw error;
+			}
 			try {
 				const data = JSON.parse(raw);
-				if (markdownPath)
-					data.mindmapMarkdownSync = { path: markdownPath };
+				if (link) data.mindmapMarkdownSync = link;
 				else delete data.mindmapMarkdownSync;
-				return JSON.stringify(data, null, '	');
-			} catch (error) {
+				changed = true;
+				return JSON.stringify(data, null, '\t');
+			} catch (_) {
 				return raw;
 			}
 		});
+		return changed ? { ok: true } : { ok: false, reason: LINK_REASON.FAILED };
 	}
 	async updateNestedParentReferences(oldPath, newPath) {
 		if (!oldPath || !newPath || oldPath === newPath) return;
+		const parentRecords = this.markdownOwnership.records.filter(
+			(record) => record.kind === 'parent' && record.targetPath === oldPath
+		);
+		const migratedLinks = new Map();
+		for (const record of parentRecords) {
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath: record.canvasPath,
+				kind: 'parent',
+				targetPath: newPath,
+				syncId: record.syncId,
+				nodeId: record.nodeId
+			});
+			if (!issued.ok) continue;
+			const upserted = this.markdownOwnership.upsert(issued.record, { replaceExisting: true });
+			if (!upserted.ok) continue;
+			migratedLinks.set(record.canvasPath, {
+				canvas: newPath,
+				nodeId: record.nodeId,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			});
+		}
 		const canvasFiles = (this.app.vault.getFiles?.() || []).filter(
-			(file) =>
-				file instanceof import_obsidian5.TFile &&
-				file.extension === 'canvas' &&
-				file.path !== newPath
+			(file) => file instanceof import_obsidian5.TFile && file.extension === 'canvas'
 		);
 		for (const file of canvasFiles) {
 			const openCanvas = this.getOpenCanvasByPath(file.path);
-			if (openCanvas) {
-				const data = openCanvas.getData();
-				if (data.mindmapParent?.canvas !== oldPath) continue;
-				data.mindmapParent.canvas = newPath;
-				openCanvas.setData(data);
-				openCanvas.requestSave();
-				continue;
-			}
 			try {
-				const raw = await this.app.vault.cachedRead(file);
-				const data = JSON.parse(raw);
-				if (data.mindmapParent?.canvas !== oldPath) continue;
-				data.mindmapParent.canvas = newPath;
-				await this.app.vault.modify(file, JSON.stringify(data, null, '\t'));
-			} catch (error) {
-				console.warn(
-					`ToMindMap: could not update parent link in ${file.path}`,
-					error
+				const data = openCanvas
+					? openCanvas.getData()
+					: JSON.parse(await this.app.vault.cachedRead(file));
+				const rawParent = data.mindmapParent;
+				if (!rawParent || (rawParent.canvas !== oldPath && !migratedLinks.has(file.path))) continue;
+				const link = migratedLinks.get(file.path) || rawParent;
+				const resolved = await resolveParentLink(
+					link,
+					file.path,
+					this.markdownOwnership,
+					this.app.vault
 				);
+				if (!resolved.ok) continue;
+				const nextParent = {
+					canvas: newPath,
+					nodeId: resolved.link.nodeId,
+					syncId: resolved.link.syncId,
+					proof: resolved.link.proof,
+					ownership: resolved.link.ownership
+				};
+				if (openCanvas) {
+					data.mindmapParent = nextParent;
+					openCanvas.setData(data);
+					openCanvas.requestSave();
+				} else {
+					await this.app.vault.process(file, (raw) => {
+						const current = JSON.parse(raw);
+						if (current.mindmapParent?.canvas !== oldPath) return raw;
+						current.mindmapParent = nextParent;
+						return JSON.stringify(current, null, '\t');
+					});
+				}
+			} catch (error) {
+				console.warn(`ToMindMap: could not update parent link in ${file.path}`, error);
 			}
 		}
+		if (migratedLinks.size > 0) await this.persistPluginData();
 	}
 	async handleSyncedFileRename(file, oldPath) {
-		if (
-			file instanceof import_obsidian5.TFile &&
-			file.extension === 'canvas'
-		) {
-			await this.updateNestedParentReferences(oldPath, file.path);
+		if (file instanceof import_obsidian5.TFile && file.extension === 'canvas') {
+			const previousRecords = this.markdownOwnership.recordsForCanvas(oldPath);
+			const previousAllRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			const previousCanvas = await this.snapshotCanvasState(file.path);
+			const previousVerifiedMarkdown = this.verifiedMarkdownLinks.get(oldPath);
+			const previousVerifiedParent = this.verifiedParentLinks.get(oldPath);
+			try {
+				const migration = this.markdownOwnership.renameCanvas(oldPath, file.path);
+				if (!migration.ok) return;
+				const links = [
+					...(migration.links || []),
+					...(migration.parentLinks || [])
+				];
+				for (const link of links) {
+					const kind = link.canvas ? 'parent' : 'markdown';
+					const result = await this.updateCanvasLinkMetadata(file.path, kind, link);
+					if (!result.ok) throw new Error(`Canvas metadata migration failed: ${result.reason}`);
+				}
+				await this.persistPluginData();
+				if (previousVerifiedMarkdown) this.verifiedMarkdownLinks.set(file.path, migration.links?.[0] || null);
+				if (previousVerifiedParent) this.verifiedParentLinks.set(file.path, migration.parentLinks?.[0] || null);
+				if (this.markdownSyncIndex.markdownFor(oldPath))
+					this.markdownSyncIndex.renameCanvas(oldPath, file.path);
+				await this.updateNestedParentReferences(oldPath, file.path);
+			} catch (error) {
+				this.restoreOwnershipSnapshot(previousAllRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				if (previousVerifiedMarkdown) this.verifiedMarkdownLinks.set(oldPath, previousVerifiedMarkdown);
+				else this.verifiedMarkdownLinks.delete(oldPath);
+				if (previousVerifiedParent) this.verifiedParentLinks.set(oldPath, previousVerifiedParent);
+				else this.verifiedParentLinks.delete(oldPath);
+				await this.restoreCanvasState(previousCanvas);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: Canvas rename transaction rolled back', error);
+			}
+			return;
 		}
-		if (this.markdownSyncIndex.has(oldPath)) {
-			const canvasPaths = Array.from(this.markdownSyncIndex.get(oldPath));
-			this.markdownSyncIndex.delete(oldPath);
-			this.markdownSyncIndex.set(file.path, new Set(canvasPaths));
+		const canvasPaths = this.markdownSyncIndex.canvasesFor(oldPath);
+		if (canvasPaths.length === 0) return;
+		const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+		const previousIndex = this.captureIndexSnapshot();
+		const previousVerified = new Map(canvasPaths.map((path) => [path, this.verifiedMarkdownLinks.get(path)]));
+		const snapshots = new Map();
+		try {
+			const updates = [];
+			for (const canvasPath of canvasPaths) {
+				const record = this.markdownOwnership.recordsForCanvas(canvasPath).find(
+					(candidate) => candidate.kind === 'markdown' && candidate.targetPath === oldPath
+				);
+				if (!record) throw new Error(`Ownership record missing for ${canvasPath}`);
+				const issued = this.markdownOwnership.issueRecord({
+					canvasPath,
+					kind: 'markdown',
+					targetPath: file.path,
+					syncId: record.syncId,
+					nodeId: null
+				});
+				if (!issued.ok) throw issued;
+				const upserted = this.markdownOwnership.upsert(issued.record, { replaceExisting: true });
+				if (!upserted.ok) throw upserted;
+				const link = {
+					path: file.path,
+					syncId: issued.record.syncId,
+					proof: issued.record.proof,
+					ownership: { source: 'plugin-data' }
+				};
+				snapshots.set(canvasPath, await this.snapshotCanvasState(canvasPath));
+				const updated = await this.updateCanvasSyncMetadata(canvasPath, link);
+				if (!updated.ok) throw updated;
+				updates.push({ canvasPath, link });
+			}
+			await this.persistPluginData();
+			if (!this.markdownSyncIndex.renameMarkdown(oldPath, file.path))
+				throw new Error('Markdown index route could not be renamed');
+			this.markdownSyncCoordinator.rename(oldPath, file.path);
+			for (const { canvasPath, link } of updates)
+				this.verifiedMarkdownLinks.set(canvasPath, link);
 			if (this.markdownWriteGuards.has(oldPath)) {
 				const guardedContent = this.markdownWriteGuards.get(oldPath);
 				this.clearMarkdownWriteGuard(oldPath);
 				this.setMarkdownWriteGuard(file.path, guardedContent);
 			}
-			await Promise.all(
-				canvasPaths.map((canvasPath) =>
-					this.updateCanvasSyncMetadata(canvasPath, file.path)
-				)
-			);
-			return;
-		}
-		if (String(oldPath).toLowerCase().endsWith('.canvas')) {
-			for (const canvasPaths of this.markdownSyncIndex.values()) {
-				if (canvasPaths.delete(oldPath)) canvasPaths.add(file.path);
+		} catch (error) {
+			this.restoreOwnershipSnapshot(previousRecords);
+			this.restoreIndexSnapshot(previousIndex);
+			for (const [canvasPath, link] of previousVerified) {
+				if (link) this.verifiedMarkdownLinks.set(canvasPath, link);
+				else this.verifiedMarkdownLinks.delete(canvasPath);
 			}
+			for (const snapshot of snapshots.values()) await this.restoreCanvasState(snapshot);
+			try { await this.persistPluginData(); } catch (_) {}
+			console.warn('ToMindMap: Markdown rename transaction rolled back', error);
 		}
 	}
 	async convertLinkedNodeToNormalTopic(canvas, node) {
@@ -52071,19 +57739,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					const parsed = JSON.parse(raw);
 					if (Array.isArray(parsed?.nodes)) sourceData = parsed;
 				} else if (String(filePath).toLowerCase().endsWith('.md')) {
-					sourceData = markdownMindMapToCanvas(
+					const decoded = this.layoutMarkdownDocument(
 						raw,
 						this.markdownLayoutOptions()
 					);
+					if (!decoded.ok) throw new Error(`Markdown decode failed: ${decoded.reason}`);
+					sourceData = decoded.value;
 				}
 			}
 			if (sourceData?.nodes?.length) {
-				const remapped = MindmapActions.remapLinkedCanvasData(
+				const remappedResult = MindmapActions.remapLinkedCanvasData(
 					sourceData,
 					node,
 					new Set(canvas.nodes.keys()),
 					() => genId()
 				);
+				if (!remappedResult.ok) throw new Error(`Linked map decode failed: ${remappedResult.reason}`);
+				const remapped = remappedResult.value;
 				const sourceRoot = remapped.nodes.find(
 					(item) => item.id === remapped.rootId
 				);
@@ -52156,6 +57828,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.deselectAll?.();
 				canvas.select?.(replacementRoot);
 			}
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
 				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
@@ -52196,21 +57869,71 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 	async handleSyncedFileDelete(file) {
 		const path = file.path;
-		if (this.markdownSyncIndex.has(path)) {
-			const canvasPaths = Array.from(this.markdownSyncIndex.get(path));
-			this.markdownSyncIndex.delete(path);
-			await Promise.all(
-				canvasPaths.map((canvasPath) =>
-					this.updateCanvasSyncMetadata(canvasPath, '')
-				)
+		const canvasPaths = this.markdownSyncIndex.canvasesFor(path);
+		if (canvasPaths.length > 0) {
+			const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			const previousVerified = new Map(
+				canvasPaths.map((canvasPath) => [canvasPath, this.verifiedMarkdownLinks.get(canvasPath)])
 			);
-			new import_obsidian5.Notice(
-				'Markdown sync detached because the linked file was deleted'
-			);
+			const snapshots = new Map();
+			try {
+				// Preflight every owner and capture exact bytes before the first write.
+				for (const canvasPath of canvasPaths) {
+					const record = this.markdownOwnership.recordsForCanvas(canvasPath).find(
+						(candidate) => candidate.kind === 'markdown' && candidate.targetPath === path
+					);
+					if (!record) throw new Error(`Ownership record missing for ${canvasPath}`);
+					snapshots.set(canvasPath, await this.snapshotCanvasState(canvasPath));
+				}
+				for (const canvasPath of canvasPaths) {
+					const snapshot = snapshots.get(canvasPath);
+					const result = await this.updateCanvasSyncMetadata(
+						canvasPath,
+						null,
+						snapshot.open
+							? { expectedData: JSON.stringify(snapshot.data) }
+							: { expectedRaw: snapshot.raw }
+					);
+					if (!result.ok) throw result;
+					const parentRecords = this.markdownOwnership.recordsForCanvas(canvasPath)
+						.filter((record) => record.kind === 'parent');
+					this.markdownOwnership.removeCanvas(canvasPath);
+					for (const record of parentRecords)
+						this.markdownOwnership.upsert(record, { replaceExisting: true });
+				}
+				await this.persistPluginData();
+				for (const canvasPath of canvasPaths) this.unindexCanvas(canvasPath);
+				this.markdownSyncCoordinator.detach(path);
+				for (const canvasPath of canvasPaths) this.verifiedMarkdownLinks.delete(canvasPath);
+				new import_obsidian5.Notice('Markdown sync detached because the linked file was deleted');
+			} catch (error) {
+				for (const snapshot of snapshots.values()) await this.restoreCanvasState(snapshot);
+				this.restoreOwnershipSnapshot(previousRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				for (const [canvasPath, link] of previousVerified) {
+					if (link) this.verifiedMarkdownLinks.set(canvasPath, link);
+					else this.verifiedMarkdownLinks.delete(canvasPath);
+				}
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: Markdown delete transaction rolled back', error);
+			}
 			return;
 		}
-		if (String(path).toLowerCase().endsWith('.canvas'))
-			this.unindexCanvas(path);
+		if (String(path).toLowerCase().endsWith('.canvas')) {
+			const previousRecords = this.markdownOwnership.records.map((record) => ({ ...record }));
+			const previousIndex = this.captureIndexSnapshot();
+			try {
+				this.markdownOwnership.removeCanvas(path);
+				this.unindexCanvas(path);
+				await this.persistPluginData();
+			} catch (error) {
+				this.restoreOwnershipSnapshot(previousRecords);
+				this.restoreIndexSnapshot(previousIndex);
+				try { await this.persistPluginData(); } catch (_) {}
+				console.warn('ToMindMap: deleted Canvas ownership rollback failed', error);
+			}
+		}
 	}
 	async createCleanNoteForTopic(canvas, node, title, content = '') {
 		const folder = canvasFolderPath(canvas);
@@ -52267,8 +57990,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (!touchesOld) continue;
 			if (!includeInternal && oldIds.has(fromId) && oldIds.has(toId))
 				continue;
-			this.canvasApi.cloneEdge(canvas, edge, replacements);
+			const cloned = this.canvasApi.cloneEdge(canvas, edge, replacements);
+			if (!cloned) throw new Error('Canvas did not create a replacement edge');
+			const clonedFromId = cloned.from?.node?.id;
+			const clonedToId = cloned.to?.node?.id;
+			if (!clonedFromId || !clonedToId) throw new Error('Replacement edge is missing an endpoint');
 		}
+		return edges.length;
 	}
 
 	async convertTopicBranchToMarkdownFile(canvas, node) {
@@ -52283,10 +58011,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			(item) => item.canvasNode
 		);
 		const title = MindmapActions.topicTitleFromNode(node);
-		const exported = portableMindMapMarkdown(canvas, [treeNode]);
-		const content = exported.trim() ? exported : `# ${title}\n`;
+		const encoded = this.encodeMarkdownDocument(canvas, {
+			includeFrontmatter: false,
+			rootTrees: [treeNode]
+		});
+		if (!encoded.ok) throw new Error(`Markdown encode failed: ${encoded.reason}`);
+		const content = encoded.value.markdown.trim()
+			? encoded.value.markdown
+			: `# ${title}\n`;
 		let file = null;
 		let card = null;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			file = await this.createCleanNoteForTopic(
 				canvas,
@@ -52309,6 +58044,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				false,
 				node.id
 			);
+			await flushCanvasView(canvas, this.app.vault);
 			for (const topic of branch.slice().reverse())
 				this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
@@ -52317,8 +58053,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.select?.(card);
 			}
 			this.markMarkdownOrderDirty(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			}
 			this.updateNodeTypeAttributes(canvas);
@@ -52330,6 +58067,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return [file];
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: branch Markdown export failed', error);
 			if (card) {
 				try {
@@ -52368,6 +58110,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const createdFiles = [];
 		const createdCards = [];
 		const replacements = new Map();
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			for (const topic of branch) {
 				const title = MindmapActions.topicTitleFromNode(topic);
@@ -52389,6 +58132,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				replacements,
 				true
 			);
+			await flushCanvasView(canvas, this.app.vault);
 			const selectedIds = new Set(
 				Array.from(canvas.selection || [])
 					.filter((item) => item && 'nodeEl' in item)
@@ -52403,8 +58147,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 			}
 			this.markMarkdownOrderDirty(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
 			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
+				this.layoutEngine.layout(canvas, { preserveRootSides: true });
 				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			}
 			this.updateNodeTypeAttributes(canvas);
@@ -52416,6 +58161,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return createdFiles;
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: clean-note conversion failed', error);
 			for (const card of createdCards) {
 				try {
@@ -52438,8 +58188,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return null;
 		}
 		const forest = buildForest(canvas);
-		const branchTrees = MindmapActions.getTopicBranch(forest, node, true);
-		const branch = branchTrees
+		const branch = MindmapActions.getTopicBranch(forest, node, true)
 			.map((item) => item.canvasNode)
 			.filter((item) => !getGroupIds(canvas).has(item.id));
 		if (branch.length === 0) return null;
@@ -52449,7 +58198,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		nested.mindmap = true;
 		nested.mindmapNestedVersion = 1;
 		nested.mindmapPendingResize = nested.nodes.map((item) => item.id);
-		const nestedPath = MindmapActions.nextTopicFilePath(
+		const nestedPath = allocateFilePath(
 			canvasFolderPath(canvas),
 			MindmapActions.topicTitleFromNode(rootNode),
 			'canvas',
@@ -52457,11 +58206,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		let created = null;
 		let card = null;
+		let oldCardData = null;
+		let registrySaved = false;
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
-			created = await this.app.vault.create(
-				nestedPath,
-				JSON.stringify(nested, null, '\t')
-			);
+			created = await this.app.vault.create(nestedPath, JSON.stringify(nested, null, '\t'));
 			card = this.createTitleOnlyFileCard(
 				canvas,
 				created,
@@ -52469,82 +58218,98 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				'nested-map',
 				MindmapActions.topicTitleFromNode(rootNode)
 			);
-			nested.mindmapParent = {
-				canvas: parentPath,
+			oldCardData = { ...canvasNodeUnknownData(card) };
+			const syncId = createSyncId();
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath: nestedPath,
+				kind: 'parent',
+				targetPath: parentPath,
+				syncId,
 				nodeId: card.id
+			});
+			if (!syncId || !issued.ok) throw new Error(issued.reason || 'Could not mint parent ownership');
+			const parentLink = {
+				canvas: parentPath,
+				nodeId: card.id,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
 			};
-			await this.app.vault.modify(
-				created,
-				JSON.stringify(nested, null, '\t')
-			);
+			setCanvasNodeUnknownData(card, { [CARD_SYNC_KEY]: issued.record.syncId });
+			nested.mindmapParent = parentLink;
+			await this.app.vault.process(created, (raw) => JSON.stringify(nested, null, '\t'));
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			registrySaved = true;
+			await this.persistPluginData();
+			await flushCanvasView(canvas, this.app.vault);
 			const replacements = new Map([[rootNode.id, card]]);
-			this.cloneEdgesAroundReplacedNodes(
-				canvas,
-				branch,
-				replacements,
-				false,
-				rootNode.id
-			);
-			for (const topic of branch.slice().reverse())
-				this.canvasApi.removeNode(canvas, topic);
+			this.cloneEdgesAroundReplacedNodes(canvas, branch, replacements, false, rootNode.id);
+			for (const topic of branch.slice().reverse()) this.canvasApi.removeNode(canvas, topic);
 			this.canvasApi.invalidateEdgeIndex();
-			this.markMarkdownOrderDirty(canvas);
-			if (this.isMindmapCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
-				if (this.settings.autoColor) this.branchColors.applyColors(canvas);
-			}
-			this.updateNodeTypeAttributes(canvas);
-			this.updateGroupBounds(canvas);
+			this.applyStructuralMutation(canvas, [rootNode], { save: false });
 			canvas.requestSave();
 			this.refreshOutline(canvas);
-			new import_obsidian5.Notice(
-				`Moved ${branch.length} topic${branch.length === 1 ? '' : 's'} to ${created.path}`
-			);
-			return { file: created, card, data: nested };
+			this.verifiedParentLinks.set(nestedPath, parentLink);
+			new import_obsidian5.Notice(`Moved ${branch.length} topic${branch.length === 1 ? '' : 's'} to ${created.path}`);
+			return { file: created, card, data: nested, link: parentLink };
 		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
 			console.error('ToMindMap: nested mind-map conversion failed', error);
+			if (registrySaved) {
+				this.markdownOwnership.removeCanvas(nestedPath);
+				try { await this.persistPluginData(); } catch (_) {}
+			}
 			if (card) {
 				try {
+					if (oldCardData) setCanvasNodeUnknownData(card, oldCardData);
 					this.canvasApi.removeNode(canvas, card);
 				} catch (_) {}
 			}
 			if (created) {
-				try {
-					await this.app.vault.delete(created);
-				} catch (_) {}
+				try { await this.app.vault.delete(created); } catch (_) {}
 			}
 			new import_obsidian5.Notice('Could not create the nested mind map');
 			return null;
 		}
 	}
 
+	async waitForCanvasNode(path, nodeId, timeoutMs = 1000) {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const open = this.getOpenCanvasByPath(path);
+			const node = open?.nodes?.get(nodeId);
+			if (open && node) return { canvas: open, node };
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		return null;
+	}
 	async openParentMindMap(canvas, parent) {
-		const parentPath = parent?.canvas;
-		const parentNodeId = parent?.nodeId;
-		if (!parentPath || !parentNodeId) {
+		if (!parent) {
 			new import_obsidian5.Notice('This mind map has no parent link');
 			return;
 		}
-		const file = this.app.vault.getAbstractFileByPath(parentPath);
-		if (!(file instanceof import_obsidian5.TFile)) {
-			new import_obsidian5.Notice('The parent mind map no longer exists');
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parent);
+		if (!resolved.ok) {
+			new import_obsidian5.Notice(`Could not open the parent mind map: ${resolved.reason}`);
 			return;
 		}
+		const file = resolved.link.file;
+		const parentPath = resolved.link.canvas;
+		const parentNodeId = resolved.link.nodeId;
 		try {
 			const leaf = this.app.workspace.getLeaf(false);
 			await leaf.openFile(file);
-			await new Promise((resolve) => setTimeout(resolve, 200));
-			const parentCanvas = this.getOpenCanvasByPath(parentPath);
-			const target = parentCanvas?.nodes.get(parentNodeId);
-			if (!target) {
+			const ready = await this.waitForCanvasNode(parentPath, parentNodeId);
+			if (!ready) {
 				new import_obsidian5.Notice('The parent topic could not be found');
 				return;
 			}
-			this.canvasApi.selectForNavigation(
-				parentCanvas,
-				target,
-				this.settings.navigationZoomPadding
-			);
+			this.canvasApi.selectForNavigation(ready.canvas, ready.node, this.settings.navigationZoomPadding);
 		} catch (error) {
 			console.error('ToMindMap: parent navigation failed', error);
 			new import_obsidian5.Notice('Could not open the parent mind map');
@@ -52552,65 +58317,106 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 
 	async convertMarkdownFileToMindMap(file) {
+		let created = null;
+		let registrySaved = false;
+		let sourcePatched = false;
+		let originalMarkdown = '';
+		let patchedMarkdownContent = '';
 		try {
-			const markdown = await this.app.vault.cachedRead(file);
-			const imported = markdownMindMapToCanvas(
-				markdown,
+			originalMarkdown = await this.app.vault.cachedRead(file);
+			const decoded = this.layoutMarkdownDocument(
+				originalMarkdown,
 				this.markdownLayoutOptions()
 			);
-			if (!imported) {
-				new import_obsidian5.Notice('No Markdown hierarchy was found');
+			if (!decoded.ok) {
+				new import_obsidian5.Notice(`Could not read the Markdown hierarchy: ${decoded.reason}`);
 				return;
 			}
-			const folder =
-				file.parent && file.parent.path ? `${file.parent.path}/` : '';
-			let canvasPath = `${folder}${file.basename}.canvas`;
-			let counter = 2;
-			while (this.app.vault.getAbstractFileByPath(canvasPath)) {
-				canvasPath = `${folder}${file.basename} ${counter}.canvas`;
-				counter++;
-			}
-			convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
+			const imported = decoded.value;
+			const folder = file.parent?.path || '';
+			const canvasPath = allocateFilePath(
+				folder,
+				file.basename,
+				'canvas',
+				(candidate) => !!this.app.vault.getAbstractFileByPath(candidate)
+			);
+			const syncId = createSyncId();
+			const issued = this.markdownOwnership.issueRecord({
+				canvasPath,
+				kind: 'markdown',
+				targetPath: file.path,
+				syncId,
+				nodeId: null
+			});
+			if (!syncId || !issued.ok) throw new Error(issued.reason || 'Could not mint Markdown ownership');
+			const patchedMarkdown = patchSyncIdOwnership(originalMarkdown, issued.record.syncId);
+			if (!patchedMarkdown.ok) throw new Error(patchedMarkdown.reason);
+			imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
+			const link = {
+				path: file.path,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			};
 			const canvasData = {
 				nodes: imported.nodes,
 				edges: imported.edges,
 				mindmap: true,
 				mindmapPendingResize: imported.nodes.map((node) => node.id),
 				mindmapMarkdownFrontmatter: imported.frontmatter || '',
-				mindmapMarkdownSync: { path: file.path }
+				mindmapMarkdownSync: link
 			};
-			const created = await this.app.vault.create(
-				canvasPath,
-				JSON.stringify(canvasData, null, '	')
+			created = await this.app.vault.create(canvasPath, JSON.stringify(canvasData, null, '\t'));
+			const preserved = MarkdownMindMapCodec.markdownWithTopicMetadata(
+				MarkdownMindMapCodec.withoutLegacyPluginComments(patchedMarkdown.markdown),
+				{
+					topicIds: imported.topicIds || [],
+					topicKeys: imported.topicKeys || [],
+					topicLabels: imported.topicLabels || []
+				}
 			);
-			this.indexMarkdownLink(created.path, file.path);
-			const preserved = markdownWithTopicMetadata(
-				withoutLegacyPluginComments(markdown),
-				imported.topicIds || [],
-				imported.topicKeys || [],
-				imported.topicLabels || []
-			);
-			if (preserved !== markdown)
-				await this.writeMarkdownFile(file, preserved, markdown);
+			patchedMarkdownContent = preserved;
+			const written = await this.writeMarkdownFile(file, preserved, originalMarkdown);
+			if (!written.ok) throw new Error(written.reason || LINK_REASON.FAILED);
+			sourcePatched = true;
+			const upserted = this.markdownOwnership.upsert(issued.record);
+			if (!upserted.ok) throw new Error(upserted.reason);
+			registrySaved = true;
+			await this.persistPluginData();
+			if (!this.indexMarkdownLink(created.path, file.path))
+				throw new Error(LINK_REASON.FAILED);
+			this.verifiedMarkdownLinks.set(created.path, link);
 			await this.app.workspace.getLeaf(false).openFile(created);
 			new import_obsidian5.Notice(
 				`Created "${created.path}" and linked it to "${file.path}"`
 			);
 		} catch (error) {
+			if (registrySaved) {
+				this.markdownOwnership.removeCanvas(created?.path || '');
+				try { await this.persistPluginData(); } catch (_) {}
+			}
+			if (sourcePatched && originalMarkdown && patchedMarkdownContent) {
+				try { await this.writeMarkdownFile(file, originalMarkdown, patchedMarkdownContent); } catch (_) {}
+			}
+			if (created) {
+				try {
+					this.unindexCanvas(created.path);
+					this.verifiedMarkdownLinks.delete(created.path);
+					await this.app.vault.delete(created);
+				} catch (_) {}
+			}
 			console.error('ToMindMap: Markdown conversion failed', error);
-			new import_obsidian5.Notice(
-				'Could not convert that Markdown file to a mind map'
-			);
+			new import_obsidian5.Notice('Could not convert that Markdown file to a mind map');
 		}
 	}
 	async copyMindMapMarkdown(canvas) {
-		const markdown = portableMindMapMarkdown(canvas);
-		if (!markdown.trim()) {
+		const encoded = this.encodeMarkdownDocument(canvas, { includeFrontmatter: false });
+		if (!encoded.ok || !encoded.value.markdown.trim()) {
 			new import_obsidian5.Notice('No mind map topics to copy');
 			return;
 		}
 		try {
-			await navigator.clipboard.writeText(markdown);
+			await writeClipboardText(encoded.value.markdown);
 			new import_obsidian5.Notice('Mind map copied as Markdown');
 		} catch (error) {
 			console.error('ToMindMap: clipboard export failed', error);
@@ -52635,9 +58441,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	handleMindMapClipboardCopy(event, cut) {
 		const canvas = this.clipboardCanvas(event);
 		if (!canvas || !event.clipboardData) return;
-		const roots = selectedMindMapTrees(canvas);
+		const roots = MarkdownMindMapCodec.extractSelectedTopicForest(canvas);
 		if (roots.length === 0) return;
-		const markdown = portableMindMapMarkdown(canvas, roots);
+		const encoded = this.encodeMarkdownDocument(canvas, {
+			includeFrontmatter: false,
+			rootTrees: roots
+		});
+		if (!encoded.ok) return;
+		const markdown = encoded.value.markdown;
 		event.preventDefault();
 		event.stopImmediatePropagation();
 		event.clipboardData.setData('text/plain', markdown);
@@ -52674,23 +58485,55 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			'';
 		if (!canvas || !clipboardText.trim()) return;
 		const markdown = normalizeClipboardMarkdown(clipboardText);
-		const imported = markdownMindMapToCanvas(
+		const decoded = this.layoutMarkdownDocument(
 			markdown,
 			this.markdownLayoutOptions()
 		);
-		if (!imported) return;
+		if (!decoded.ok) return;
 		event.preventDefault();
 		event.stopImmediatePropagation();
 		const parent = this.canvasApi.getSelectedNode(canvas);
-		void this.importMarkdownIntoCanvas(
-			canvas,
-			markdown,
-			'clipboard',
-			parent
+		this.runAsync(
+			() => this.importMarkdownIntoCanvas(canvas, markdown, 'clipboard', parent),
+			'paste Markdown'
 		);
 	}
-	async saveMindMapMarkdown(canvas) {
-		await this.attachMarkdownSync(canvas);
+	async readBoundedMarkdownFile(file) {
+		const maxBytes = MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes;
+		if (Number(file?.size || 0) > maxBytes) {
+			return { ok: false, reason: 'file-byte-budget' };
+		}
+		if (typeof file?.stream === 'function') {
+			const reader = file.stream().getReader();
+			const chunks = [];
+			let bytes = 0;
+			try {
+				while (true) {
+					const part = await reader.read();
+					if (part.done) break;
+					bytes += part.value?.byteLength || part.value?.length || 0;
+					if (bytes > maxBytes) {
+						await reader.cancel?.();
+						return { ok: false, reason: 'file-byte-budget' };
+					}
+					chunks.push(part.value);
+				}
+			} finally {
+				reader.releaseLock?.();
+			}
+			const decoder = new TextDecoder();
+			const output = new Uint8Array(bytes);
+			let offset = 0;
+			for (const chunk of chunks) {
+				output.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			return { ok: true, value: decoder.decode(output) };
+		}
+		const text = await file.text();
+		if (new TextEncoder().encode(text).byteLength > maxBytes)
+			return { ok: false, reason: 'file-byte-budget' };
+		return { ok: true, value: text };
 	}
 	importMarkdownFile(canvas) {
 		const input = document.createElement('input');
@@ -52701,20 +58544,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			input.removeEventListener('change', handler);
 			const file = (_a = input.files) == null ? void 0 : _a[0];
 			if (!file) return;
-			void file
-				.text()
-				.then((markdown) =>
-					this.importMarkdownIntoCanvas(canvas, markdown, file.name)
-				)
-				.catch((error) => {
-					console.error(
-						'ToMindMap: Markdown file import failed',
-						error
-					);
-					new import_obsidian5.Notice(
-						'Could not read that Markdown file'
-					);
-				});
+			this.runAsync(async () => {
+				const read = await this.readBoundedMarkdownFile(file);
+				if (!read.ok) {
+					new import_obsidian5.Notice(`Could not import Markdown: ${read.reason}`);
+					return;
+				}
+				await this.importMarkdownIntoCanvas(canvas, read.value, file.name);
+			}, 'import Markdown file');
 		};
 		input.addEventListener('change', handler);
 		input.click();
@@ -52725,17 +58562,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		sourceName = 'pasted Markdown',
 		parentNode = null
 	) {
-		const imported = markdownMindMapToCanvas(markdown, {
+		if (new TextEncoder().encode(String(markdown || '')).byteLength >
+			MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes) {
+			new import_obsidian5.Notice('Could not import Markdown: file-byte-budget');
+			return { ok: false, reason: 'file-byte-budget' };
+		}
+		const decoded = this.layoutMarkdownDocument(markdown, {
 			nodeWidth: this.settings.defaultNodeWidth,
 			nodeHeight: this.settings.defaultNodeHeight,
 			maxNodeHeight: this.settings.maxNodeHeight,
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap
 		});
-		if (!imported) {
-			new import_obsidian5.Notice('No Markdown hierarchy was found');
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Could not import Markdown: ${decoded.reason}`);
 			return;
 		}
+		const imported = decoded.value;
 		const idMap = new Map();
 		const reservedIds = new Set(canvas.nodes.keys());
 		for (const node of imported.nodes) {
@@ -52755,18 +58598,29 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const existing = Array.from(canvas.nodes.values()).filter(
 			(node) => !groupIds.has(node.id)
 		);
-		const localMinX = Math.min(...imported.nodes.map((node) => node.x));
-		const localMinY = Math.min(...imported.nodes.map((node) => node.y));
+		let localMinX = Infinity;
+		let localMinY = Infinity;
+		for (const node of imported.nodes) {
+			localMinX = Math.min(localMinX, Number(node.x) || 0);
+			localMinY = Math.min(localMinY, Number(node.y) || 0);
+		}
+		if (!Number.isFinite(localMinX) || !Number.isFinite(localMinY))
+			return { ok: false, reason: 'invalid-geometry' };
+		let existingMinX = Infinity;
+		let existingMaxY = -Infinity;
+		for (const node of existing) {
+			existingMinX = Math.min(existingMinX, Number(node.x) || 0);
+			existingMaxY = Math.max(existingMaxY, (Number(node.y) || 0) + (Number(node.height) || 0));
+		}
 		const targetX = parentNode
 			? parentNode.x + parentNode.width + this.settings.horizontalGap
 			: existing.length > 0
-				? Math.min(...existing.map((node) => node.x))
+				? existingMinX
 				: 0;
 		const targetY = parentNode
 			? parentNode.y
 			: existing.length > 0
-				? Math.max(...existing.map((node) => node.y + node.height)) +
-					Math.max(160, this.settings.verticalGap * 8)
+				? existingMaxY + Math.max(160, this.settings.verticalGap * 8)
 				: 0;
 		const dx = targetX - localMinX;
 		const dy = targetY - localMinY;
@@ -52776,8 +58630,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const canvasPath =
 			canvas.view && canvas.view.file ? canvas.view.file.path : '';
-		convertMarkdownAnchorsToCardLinks(imported.nodes, canvasPath);
-		const currentData = canvas.getData();
+		imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+			imported.nodes,
+			canvasPath
+		);
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		try {
+			const currentData = canvas.getData();
 		if (currentData.mindmap !== true) {
 			currentData.mindmap = true;
 		}
@@ -52789,6 +58648,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const importedNodes = imported.nodes
 			.map((data) => canvas.nodes.get(data.id))
 			.filter(Boolean);
+		if (importedNodes.length !== imported.nodes.length)
+			throw new Error('Canvas did not materialize every imported topic');
+		const importedEdges = imported.edges
+			.map((data) => canvas.edges.get(data.id))
+			.filter(Boolean);
+		if (importedEdges.length !== imported.edges.length)
+			throw new Error('Canvas did not materialize every imported edge');
 		const focusPastedRoot = () => {
 			if (sourceName !== 'clipboard') return;
 			const root =
@@ -52805,18 +58671,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (parentNode) {
 			for (const rootId of imported.rootIds) {
 				const root = canvas.nodes.get(rootId);
-				if (root)
-					this.canvasApi.createEdge(
-						canvas,
-						parentNode,
-						root,
-						'right',
-						'left',
-						parentNode.color || void 0
-					);
+				if (!root) throw new Error('An imported root disappeared before connection');
+				const edge = this.canvasApi.createEdge(
+					canvas,
+					parentNode,
+					root,
+					'right',
+					'left',
+					parentNode.color || void 0
+				);
+				if (!edge) throw new Error('Canvas did not create an imported-root edge');
 			}
-			this.markMarkdownOrderDirty(canvas);
 		}
+		this.markMarkdownOrderDirty(canvas);
 		if (this.isAutoAdjustCanvas(canvas)) {
 			this.resizeNodesWhenRendered(
 				canvas,
@@ -52853,15 +58720,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.settings.navigationZoomPadding
 				);
 		}
-		new import_obsidian5.Notice(
-			`Imported ${imported.nodes.length} topic${imported.nodes.length === 1 ? '' : 's'} from ${sourceName}${missingMediaCount > 0 ? ` · ${missingMediaCount} missing media highlighted` : ''}`
-		);
+			new import_obsidian5.Notice(
+				`Imported ${imported.nodes.length} topic${imported.nodes.length === 1 ? '' : 's'} from ${sourceName}${missingMediaCount > 0 ? ` · ${missingMediaCount} missing media highlighted` : ''}`
+			);
+			return { ok: true, imported: imported.nodes.length };
+		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				this.canvasApi.invalidateEdgeIndex();
+				if (this.isMindmapCanvas(canvas)) MindmapActions.syncCollapsedVisibility(canvas);
+				canvas.requestSave?.();
+				await flushCanvasView(canvas, this.app.vault);
+			} catch (_) {}
+			new import_obsidian5.Notice('Could not import the Markdown hierarchy');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
+		}
 	}
 	updateNodeTypeAttributes(canvas) {
 		if (!canvas || !canvas.nodes) return;
-		const edgeIndex = canvas.edges
-			? this.canvasApi.getEdgeIndex(canvas)
-			: { incoming: new Map(), outgoing: new Map() };
+		const graph = this.canvasApi.getGraphQuery?.(canvas) || null;
 		for (const node of canvas.nodes.values()) {
 			if (!node || !node.nodeEl) continue;
 			const nodeFilePath = canvasNodeFilePath(node);
@@ -52910,7 +58787,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			const isRootTopic =
 				type === 'text' &&
-				!edgeIndex.incoming.has(node.id);
+				(graph?.incomingEdgesOf(node)?.length || 0) === 0;
 			for (const element of new Set([
 				node.nodeEl,
 				shell,
@@ -53037,7 +58914,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.layoutEngine.layout(canvas);
 			this.updateGroupBounds(canvas);
 			canvas.requestSave();
-			void this.flushCanvasToMarkdown(canvas);
+			this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 		}
 		return attached;
 	}
@@ -53046,7 +58923,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!wrapper) return () => {};
 		let hoveredNode = null;
 		const supports = (event) =>
-			MediaDrop.hasSupportedDrop(event.dataTransfer);
+			hasSupportedDrop(event.dataTransfer);
 
 		const clearHover = () => {
 			if (hoveredNode && hoveredNode.nodeEl) {
@@ -53087,22 +58964,34 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 		};
 		const onDrop = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			if (!supports(event)) return;
-			event.preventDefault();
-			event.stopImmediatePropagation();
-			const target = hoveredNode || findNodeFromEvent(canvas, event);
-			clearHover();
-			const groupIds = getGroupIds(canvas);
-			const topic = target && !groupIds.has(target.id) ? target : null;
-			const position = canvas.posFromEvt(event);
-			const files = Array.from(event.dataTransfer?.files || []);
-			if (files.length > 0) {
-				void this.addDroppedFiles(canvas, files, position, topic);
-				return;
-			}
-			const url = MediaDrop.droppedUrl(event.dataTransfer);
-			if (url) this.addDroppedUrl(canvas, url, position, topic);
+			void (async () => {
+				if (!this.isMindmapCanvas(canvas)) {
+					clearHover();
+					return;
+				}
+				if (!supports(event)) {
+					clearHover();
+					return;
+				}
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				const target = findNodeFromEvent(canvas, event);
+				clearHover();
+				const groupIds = getGroupIds(canvas);
+				const topic = target && !groupIds.has(target.id) ? target : null;
+				const position = canvas.posFromEvt(event);
+				const files = Array.from(event.dataTransfer?.files || []);
+				if (files.length > 0) {
+					await this.addDroppedFiles(canvas, files, position, topic);
+					return;
+				}
+				const url = droppedUrl(event.dataTransfer);
+				if (url) await this.addDroppedUrl(canvas, url, position, topic);
+			})().catch((error) => {
+				clearHover();
+				console.error('ToMindMap: media drop failed', error);
+				new import_obsidian5.Notice('Could not add the dropped media');
+			});
 		};
 
 		wrapper.addEventListener('dragenter', onDragEnter, true);
@@ -53127,10 +59016,68 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			!window.matchMedia('(pointer: fine)').matches
 		);
 	}
+	/**
+	 * Reconfigure only the live input adapters affected by settings or mode.
+	 * Keyboard, mutation, media, and drag listeners stay attached for the
+	 * Canvas session, so changing a preference never requires a leaf switch.
+	 */
+	syncCanvasBindings(canvas = this.interceptedCanvas) {
+		if (this.cleanupTouchHandler) {
+			this.cleanupTouchHandler();
+			this.cleanupTouchHandler = null;
+		}
+		if (this.cleanupNavHandler) {
+			this.cleanupNavHandler();
+			this.cleanupNavHandler = null;
+		}
+		this.touchController = null;
+		if (!canvas || !this.isMindmapCanvas(canvas)) return false;
+		if (this.isTouchUiEnabled()) {
+			this.touchController = new TouchControlsController({
+				canvas,
+				actions: this.createMindMapActionSurface(canvas),
+				Menu: import_obsidian5.Menu,
+				setIcon: import_obsidian5.setIcon,
+				isEnabled: () =>
+					this.isTouchUiEnabled() && this.isMindmapCanvas(canvas),
+				isTopicNode: (node) =>
+					nodeIsConvertibleTopic(canvas, node) ||
+					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
+				onDoubleTap: (node) => {
+					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
+					const file = this.app.vault.getAbstractFileByPath(
+						canvasNodeFilePath(node)
+					);
+					if (!(file instanceof import_obsidian5.TFile)) return false;
+					void this.app.workspace.getLeaf(false).openFile(file);
+					return true;
+				},
+				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
+				buildMenuItems: (menu, node) => {
+					this.app.workspace.trigger('canvas:node-menu', menu, node);
+				}
+			});
+			this.cleanupTouchHandler = this.touchController.attach();
+		}
+		if (this.settings.mouseNavigation) {
+			const onPointerDown = (event) => {
+				if (event.button !== 3 && event.button !== 4) return;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				if (event.button === 3) this.navigateBack(canvas);
+				else this.navigateForward(canvas);
+			};
+			canvas.wrapperEl?.addEventListener('pointerdown', onPointerDown, true);
+			this.cleanupNavHandler = () =>
+				canvas.wrapperEl?.removeEventListener('pointerdown', onPointerDown, true);
+		}
+		return true;
+	}
 	registerNodeDragReparentHandler(canvas) {
 		const wrapper = canvas.wrapperEl;
-		if (!wrapper) return () => {};
+		if (!wrapper) return { finish() { return false; }, dispose() {} };
 		const ownerDocument = wrapper.ownerDocument || document;
+		const ownerWindow = ownerDocument.defaultView;
 		let draggedNode = null;
 		let dragStartPos = null;
 		let isSingleCardDrag = false;
@@ -53145,6 +59092,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let draggedMoveTo = null;
 		let dragPointerStart = null;
 		let latestPointerPosition = null;
+		let terminalReason = null;
+		let terminalResult = null;
+		let activePointerId = null;
 		const stableMediaPositions = new Map(
 			Array.from(canvas.nodes.values()).map((node) => [
 				node.id,
@@ -53419,7 +59369,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.settings.navigationZoomPadding
 					);
 					rememberMediaPosition(resized);
-					void this.flushCanvasToMarkdown(canvas);
+					this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				};
 				const view = wrapper.ownerDocument?.defaultView;
 				if (typeof view?.requestAnimationFrame === 'function')
@@ -53472,7 +59422,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (result.changed) this.markMarkdownOrderDirty(canvas);
 				canvas.requestSave();
 				rememberMediaPosition(selected);
-				void this.flushCanvasToMarkdown(canvas);
+				this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				return;
 			}
 			setMediaDragging(draggedNode, false);
@@ -53524,7 +59474,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (result.changed) this.markMarkdownOrderDirty(canvas);
 				canvas.requestSave();
 				rememberMediaPosition(nodeToMove);
-				void this.flushCanvasToMarkdown(canvas);
+				this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
@@ -53578,7 +59528,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (this.settings.autoColor && this.isMindmapCanvas(canvas))
 				this.branchColors.applyColors(canvas);
 			canvas.requestSave();
-			void this.flushCanvasToMarkdown(canvas);
+			this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
 			if (hierarchyChanged)
 				new import_obsidian5.Notice(
 					dropZone === 'child'
@@ -53587,8 +59537,64 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				);
 		};
 
+		const detachOwnedListeners = () => {
+			ownerDocument.removeEventListener('pointermove', onPointerMove, true);
+			ownerDocument.removeEventListener('pointerup', onPointerUp, true);
+			ownerDocument.removeEventListener('mousemove', onPointerMove, true);
+			ownerDocument.removeEventListener('mouseup', onPointerUp, true);
+		};
+		const clearOwnedGesture = () => {
+			cancelPreviewFrame();
+			if (pointerUpFrame !== null) {
+				if (typeof ownerWindow?.cancelAnimationFrame === 'function')
+					ownerWindow.cancelAnimationFrame(pointerUpFrame);
+				else clearTimeout(pointerUpFrame);
+				pointerUpFrame = null;
+			}
+			setMediaDragging(draggedNode, false);
+			setMindmapDragging(false);
+			dragAttachment.finish(
+				terminalReason === 'commit' ? 'commit' : 'cancel',
+				draggedNode
+			);
+			restoreDraggedMove();
+			detachOwnedListeners();
+			activePointerId = null;
+			draggedNode = null;
+			dragStartPos = null;
+			isSingleCardDrag = false;
+			liveBranchDirection = null;
+			livePreviewTargetId = null;
+			previewResolved = false;
+			resizingNode = null;
+			dragPointerStart = null;
+			latestPointerPosition = null;
+		};
+		const finishGesture = (reason, event = null) => {
+			if (terminalReason) return terminalResult;
+			if (
+				activePointerId !== null &&
+				event?.pointerId !== undefined &&
+				event.pointerId !== activePointerId
+			) return terminalResult;
+			terminalReason = reason;
+			if (reason === 'commit') {
+				try {
+					finishPointerUp(event);
+				} finally {
+					clearOwnedGesture();
+				}
+			} else {
+				clearOwnedGesture();
+			}
+			terminalResult = { ok: true, reason };
+			return terminalResult;
+		};
+		const onPointerCancel = (event) => finishGesture('cancel', event);
+		const onWindowBlur = () => finishGesture('blur');
+
 		const onPointerUp = (event) => {
-			if (pointerUpFrame !== null) return;
+			if (terminalReason || pointerUpFrame !== null) return;
 			if (draggedNode) latestPointerPosition = canvas.posFromEvt(event);
 			if (
 				draggedNode &&
@@ -53600,7 +59606,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const view = wrapper.ownerDocument?.defaultView;
 			const finish = () => {
 				pointerUpFrame = null;
-				finishPointerUp(event);
+				finishGesture('commit', event);
 			};
 			pointerUpFrame =
 				typeof view?.requestAnimationFrame === 'function'
@@ -53609,11 +59615,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 
 		const onPointerDown = (event) => {
-			if (!this.isMindmapCanvas(canvas)) return;
-			dragAttachment.cancel();
-			const node = findNodeFromEvent(canvas, event);
-			const groupIds = getGroupIds(canvas);
-			if (node && !groupIds.has(node.id)) {
+			if (terminalReason) {
+				dragAttachment.cancel();
+				terminalReason = null;
+				terminalResult = null;
+			}
+			const node = isPrimaryCardGesture(event, {
+				isEnabled: () => this.isMindmapCanvas(canvas),
+				findNode: (pointerEvent) => findNodeFromEvent(canvas, pointerEvent),
+				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
+			});
+			if (node) {
+				activePointerId = event.pointerId ?? null;
 				draggedNode = node;
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
@@ -53656,6 +59669,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 				}
 			} else {
+				if (draggedNode) finishGesture('cancel', event);
+				activePointerId = null;
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
@@ -53711,53 +59726,24 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		wrapper.addEventListener('pointerdown', onPointerDown, true);
 		wrapper.addEventListener('pointermove', onPointerMove, true);
 		wrapper.addEventListener('pointerup', onPointerUp, true);
-		return () => {
-			wrapper.removeEventListener(
-				'mousedown',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener(
-				'pointerdown',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener(
-				'touchstart',
-				blockNonFileResizing,
-				true
-			);
-			wrapper.removeEventListener('pointerdown', onPointerDown, true);
-			wrapper.removeEventListener('pointermove', onPointerMove, true);
-			wrapper.removeEventListener('pointerup', onPointerUp, true);
-			ownerDocument.removeEventListener(
-				'pointermove',
-				onPointerMove,
-				true
-			);
-			ownerDocument.removeEventListener('pointerup', onPointerUp, true);
-			ownerDocument.removeEventListener('mousemove', onPointerMove, true);
-			ownerDocument.removeEventListener('mouseup', onPointerUp, true);
-			cancelPreviewFrame();
-			if (pointerUpFrame !== null) {
-				const view = wrapper.ownerDocument?.defaultView;
-				if (typeof view?.cancelAnimationFrame === 'function')
-					view.cancelAnimationFrame(pointerUpFrame);
-				else clearTimeout(pointerUpFrame);
-				pointerUpFrame = null;
+		ownerDocument.addEventListener('pointercancel', onPointerCancel, true);
+		ownerDocument.addEventListener('lostpointercapture', onPointerCancel, true);
+		ownerWindow?.addEventListener?.('blur', onWindowBlur);
+		return {
+			finish: finishGesture,
+			dispose(reason = 'teardown') {
+				finishGesture(reason === 'commit' ? 'commit' : reason);
+				wrapper.removeEventListener('mousedown', blockNonFileResizing, true);
+				wrapper.removeEventListener('pointerdown', blockNonFileResizing, true);
+				wrapper.removeEventListener('touchstart', blockNonFileResizing, true);
+				wrapper.removeEventListener('pointerdown', onPointerDown, true);
+				wrapper.removeEventListener('pointermove', onPointerMove, true);
+				wrapper.removeEventListener('pointerup', onPointerUp, true);
+				ownerDocument.removeEventListener('pointercancel', onPointerCancel, true);
+				ownerDocument.removeEventListener('lostpointercapture', onPointerCancel, true);
+				ownerWindow?.removeEventListener?.('blur', onWindowBlur);
+				detachOwnedListeners();
 			}
-			setMediaDragging(draggedNode, false);
-			setMindmapDragging(false);
-			dragAttachment.cancel();
-			restoreDraggedMove();
-			draggedNode = null;
-			dragStartPos = null;
-			isSingleCardDrag = false;
-			liveBranchDirection = null;
-			livePreviewTargetId = null;
-			resizingNode = null;
-			dragPointerStart = null;
-			latestPointerPosition = null;
 		};
 	}
 	canvasViewportCenter(canvas) {
@@ -53812,49 +59798,61 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	async syncParentLinkedCardTitle(canvas, title, childFile = null) {
 		const parentLink = canvas?.getData?.()?.[TOMINMAP_PARENT];
-		const parentPath = parentLink?.canvas;
-		const parentNodeId = parentLink?.nodeId;
-		if (!parentPath || !parentNodeId || !title) return false;
-		const parentFile = this.app.vault.getAbstractFileByPath(parentPath);
+		if (!parentLink || !title) return false;
+		const resolved = await this.resolveParentLinkForCanvas(canvas, parentLink);
+		if (!resolved.ok) return false;
+		const parentPath = resolved.link.canvas;
+		const parentNodeId = resolved.link.nodeId;
+		const parentFile = resolved.link.file;
 		if (!(parentFile instanceof import_obsidian5.TFile)) return false;
-		const patchData = (data) =>
-			MindmapActions.updateLinkedParentCardData(
-				data,
-				parentNodeId,
-				title,
-				childFile?.path
-			);
+		const patchData = (data) => {
+			const card = (data.nodes || []).find((node) => node.id === parentNodeId);
+			if (!card) return null;
+			card.unknownData = {
+				...(card.unknownData || {}),
+				[TOMINMAP_TITLE_ONLY]: true,
+				[TOMINMAP_CARD_KIND]: 'nested-map',
+				[TOMINMAP_CARD_TITLE]: title,
+				[CARD_SYNC_KEY]: resolved.link.syncId
+			};
+			if (childFile?.path) card.file = childFile.path;
+			return data;
+		};
 		const parentCanvas = this.getOpenCanvasByPath(parentPath);
 		const card = parentCanvas?.nodes?.get(parentNodeId);
 		if (card) {
 			if (childFile?.path) {
-				if (typeof card.setFilePath === 'function')
-					card.setFilePath(childFile.path, card.subpath || '');
-				else if (typeof card.setFile === 'function')
-					card.setFile(childFile, '');
-				else {
-					card.file = childFile;
-					card.filePath = childFile.path;
-				}
+				if (typeof card.setFilePath === 'function') card.setFilePath(childFile.path, card.subpath || '');
+				else if (typeof card.setFile === 'function') card.setFile(childFile, '');
+				else { card.file = childFile; card.filePath = childFile.path; }
 			}
 			setCanvasNodeUnknownData(card, {
 				[TOMINMAP_TITLE_ONLY]: true,
 				[TOMINMAP_CARD_KIND]: 'nested-map',
-				[TOMINMAP_CARD_TITLE]: title
+				[TOMINMAP_CARD_TITLE]: title,
+				[CARD_SYNC_KEY]: resolved.link.syncId
 			});
 			this.updateNodeTypeAttributes(parentCanvas);
 			this.updateGroupBounds(parentCanvas);
-			parentCanvas.requestSave?.();
+			this.syncApplyingCanvas.add(parentCanvas);
+			try {
+				parentCanvas.requestSave?.();
+				await flushCanvasView(parentCanvas, this.app.vault);
+			} finally {
+				this.syncApplyingCanvas.delete(parentCanvas);
+			}
 			return true;
 		}
 		if (typeof this.app.vault.process !== 'function') return false;
+		let patchedCard = false;
 		try {
 			await this.app.vault.process(parentFile, (raw) => {
 				const data = JSON.parse(raw);
 				const patched = patchData(data);
+				patchedCard = Boolean(patched);
 				return patched ? JSON.stringify(patched, null, '\t') : raw;
 			});
-			return true;
+			return patchedCard;
 		} catch (error) {
 			console.error('ToMindMap: could not update the parent linked card', error);
 			return false;
@@ -53887,10 +59885,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		if (competingMaps.length > 0) return false;
 		if (title === file.basename) return false;
-		const folder = file.parent?.path ? `${file.parent.path}/` : '';
-		const target = `${folder}${title}.canvas`;
+		const target = allocateFilePath(
+			file.parent?.path || '',
+			title,
+			'canvas',
+			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+		);
 		if (target === file.path) return false;
-		if (this.app.vault.getAbstractFileByPath(target)) return false;
 		try {
 			await this.app.fileManager.renameFile(file, target);
 			await this.syncParentLinkedCardTitle(
@@ -53927,16 +59928,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						y: topic.y
 					}
 				: this.canvasViewportCenter(canvas);
-			void this.addDroppedFiles(canvas, files, position, topic);
+			this.runAsync(() => this.addDroppedFiles(canvas, files, position, topic), 'add dropped files');
 		};
 		input.addEventListener('change', handler);
 		input.click();
 	}
 	async addDroppedFiles(canvas, files, position, topic = null) {
+		if (!this.isMindmapCanvas(canvas)) return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
+		const MAX_FILES = 100;
+		const MAX_BYTES = 256 * 1024 * 1024;
+		const selected = Array.from(files || []).slice(0, MAX_FILES);
+		let totalBytes = 0;
+		for (const file of selected) totalBytes += Number(file?.size || 0);
+		if (totalBytes > MAX_BYTES) {
+			new import_obsidian5.Notice('The dropped media is too large to import safely');
+			return { ok: false, reason: 'file-byte-budget' };
+		}
 		const sourcePath = canvas.view?.file?.path || '';
 		const createdFiles = [];
 		let failures = 0;
-		const markdownPath = this.getMarkdownSyncPath(canvas.getData());
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const markdownPath = this.verifiedMarkdownLinks.get(canvas.view?.file?.path)?.path || '';
 		const queuedMarkdownApply = markdownPath
 			? this.markdownModifyTimers.get(markdownPath)
 			: void 0;
@@ -53946,123 +59958,81 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		this.localCanvasMutations.add(canvas);
 		try {
-			for (const file of files) {
+			for (const file of selected) {
 				try {
-					const attachmentPath =
-						await this.app.fileManager.getAvailablePathForAttachment(
-							file.name || 'Attachment',
-							sourcePath
-						);
+					const attachmentPath = await this.app.fileManager.getAvailablePathForAttachment(
+						file.name || 'Attachment',
+						sourcePath
+					);
 					const created = await this.app.vault.createBinary(
 						attachmentPath,
 						await file.arrayBuffer()
 					);
-					createdFiles.push({
-						file: created,
-						mimeType: file.type || ''
-					});
+					createdFiles.push({ file: created, mimeType: file.type || '' });
 				} catch (error) {
 					failures++;
-					console.error(
-						`ToMindMap: could not add dropped file "${file.name || 'Attachment'}"`,
-						error
-					);
+					console.error(`ToMindMap: could not add dropped file "${file.name || 'Attachment'}"`, error);
 				}
 			}
 			if (createdFiles.length === 0) {
 				new import_obsidian5.Notice('Could not add the dropped files');
-				return;
+				return { ok: false, reason: LINK_REASON.FAILED, failures };
 			}
 			const nodes = [];
 			let cursorY = topic ? topic.y : Number(position?.y) || 0;
-			const startX = topic
-				? topic.x + topic.width + this.settings.horizontalGap
-				: Number(position?.x) || 0;
-
+			const startX = topic ? topic.x + topic.width + this.settings.horizontalGap : Number(position?.x) || 0;
 			for (const { file, mimeType } of createdFiles) {
 				let id = genId();
 				while (canvas.nodes.has(id)) id = genId();
-				const nodeSpec = MediaDrop.createFileNodeSpec(
-					file.path,
-					mimeType,
-					{ x: startX, y: cursorY },
-					this.settings,
-					id
-				);
+				const nodeSpec = createFileNodeSpec(file.path, mimeType, { x: startX, y: cursorY }, this.settings, id);
+				if (!nodeSpec) throw new Error('Could not create a media card');
 				nodes.push(nodeSpec);
 				cursorY += nodeSpec.height + this.settings.verticalGap;
 			}
-
 			canvas.importData({ nodes, edges: [] });
+			if (nodes.some((spec) => !canvas.nodes.has(spec.id))) throw new Error('Canvas did not materialize imported media');
 			this.canvasApi.invalidateEdgeIndex();
-
 			if (topic) {
 				for (const spec of nodes) {
 					const childNode = canvas.nodes.get(spec.id);
 					if (childNode) this.connectTopics(canvas, topic, childNode);
 				}
 			} else {
-				this.attachNearbyOrphanMedia(
-					canvas,
-					nodes.map((node) => node.id)
-				);
+				this.attachNearbyOrphanMedia(canvas, nodes.map((node) => node.id));
 				const first = canvas.nodes.get(nodes[0].id);
-				if (first)
-					this.canvasApi.selectForNavigation(
-						canvas,
-						first,
-						this.settings.navigationZoomPadding
-					);
+				if (first) this.canvasApi.selectForNavigation(canvas, first, this.settings.navigationZoomPadding);
 			}
-			// This queues the newer Canvas state for Markdown before the mutation
-			// guard is released.
 			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
 			const added = createdFiles.length;
-			void this.flushCanvasToMarkdown(canvas);
-			new import_obsidian5.Notice(
-				`Added ${added} file${added === 1 ? '' : 's'} to the mind map${failures > 0 ? ` · ${failures} could not be read` : ''}`
-			);
+			new import_obsidian5.Notice(`Added ${added} file${added === 1 ? '' : 's'} to the mind map${failures > 0 ? ` · ${failures} could not be read` : ''}`);
+			return { ok: true, imported: added, failures };
+		} catch (error) {
+			try { canvas.setData(beforeData); } catch (_) {}
+			for (const { file } of createdFiles) {
+				try { await this.app.vault.delete(file); } catch (_) {}
+			}
+			new import_obsidian5.Notice('Could not add the dropped files');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
 		} finally {
 			this.localCanvasMutations.delete(canvas);
 		}
 	}
 	resolveDroppedVaultFile(value, sourcePath = '') {
-		const extracted = MediaDrop.extractFilePathFromUrl(value);
-		if (!extracted) return null;
+		const resource = decodeMediaResource(value, sourcePath);
+		if (!resource.ok || resource.type !== 'vault-file') return null;
 		const candidates = [];
 		const addCandidate = (candidate) => {
-			let normalized = String(candidate || '').trim();
-			if (!normalized) return;
-			try {
-				normalized = decodeURIComponent(normalized);
-			} catch (_) {}
-			normalized = normalized.replace(/\\/g, '/').replace(/^\.\/+/, '');
-			if (!candidates.includes(normalized)) candidates.push(normalized);
-			const withoutLeadingSlash = normalized.replace(/^\/+/, '');
-			if (
-				withoutLeadingSlash &&
-				!candidates.includes(withoutLeadingSlash)
-			)
-				candidates.push(withoutLeadingSlash);
+			const normalized = String(candidate || '')
+				.trim()
+				.replace(/\\/g, '/')
+				.replace(/^\/+/, '');
+			if (normalized && !candidates.includes(normalized))
+				candidates.push(normalized);
 		};
-		addCandidate(extracted);
-		if (String(value || '').startsWith('file:')) {
-			const basePath = this.app.vault.adapter?.getBasePath?.();
-			if (basePath) {
-				const normalizedBase = String(basePath)
-					.replace(/\\/g, '/')
-					.replace(/\/+$/, '');
-				const absolute = candidates[0] || '';
-				if (
-					absolute === normalizedBase ||
-					absolute.startsWith(`${normalizedBase}/`)
-				)
-					addCandidate(
-						absolute
-							.slice(normalizedBase.length)
-							.replace(/^\/+/, '')
-					);
-			}
+		addCandidate(resource.path);
+		if (!resource.protocol && resource.sourceDirectory) {
+			addCandidate(`${resource.sourceDirectory}/${resource.path}`);
 		}
 		for (const candidate of candidates) {
 			const direct = this.app.vault.getAbstractFileByPath(candidate);
@@ -54075,66 +60045,64 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const files = this.app.vault.getFiles?.() || [];
 		for (const candidate of candidates) {
-			const suffix = `/${candidate.replace(/^\/+/, '')}`;
-			const matches = files.filter((file) =>
-				`/${file.path}`.endsWith(suffix)
-			);
+			const suffix = `/${candidate}`;
+			const matches = files.filter((file) => `/${file.path}`.endsWith(suffix));
 			if (matches.length === 1) return matches[0];
 		}
 		return null;
 	}
-	addDroppedUrl(canvas, url, position, topic = null) {
-		let id = genId();
-		while (canvas.nodes.has(id)) id = genId();
-
-		const startX = topic
-			? topic.x + topic.width + this.settings.horizontalGap
-			: Number(position?.x) || 0;
-		const startY = topic ? topic.y : Number(position?.y) || 0;
-
+	async addDroppedUrl(canvas, url, position, topic = null) {
+		if (!this.isMindmapCanvas(canvas)) return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
+		const resource = decodeMediaResource(url, canvas.view?.file?.path || '');
+		if (!resource.ok) {
+			new import_obsidian5.Notice(`Could not read the dropped resource: ${resource.reason}`);
+			return { ok: false, reason: LINK_REASON.FAILED };
+		}
 		const sourcePath = canvas.view?.file?.path || '';
 		const vaultFile = this.resolveDroppedVaultFile(url, sourcePath);
-		const isPlainFilePath =
-			MediaDrop.extractFilePathFromUrl(url) &&
-			!/^[a-z][a-z0-9+.-]*:/i.test(String(url || '').trim());
-		if (isPlainFilePath && !vaultFile) {
-			new import_obsidian5.Notice(
-				`Could not resolve the dropped vault file: ${url}`
-			);
-			return;
+		if (resource.type === 'vault-file' && !vaultFile) {
+			new import_obsidian5.Notice(`Could not resolve the dropped vault file: ${url}`);
+			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
 		}
+		let id = genId();
+		while (canvas.nodes.has(id)) id = genId();
+		const startX = topic ? topic.x + topic.width + this.settings.horizontalGap : Number(position?.x) || 0;
+		const startY = topic ? topic.y : Number(position?.y) || 0;
 		const nodeSpec = vaultFile
-			? MediaDrop.createFileNodeSpec(
+			? createFileNodeSpec(
 					vaultFile.path,
-					vaultFile.extension
-						? `application/${vaultFile.extension}`
-						: '',
+					vaultFile.extension ? `application/${vaultFile.extension}` : '',
 					{ x: startX, y: startY },
 					this.settings,
 					id
 				)
-			: MediaDrop.createLinkNodeSpec(
-					url,
-					{ x: startX, y: startY },
-					this.settings,
-					id
-				);
-
-		canvas.importData({ nodes: [nodeSpec], edges: [] });
-		this.canvasApi.invalidateEdgeIndex();
-
-		const node = canvas.nodes.get(id);
-		if (topic && node) {
-			this.connectTopics(canvas, topic, node);
-		} else if (node) {
-			this.canvasApi.selectForNavigation(
-				canvas,
-				node,
-				this.settings.navigationZoomPadding
-			);
+			: createLinkNodeSpec(url, { x: startX, y: startY }, this.settings, id);
+		if (!nodeSpec) {
+			new import_obsidian5.Notice('Could not create a card for that resource');
+			return { ok: false, reason: LINK_REASON.FAILED };
 		}
-		canvas.requestSave();
-		new import_obsidian5.Notice('Added link to the mind map');
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		try {
+			canvas.importData({ nodes: [nodeSpec], edges: [] });
+			const node = canvas.nodes.get(id);
+			if (!node) throw new Error('Canvas did not materialize the resource card');
+			this.canvasApi.invalidateEdgeIndex();
+			if (topic) {
+				this.connectTopics(canvas, topic, node);
+				if (this.canvasApi.getParentNode(canvas, node)?.id !== topic.id)
+					throw new Error('The resource could not be connected to the selected topic');
+			} else {
+				this.canvasApi.selectForNavigation(canvas, node, this.settings.navigationZoomPadding);
+			}
+			canvas.requestSave();
+			await flushCanvasView(canvas, this.app.vault);
+			new import_obsidian5.Notice('Added link to the mind map');
+			return { ok: true, node };
+		} catch (error) {
+			try { canvas.setData(beforeData); } catch (_) {}
+			new import_obsidian5.Notice('Could not add the dropped resource');
+			return { ok: false, reason: LINK_REASON.FAILED, error };
+		}
 	}
 	connectTopics(canvas, parent, child) {
 		if (!parent || !child || parent === child) return;
@@ -54175,27 +60143,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 	}
 	mediaTargetExists(target, sourcePath) {
-		const cleanTarget = String(target || '')
-			.split('#')[0]
-			.split('?')[0]
-			.trim();
-		if (!cleanTarget) return true;
-		const resolved = this.app.metadataCache.getFirstLinkpathDest(
-			cleanTarget,
-			sourcePath
-		);
-		if (resolved) return true;
-		const sourceFolder = sourcePath.includes('/')
-			? sourcePath.slice(0, sourcePath.lastIndexOf('/'))
-			: '';
-		const relative = sourceFolder
-			? `${sourceFolder}/${cleanTarget}`
-			: cleanTarget;
-		const normalized =
-			typeof import_obsidian5.normalizePath === 'function'
-				? (0, import_obsidian5.normalizePath)(relative)
-				: relative.replace(/\\/g, '/').replace(/\/+/g, '/');
-		return !!this.app.vault.getAbstractFileByPath(normalized);
+		const resource = decodeMediaResource(target, sourcePath);
+		if (!resource.ok) return false;
+		if (resource.type !== 'vault-file') return true;
+		const candidates = [resource.path, resource.path.replace(/^\/+/, '')];
+		if (!resource.protocol && resource.sourceDirectory)
+			candidates.push(`${resource.sourceDirectory}/${resource.path}`);
+		for (const candidate of candidates) {
+			const resolved = this.app.metadataCache.getFirstLinkpathDest(
+				candidate,
+				sourcePath
+			);
+			if (resolved) return true;
+			const normalized =
+				typeof import_obsidian5.normalizePath === 'function'
+					? (0, import_obsidian5.normalizePath)(candidate)
+					: candidate.replace(/\\/g, '/').replace(/\/+/g, '/');
+			if (this.app.vault.getAbstractFileByPath(normalized)) return true;
+		}
+		return false;
 	}
 	async validateMediaLinks(canvas, nodes, showNotice) {
 		const sourcePath =
@@ -54209,7 +60175,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const markers = { ...previous };
 		let missingCount = 0;
 		for (const node of nodes) {
-			const targets = extractLocalMediaTargets(node.text || '');
+			const targets = MarkdownMindMapCodec.extractLocalMediaTargets(node.text || '')
+				.map((target) => decodeMediaResource(target, sourcePath))
+				.filter((resource) => resource.ok && resource.type === 'vault-file')
+				.map((resource) => resource.path);
 			const missing = targets.filter(
 				(target) => !this.mediaTargetExists(target, sourcePath)
 			);
@@ -54254,15 +60223,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: {};
 		for (const node of canvas.nodes.values()) {
 			if (!node.nodeEl) continue;
+			const previousMissing = node.nodeEl.getAttribute?.('data-tomindmap-missing-media');
 			node.nodeEl.removeClass('tomindmap-missing-media');
 			node.nodeEl.removeAttribute('data-tomindmap-missing-media');
+			if (previousMissing?.startsWith('Missing media: '))
+				node.nodeEl.removeAttribute('aria-label');
 			const missing = markers[node.id];
 			if (!Array.isArray(missing) || missing.length === 0) continue;
+			const description = `Missing: ${missing.join(', ')}`;
 			node.nodeEl.addClass('tomindmap-missing-media');
-			node.nodeEl.setAttribute(
-				'data-tomindmap-missing-media',
-				`Missing: ${missing.join(', ')}`
-			);
+			node.nodeEl.setAttribute('data-tomindmap-missing-media', description);
+			node.nodeEl.setAttribute('aria-label', `Missing media: ${missing.join(', ')}`);
 		}
 	}
 	async prepareCanvasForExport(canvas, includeNestedMaps = false) {
@@ -54271,12 +60242,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const cache = new Map();
 		const active = new Set([canvasPathFor(canvas)].filter(Boolean));
 		let sequence = 0;
+		const MAX_NESTED_DEPTH = 32;
+		const MAX_EXPORT_NODES = 20000;
+		const MAX_EXPORT_BYTES = 5 * 1024 * 1024;
+		const budget = { nodes: 0, bytes: 0 };
 		const filePathOf = (node) =>
 			String(node?.file || '')
 				.split('#')[0]
 				.split('?')[0];
 		const isNestedCard = (node) =>
-			node?.type === 'file' && /\.canvas$/i.test(filePathOf(node));
+			node?.type === 'file' &&
+			/\.canvas$/i.test(filePathOf(node)) &&
+			canvasNodeUnknownData(node)[TOMINMAP_CARD_KIND] === 'nested-map';
 		const nodeText = (node) => {
 			if (node?.type === 'group') return node.label || 'Group';
 			if (node?.type === 'file') {
@@ -54284,14 +60261,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const path = filePathOf(node);
 				return path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'File';
 			}
-			return getRootTitle(canvasNodeMarkdownText(node));
+			return MarkdownMindMapCodec.topicTitle(canvasNodeMarkdownText(node));
 		};
-		const rectOf = (node) => ({
-			x: Number(node.x) || 0,
-			y: Number(node.y) || 0,
-			width: Number(node.width) || 260,
-			height: Number(node.height) || 60
-		});
+		const rectOf = (node) => {
+			const x = Number(node?.x);
+			const y = Number(node?.y);
+			const width = Number(node?.width);
+			const height = Number(node?.height);
+			if (
+				![x, y, width, height].every(Number.isFinite) ||
+				width <= 0 || height <= 0 || width > 100000 || height > 100000
+			) throw new Error('Nested export geometry is invalid');
+			return { x, y, width, height };
+		};
 		const intersects = (left, right, gap = 42) =>
 			!(
 				left.x + left.width + gap <= right.x ||
@@ -54301,10 +60283,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		const groupBounds = (nodes) => {
 			const rects = nodes.map(rectOf);
-			const minX = Math.min(...rects.map((item) => item.x));
-			const minY = Math.min(...rects.map((item) => item.y));
-			const maxX = Math.max(...rects.map((item) => item.x + item.width));
-			const maxY = Math.max(...rects.map((item) => item.y + item.height));
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const item of rects) {
+				minX = Math.min(minX, item.x);
+				minY = Math.min(minY, item.y);
+				maxX = Math.max(maxX, item.x + item.width);
+				maxY = Math.max(maxY, item.y + item.height);
+			}
 			return {
 				x: minX,
 				y: minY,
@@ -54369,9 +60357,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						return candidate;
 				}
 			}
-			const occupiedBottom = occupied.length
-				? Math.max(...occupied.map((item) => item.y + item.height))
-				: rectOf(anchor).y;
+			let occupiedBottom = rectOf(anchor).y;
+			for (const item of occupied)
+				occupiedBottom = Math.max(occupiedBottom, item.y + item.height);
 			return translate(
 				base,
 				0,
@@ -54379,25 +60367,54 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		};
 		const loadCanvas = async (path) => {
-			if (!path || active.has(path)) return null;
+			if (!path || active.has(path) || !isCanonicalVaultPath(path) || !/\.canvas$/i.test(path))
+				return null;
 			if (cache.has(path)) return cache.get(path);
 			const file = this.app.vault.getAbstractFileByPath(path);
 			if (!(file instanceof import_obsidian5.TFile)) {
 				cache.set(path, null);
 				return null;
 			}
+			if (Number.isFinite(file.size) && file.size > MAX_EXPORT_BYTES) {
+				cache.set(path, null);
+				return null;
+			}
 			try {
-				const data = JSON.parse(await this.app.vault.cachedRead(file));
+				const raw = await this.app.vault.cachedRead(file);
+				const bytes = new TextEncoder().encode(raw).byteLength;
+				if (bytes > MAX_EXPORT_BYTES) {
+					cache.set(path, null);
+					return null;
+				}
+				budget.bytes += bytes;
+				if (budget.bytes > MAX_EXPORT_BYTES) throw new Error('Nested export byte budget exceeded');
+				const data = JSON.parse(raw);
+				if (!Array.isArray(data?.nodes) || !Array.isArray(data?.edges))
+					throw new Error('Nested Canvas schema is invalid');
 				cache.set(path, data);
 				return data;
 			} catch (error) {
+				if (/Nested export (?:byte|node|depth) budget exceeded/.test(String(error?.message || "")))
+					throw error;
 				console.warn(`ToMindMap: could not read nested map ${path}`, error);
 				cache.set(path, null);
 				return null;
 			}
 		};
-		const expandLevel = async (data, prefix, occupied, ancestry) => {
+		const expandLevel = async (
+			data,
+			prefix,
+			occupied,
+			ancestry,
+			ownerPath = canvasPathFor(canvas),
+			depth = 0
+		) => {
+			if (depth > MAX_NESTED_DEPTH)
+				throw new Error('Nested export depth budget exceeded');
 			const sourceNodes = Array.isArray(data?.nodes) ? data.nodes : [];
+			budget.nodes += sourceNodes.length;
+			if (budget.nodes > MAX_EXPORT_NODES)
+				throw new Error('Nested export node budget exceeded');
 			const nodes = sourceNodes.map((node) => ({
 				...node,
 				id: `${prefix}${node.id}`
@@ -54421,7 +60438,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!nestedCards.has(node.id)) continue;
 				const path = filePathOf(node);
 				const nested = await loadCanvas(path);
-				if (!nested || ancestry.has(path)) {
+				const parentLink = nested?.mindmapParent;
+				const ownedParent =
+					Boolean(parentLink) &&
+					parentLink.canvas === ownerPath &&
+					this.markdownOwnership
+						.recordsForCanvas(path)
+						.some(
+							(record) =>
+								record.kind === 'parent' &&
+								record.targetPath === ownerPath &&
+								record.nodeId === parentLink.nodeId &&
+								record.proof === parentLink.proof
+						);
+				if (!nested || !ownedParent || ancestry.has(path)) {
 					output.push(node);
 					occupiedHere.push(rectOf(node));
 					continue;
@@ -54431,7 +60461,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					nested,
 					childPrefix,
 					occupiedHere,
-					new Set([...ancestry, path])
+					new Set([...ancestry, path]),
+					path,
+					depth + 1
 				);
 				if (child.nodes.length === 0) {
 					output.push(node);
@@ -54458,18 +60490,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				for (const placedNode of placed) occupiedHere.push(rectOf(placedNode));
 				replacements.set(node.id, child.rootIds);
 			}
-			const mapEndpoint = (id) => replacements.get(id)?.[0] || id;
-			for (const edge of sourceEdges) {
-				const fromNode = mapEndpoint(`${prefix}${edge.fromNode}`);
-				const toNode = mapEndpoint(`${prefix}${edge.toNode}`);
+			const mapEndpoint = (id) => replacements.get(id) || [id];
+			for (const [edgeIndex, edge] of sourceEdges.entries()) {
+				const fromValues = mapEndpoint(`${prefix}${edge.fromNode}`);
+				const toValues = mapEndpoint(`${prefix}${edge.toNode}`);
 				if (!byId.has(`${prefix}${edge.fromNode}`) || !byId.has(`${prefix}${edge.toNode}`))
 					continue;
-				outputEdges.push({
-					...edge,
-					id: `${prefix}edge-${edge.id || `${sourceEdges.indexOf(edge)}`}`,
-					fromNode,
-					toNode
-				});
+				for (const fromNode of fromValues) {
+					for (const toNode of toValues) {
+						outputEdges.push({
+							...edge,
+							id: `${prefix}edge-${edge.id || edgeIndex}`,
+							fromNode,
+							toNode
+						});
+					}
+				}
 			}
 			const incoming = new Set(outputEdges.map((edge) => edge.toNode));
 			const rootIds = output
@@ -54484,10 +60520,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			};
 		};
 		const expanded = await expandLevel(sourceData, '', [], active);
-		const exportData = {
-			...sourceData,
+		const exportPlan = createExportPlan({
+			title: canvas.view?.file?.basename || 'Mind map',
 			nodes: expanded.nodes,
 			edges: expanded.edges
+		}, {
+			replacements: expanded.replacements,
+			strictEdges: false
+		});
+		const exportData = {
+			...sourceData,
+			nodes: exportPlan.topics,
+			edges: exportPlan.edges
 		};
 		const wrapperRect =
 			canvas.wrapperEl?.getBoundingClientRect?.() || {
@@ -54543,6 +60587,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			expanded.nodes.map((node) => [
 				node.id,
 				{
+					...node,
 					id: node.id,
 					x: Number(node.x) || 0,
 					y: Number(node.y) || 0,
@@ -54550,8 +60595,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					height: Number(node.height) || 60,
 					color: node.color || '',
 					text: nodeText(node),
+					unknownData: { ...(node.unknownData || {}) },
 					nodeEl: exportNodeElement(node),
 					contentEl: null
+				}
+			])
+		);
+		const syntheticEdges = new Map(
+			exportData.edges.map((edge) => [
+				edge.id,
+				{
+					...edge,
+					from: { node: syntheticNodes.get(edge.fromNode), side: edge.fromSide },
+					to: { node: syntheticNodes.get(edge.toNode), side: edge.toSide }
 				}
 			])
 		);
@@ -54560,7 +60616,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			view: canvas.view,
 			selection: exportSelection,
 			nodes: syntheticNodes,
-			edges: new Map(),
+			edges: syntheticEdges,
+			exportPlan,
 			getData: () => exportData
 		};
 	}
@@ -54583,32 +60640,38 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 			return;
 		}
-		const exportCanvas = await this.prepareCanvasForExport(
-			canvas,
-			request.includeNestedMaps
-		);
-		const base =
-			canvas.view && canvas.view.file
-				? canvas.view.file.basename
-				: 'Mind map';
-		const scopeName =
-			scope === 'whole'
-				? 'Whole map'
-				: scope === 'viewport'
-					? 'Viewport'
-					: 'Selection';
+		let exportCanvas;
+		let base;
+		let scopeName;
+		const rasterSession = createRasterExportSession();
 		try {
+			exportCanvas = await this.prepareCanvasForExport(
+				canvas,
+				request.includeNestedMaps
+			);
+			base =
+				canvas.view && canvas.view.file
+					? canvas.view.file.basename
+					: 'Mind map';
+			scopeName =
+				scope === 'whole'
+					? 'Whole map'
+					: scope === 'viewport'
+						? 'Viewport'
+						: 'Selection';
 			if (request.format === 'markdown') {
-				const markdown = portableMindMapMarkdown(exportCanvas);
-				const filename = await saveToDownloads(
-					base,
-					'Mind map',
-					'md',
-					markdown
-				);
-				new import_obsidian5.Notice(
-					`Saved Markdown to Downloads: ${filename}`
-				);
+				const encoded = this.encodeMarkdownDocument(exportCanvas, {
+					includeFrontmatter: false
+				});
+				if (!encoded.ok) throw new Error(encoded.reason);
+				const markdown = encoded.value.markdown;
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: 'Mind map',
+					extension: 'md',
+					content: markdown
+				});
+				new import_obsidian5.Notice(`Saved Markdown: ${filename}`);
 				return;
 			}
 			const html = canvasPrintDocument(exportCanvas, scope);
@@ -54621,15 +60684,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (request.format === 'svg') {
 				const svg = pdfSvgFromDocument(embedded, false);
 				if (!svg) throw new Error('Could not build SVG');
-				const filename = await saveToDownloads(
-					base,
-					scopeName,
-					'svg',
-					svg.svg
-				);
-				new import_obsidian5.Notice(
-					`Saved SVG to Downloads: ${filename}`
-				);
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: scopeName,
+					extension: 'svg',
+					content: svg.svg
+				});
+				new import_obsidian5.Notice(`Saved SVG: ${filename}`);
 				return;
 			}
 			if (request.format === 'png') {
@@ -54639,7 +60700,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!svg) throw new Error('Could not build image');
 				let bytes;
 				try {
-					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png');
+					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png', {
+						session: rasterSession
+					});
 				} catch (error) {
 					console.warn(
 						'ToMindMap: rich image rendering failed; using portable text SVG',
@@ -54647,17 +60710,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					);
 					svg = pdfSvgFromDocument(embedded, true);
 					if (!svg) throw error;
-					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png');
+					bytes = await rasterizeSvg(svg, ownerDocument, 'image/png', {
+						session: rasterSession
+					});
 				}
-				const filename = await saveToDownloads(
-					base,
-					scopeName,
-					'png',
-					bytes
-				);
-				new import_obsidian5.Notice(
-					`Saved PNG to Downloads: ${filename}`
-				);
+				const filename = await this.deliverExport({
+					baseName: base,
+					suffix: scopeName,
+					extension: 'png',
+					content: bytes
+				});
+				new import_obsidian5.Notice(`Saved PNG: ${filename}`);
 			}
 		} catch (error) {
 			console.error('ToMindMap: export failed', error);
@@ -54667,20 +60730,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 	async exportMindMapPdf(canvas, scope, includeNestedMaps = false) {
-		const exportCanvas = await this.prepareCanvasForExport(
-			canvas,
-			includeNestedMaps
-		);
-		const html = canvasPrintDocument(exportCanvas, scope);
-		if (!html) {
-			new import_obsidian5.Notice(
-				scope === 'selection'
-					? 'Select at least one card to export'
-					: 'Nothing is available in that export area'
-			);
-			return;
-		}
 		try {
+			const exportCanvas = await this.prepareCanvasForExport(
+				canvas,
+				includeNestedMaps
+			);
+			const html = canvasPrintDocument(exportCanvas, scope);
+			if (!html) {
+				new import_obsidian5.Notice(
+					scope === 'selection'
+						? 'Select at least one card to export'
+						: 'Nothing is available in that export area'
+				);
+				return;
+			}
 			const embedded = await embedDocumentAssets(
 				html,
 				this.exportAssetResolvers()
@@ -54704,8 +60767,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					: scope === 'viewport'
 						? 'Viewport'
 						: 'Selection';
-			const filename = await saveToDownloads(base, scopeName, 'pdf', pdf);
-			new import_obsidian5.Notice(`Saved PDF to Downloads: ${filename}`);
+			const filename = await this.deliverExport({
+				baseName: base,
+				suffix: scopeName,
+				extension: 'pdf',
+				content: pdf
+			});
+			new import_obsidian5.Notice(`Saved PDF: ${filename}`);
 		} catch (error) {
 			console.error('ToMindMap: PDF export failed', error);
 			const detail = error instanceof Error ? `: ${error.message}` : '';
@@ -54713,40 +60781,72 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 	/**
-	 * Resolvers that let the export pipeline inline every image and attachment
-	 * referenced by the cards, so PDFs, SVGs, and PNGs match the live canvas.
+	 * Vault assets are the default. HTTPS assets are reachable only after the
+	 * user explicitly approves their exact origin, and local file URLs are
+	 * never given an implicit filesystem reader.
 	 */
 	exportAssetResolvers() {
 		const vault = this.app.vault;
-		return {
-			readVaultFile: async (path) => {
-				const file = vault.getAbstractFileByPath(path);
-				if (!(file instanceof import_obsidian5.TFile)) return null;
-				try {
-					const buffer = await vault.adapter.readBinary(file.path);
-					return buffer;
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not read "${path}" for export`,
-						error
-					);
-					return null;
-				}
-			},
-			fetchUrl: async (url) => {
-				try {
-					const response = await fetch(url);
-					if (!response.ok) return null;
-					return new Uint8Array(await response.arrayBuffer());
-				} catch (error) {
-					console.warn(
-						`ToMindMap: could not fetch "${url}" for export`,
-						error
-					);
-					return null;
-				}
+		const readVaultFile = async (path) => {
+			const file = vault.getAbstractFileByPath(path);
+			if (!(file instanceof import_obsidian5.TFile)) return null;
+			try {
+				if (typeof vault.readBinary === 'function')
+					return await vault.readBinary(file);
+				if (typeof vault.adapter?.readBinary === 'function')
+					return await vault.adapter.readBinary(file.path);
+				return null;
+			} catch (error) {
+				console.warn(`ToMindMap: could not read "${path}" for export`, error);
+				return null;
 			}
 		};
+		return {
+			assetResolver: createExportAssetResolver({ readVaultFile })
+		};
+	}
+	/**
+	 * Obsidian's platform flag, not loader syntax, selects export delivery.
+	 * Desktop writes with exclusive filesystem creation; mobile uses the
+	 * browser download adapter when those capabilities are present.
+	 */
+	exportDeliveryCapabilities() {
+		const platform = import_obsidian5.Platform || {};
+		const ownerWindow = typeof window === 'undefined' ? null : window;
+		const ownerDocument = ownerWindow?.document || globalThis.document || null;
+		let filesystem = null;
+		if (platform.isDesktopApp === true && typeof require === 'function') {
+			try {
+				const fs = require('fs');
+				const path = require('path');
+				const os = require('os');
+				fsystem = {
+					fs,
+					path,
+					directory: path.join(os.homedir(), 'Downloads')
+				};
+			} catch (_) {
+				filesystem = null;
+			}
+		}
+		const canDownloadFiles = Boolean(
+			ownerWindow &&
+			typeof ownerWindow.Blob === 'function' &&
+			ownerWindow.URL?.createObjectURL &&
+			ownerWindow.URL?.revokeObjectURL &&
+			ownerDocument?.createElement &&
+			ownerDocument?.body?.appendChild
+		);
+		return {
+			canWriteDownloads: Boolean(filesystem),
+			canDownloadFiles,
+			filesystem,
+			browser: { window: ownerWindow, document: ownerDocument },
+			maxOutputBytes: 64 * 1024 * 1024
+		};
+	}
+	deliverExport(request) {
+		return createExportDelivery(this.exportDeliveryCapabilities()).deliver(request);
 	}
 	/**
 	 * Import a FreeMind .mm file and create a .canvas file.
@@ -54762,64 +60862,221 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const file = (_a = input.files) == null ? void 0 : _a[0];
 			if (!file) return;
 			void (async () => {
-				const xml = await file.text();
-				const canvasData = freemindToCanvas(xml, {
-					nodeWidth: this.settings.defaultNodeWidth,
-					nodeHeight: this.settings.defaultNodeHeight,
-					maxNodeHeight: this.settings.maxNodeHeight,
-					horizontalGap: this.settings.horizontalGap,
-					verticalGap: this.settings.verticalGap
-				});
-				if (!canvasData) {
-					new import_obsidian5.Notice(
-						'Failed to parse .mm file. Make sure it is a valid mind map file.'
+				let created = null;
+				let canvasPath = '';
+				try {
+					const xml = await file.text();
+					const decoded = decodeFreeMind(xml, {
+						budgets: DEFAULT_FREEMIND_BUDGETS,
+						nodeWidth: this.settings.defaultNodeWidth,
+						nodeHeight: this.settings.defaultNodeHeight,
+						maxNodeHeight: this.settings.maxNodeHeight,
+						horizontalGap: this.settings.horizontalGap,
+						verticalGap: this.settings.verticalGap
+					});
+					if (!decoded.ok) {
+						const detail = decoded.reason === FREEMIND_REASON.EXTERNAL_ENTITY
+							? 'external entities are not allowed'
+							: decoded.reason;
+						new import_obsidian5.Notice(`Could not import the FreeMind file: ${detail}`);
+						return;
+					}
+					const { roots, nodeCount, maxDepth, ...canvasData } = decoded.value;
+					canvasData.mindmap = true;
+					canvasData.mindmapPendingResize = canvasData.nodes.map((node) => node.id);
+					const baseName = file.name.replace(/\.mm$/i, '') || 'Mind map';
+					canvasPath = allocateFilePath(
+						folderPath || '',
+						baseName,
+						'canvas',
+						(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
 					);
-					return;
-				}
-				const baseName = file.name.replace(/\.mm$/i, '');
-				const folder = folderPath ? folderPath + '/' : '';
-				let canvasPath = `${folder}${baseName}.canvas`;
-				let counter = 1;
-				while (this.app.vault.getAbstractFileByPath(canvasPath)) {
-					canvasPath = `${folder}${baseName} ${counter}.canvas`;
-					counter++;
-				}
-				await this.app.vault.create(
-					canvasPath,
-					JSON.stringify(canvasData, null, '	')
-				);
-				const created =
-					this.app.vault.getAbstractFileByPath(canvasPath);
-				if (created instanceof import_obsidian5.TFile) {
+					created = await this.app.vault.create(
+						canvasPath,
+						JSON.stringify(canvasData, null, '\t')
+					);
 					await this.app.workspace.getLeaf(false).openFile(created);
+					new import_obsidian5.Notice(
+						`Imported "${file.name}" as "${created.path}"`
+					);
+				} catch (error) {
+					if (created) {
+						try { await this.app.vault.delete(created); } catch (_) {}
+					}
+					console.error('ToMindMap: FreeMind import failed', error);
+					new import_obsidian5.Notice('Could not import the FreeMind file');
 				}
-				new import_obsidian5.Notice(
-					`Imported "${file.name}" as "${canvasPath}"`
-				);
 			})();
 		};
 		input.addEventListener('change', handler);
 		input.click();
 	}
 	isMindmapCanvas(canvas) {
-		const data = canvas.getData();
-		if (typeof data.mindmap === 'boolean') return data.mindmap;
-		return this.settings.defaultMindmapMode;
+		try {
+			if (!canvas || typeof canvas.getData !== 'function') return false;
+			const data = canvas.getData();
+			if (!data || typeof data !== 'object') return false;
+			if (typeof data.mindmap === 'boolean') return data.mindmap;
+			return this.settings.defaultMindmapMode;
+		} catch (_) {
+			return false;
+		}
 	}
 	isAutoAdjustCanvas(canvas) {
 		return this.isMindmapCanvas(canvas);
 	}
+	runMindMapAction(name, canvas, action, ...args) {
+		if (!canvas || !this.isMindmapCanvas(canvas) || typeof action !== 'function')
+			return { ok: false, reason: 'ineligible' };
+		try {
+			return { ok: true, value: action(...args) };
+		} catch (error) {
+			console.error(`ToMindMap: ${name} failed`, error);
+			new import_obsidian5.Notice(`Could not ${name}`);
+			return { ok: false, reason: 'failed', error };
+		}
+	}
+	createMindMapActionSurface(canvas) {
+		const surface = {};
+		for (const name of [
+			'startEditing',
+			'addChild',
+			'addSibling',
+			'addParent',
+			'reorderTopic',
+			'deleteBranch',
+			'deleteSingleTopic'
+		]) {
+			surface[name] = (...args) =>
+				this.runMindMapAction(
+					name,
+					canvas,
+					this.keyboardHandler[name]?.bind(this.keyboardHandler),
+					...args
+				).value;
+		}
+		return surface;
+	}
+	captureCanvasDecorations(canvas) {
+		if (!canvas || this.canvasDecorationState.has(canvas)) return;
+		const classes = [
+			'tomindmap-collapsed-hidden',
+			'tomindmap-collapsed-node',
+			'tomindmap-navigation-selected',
+			'mindmap-group-animating',
+			'tomindmap-media-dragging',
+			'tomindmap-plain-card',
+			'tomindmap-resizable-content',
+			ROOT_TOPIC_CLASS,
+			'tomindmap-title-only-card',
+			'tomindmap-file-card',
+			'tomindmap-missing-media'
+		];
+		const attributes = [
+			'data-node-type',
+			'data-tomindmap-card-title',
+			'data-tomindmap-card-kind',
+			'data-tomindmap-missing-media',
+			'aria-label'
+		];
+		const elements = new Map();
+		const remember = (element) => {
+			if (!element || elements.has(element)) return;
+			elements.set(element, {
+				classes: Object.fromEntries(
+					classes.map((name) => [name, Boolean(element.hasClass?.(name))])
+				),
+				attributes: Object.fromEntries(
+					attributes.map((name) => [name, element.getAttribute?.(name) ?? null])
+				)
+			});
+		};
+		for (const node of canvas.nodes?.values?.() || []) {
+			const nodeElement = node.nodeEl;
+			const shell = nodeElement?.matches?.('.canvas-node')
+				? nodeElement
+				: nodeElement?.closest?.('.canvas-node') || nodeElement?.querySelector?.('.canvas-node') || nodeElement;
+			remember(nodeElement);
+			remember(node.containerEl);
+			remember(shell);
+			let controlsOwner = shell;
+			let ancestor = shell?.parentElement || null;
+			const selected = canvas.selection?.has?.(node) || canvas.selection?.has?.(node.id);
+			for (
+				let depth = 0;
+				selected && ancestor && ancestor !== canvas.wrapperEl && depth < 4;
+				depth++
+			) {
+				const ownsResizeControl = Array.from(ancestor.children || []).some((child) =>
+					child.matches?.(
+						".canvas-node-resizer, .canvas-node-resizers, .canvas-node-resize-handle, [class*='resizer']"
+					)
+				);
+				if (ownsResizeControl) {
+					controlsOwner = ancestor;
+					break;
+				}
+				ancestor = ancestor.parentElement;
+			}
+			remember(controlsOwner);
+			for (const resizer of controlsOwner?.querySelectorAll?.(
+				".canvas-node-resizer, .canvas-node-resizers, .canvas-node-resize-handle, [class*='resizer']"
+			) || []) remember(resizer);
+		}
+		const edgeStyles = [];
+		for (const edge of canvas.edges?.values?.() || []) {
+			for (const element of [
+				edge.lineGroupEl,
+				edge.lineEndGroupEl,
+				edge.el,
+				edge.edgeEl
+			]) {
+				if (!element?.style) continue;
+				edgeStyles.push([element, element.style.display ?? '']);
+			}
+		}
+		this.canvasDecorationState.set(canvas, { elements, edgeStyles });
+	}
+	disposeCanvasDecorations(canvas) {
+		const state = this.canvasDecorationState.get(canvas);
+		if (!state) return false;
+		for (const [element, snapshot] of state.elements) {
+			for (const [name, enabled] of Object.entries(snapshot.classes))
+				element.toggleClass?.(name, enabled);
+			for (const [name, value] of Object.entries(snapshot.attributes)) {
+				if (value === null) element.removeAttribute?.(name);
+				else element.setAttribute?.(name, value);
+			}
+		}
+		for (const [element, display] of state.edgeStyles)
+			element.style.display = display;
+		this.canvasDecorationState.delete(canvas);
+		return true;
+	}
+	finishCanvasGesture(reason = 'cancel') {
+		for (const owner of this.canvasGestureOwners) owner.finish(reason);
+	}
+	disposeCanvasGestures(reason = 'teardown') {
+		this.finishCanvasGesture(reason);
+		for (const owner of this.canvasGestureOwners) owner.dispose(reason);
+		this.canvasGestureOwners.clear();
+		this.cleanupNodeDragReparentHandler = null;
+		this.cleanupGroupDragHandler = null;
+	}
 	toggleMindmapMode(canvas) {
 		const data = canvas.getData();
 		const newValue = !this.isMindmapCanvas(canvas);
+		this.finishCanvasGesture(newValue ? 'mode-enable' : 'mode-disable');
 		data.mindmap = newValue;
 		delete data.mindmapAutoAdjust;
 		canvas.setData(data);
-		canvas.requestSave();
-		if (newValue && this.settings.autoColor) {
-			this.branchColors.applyColors(canvas);
-		}
 		if (newValue) {
+			this.captureCanvasDecorations(canvas);
+			MindmapActions.syncCollapsedVisibility(canvas);
+			this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
+			this.updateNodeTypeAttributes(canvas);
+			this.layoutEngine.layout(canvas, { preserveRootSides: true });
+			if (this.settings.autoColor) this.branchColors.applyColors(canvas);
 			const groupIds = getGroupIds(canvas);
 			this.resizeNodesWhenRendered(
 				canvas,
@@ -54827,85 +61084,52 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					(node) => !groupIds.has(node.id)
 				)
 			);
-		}
-		if (newValue) {
 			this.refreshOutline(canvas);
 		} else {
-			this.liveSizing.stopWatchingCanvas();
-			for (const node of canvas.nodes.values()) {
-				var _a;
-				(_a = node.nodeEl) == null
-					? void 0
-					: _a.removeClass('tomindmap-navigation-selected');
+			this.liveSizing.cancelQueue(canvas);
+			this.liveSizing.stopWatchingCanvas(canvas);
+			this.syncCanvasBindings(canvas);
+			this.disposeCanvasDecorations(canvas);
+			for (const leaf of this.app.workspace.getLeavesOfType(OUTLINE_VIEW_TYPE)) {
+				if (leaf.view instanceof OutlineView)
+					leaf.view.showUnavailable('Mind-map mode is off for this canvas', canvas);
 			}
-			this.hideOutline();
 		}
+		canvas.requestSave();
+		this.syncCanvasBindings(canvas);
 		this.updateToggleButton(canvas);
 	}
 	injectToggleButton(canvas) {
-		if (this.cleanupToggleHandler) {
-			this.cleanupToggleHandler();
-			this.cleanupToggleHandler = null;
-		}
-		if (this.toggleBtnEl) {
-			this.toggleBtnEl.remove();
-			this.toggleBtnEl = null;
-		}
-		if (this.mediaBtnEl) {
-			this.mediaBtnEl.remove();
-			this.mediaBtnEl = null;
-		}
-		if (canvas.wrapperEl)
-			canvas.wrapperEl.toggleClass(
-				'tomindmap-mindmap-mode',
-				this.isMindmapCanvas(canvas)
-			);
-		const controls =
-			canvas.view.containerEl.querySelector('.canvas-controls');
+		this.cleanupToggleHandler?.();
+		this.cleanupToggleHandler = null;
+		this.toggleBtnEl?.remove();
+		this.toggleBtnEl = null;
+		canvas.wrapperEl?.toggleClass(
+			'tomindmap-mindmap-mode',
+			this.isMindmapCanvas(canvas)
+		);
+		const container = canvas.view.containerEl;
+		const controls = container.querySelector('.canvas-controls');
 		if (!controls) return;
 		const ownerDocument = controls.ownerDocument || document;
-		const btn = ownerDocument.createElement('div');
-		btn.addClass('tomindmap-toggle-btn', 'clickable-icon');
-		btn.setAttribute('aria-label', 'Toggle mindmap mode');
-		const container = canvas.view.containerEl;
-		let suppressClick = false;
-		const toggleFromEvent = (e) => {
-			const target = e.target;
-			if (!target?.closest?.('.tomindmap-toggle-btn')) return;
-			e.preventDefault();
-			e.stopImmediatePropagation();
+		const button = ownerDocument.createElement('button');
+		button.type = 'button';
+		button.addClass('tomindmap-toggle-btn', 'clickable-icon');
+		button.setAttribute('aria-label', 'Toggle mindmap mode');
+		button.setAttribute('aria-pressed', String(this.isMindmapCanvas(canvas)));
+		const onToggleClick = (event) => {
+			if (event.defaultPrevented) return;
+			if (event.button !== undefined && event.button !== 0) return;
+			if (!event.target?.closest?.('.tomindmap-toggle-btn')) return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
 			this.toggleMindmapMode(canvas);
 		};
-		const onTogglePointerDown = (event) => {
-			if (!event.target?.closest?.('.tomindmap-toggle-btn')) return;
-			suppressClick = true;
-			toggleFromEvent(event);
-		};
-		const onToggleClick = (event) => {
-			const isToggleClick = !!event.target?.closest?.(
-				'.tomindmap-toggle-btn'
-			);
-			if (suppressClick && isToggleClick) {
-				suppressClick = false;
-				event.preventDefault();
-				event.stopImmediatePropagation();
-				return;
-			}
-			if (!isToggleClick) return;
-			toggleFromEvent(event);
-		};
-		container.addEventListener('pointerdown', onTogglePointerDown, true);
 		container.addEventListener('click', onToggleClick, true);
-		this.cleanupToggleHandler = () => {
-			container.removeEventListener(
-				'pointerdown',
-				onTogglePointerDown,
-				true
-			);
+		this.cleanupToggleHandler = () =>
 			container.removeEventListener('click', onToggleClick, true);
-		};
-		controls.prepend(btn);
-		this.toggleBtnEl = btn;
+		controls.prepend(button);
+		this.toggleBtnEl = button;
 		this.updateToggleButton(canvas);
 	}
 	updateToggleButton(canvas) {
@@ -54922,12 +61146,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			isActive ? 'network' : 'layout-dashboard'
 		);
 		this.toggleBtnEl.toggleClass('is-active', isActive);
+		this.toggleBtnEl.setAttribute('aria-pressed', String(isActive));
 		this.toggleBtnEl.setAttribute(
 			'aria-label',
 			isActive
 				? 'Mindmap mode: Enter sibling · Tab child · Type to edit'
 				: 'Mindmap mode (inactive)'
 		);
+	}
+	selectAndEditTracked(canvas, node, padding) {
+		if (!canvas || !node) return;
+		this.canvasApi.selectAndZoom?.(canvas, node, padding);
+		this.trackedTimeout(() => {
+			if (
+				this.unloaded ||
+				this.interceptedCanvas !== canvas ||
+				!canvas.nodes?.has?.(node.id) ||
+				canvas.nodes.get(node.id) !== node
+			)
+				return;
+			node.nodeEl?.removeClass?.('tomindmap-navigation-selected');
+			node.startEditing?.();
+		}, 50);
 	}
 	/** Schedule a setTimeout that is automatically cancelled on unload/canvas switch. */
 	trackedTimeout(callback, ms) {
@@ -54936,6 +61176,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			callback();
 		}, ms);
 		this.pendingTimers.add(id);
+		return id;
 	}
 	/** Schedule a requestAnimationFrame that is automatically cancelled on cleanup. */
 	trackedRaf(callback) {
@@ -54944,14 +61185,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			callback();
 		});
 		this.pendingRafs.add(id);
+		return id;
 	}
 	/** Cancel all pending tracked timers, RAFs, and observers. */
-	cancelPendingAsync() {
+	cancelPendingAsync(canvas = this.interceptedCanvas) {
 		if (this.liveSizing) {
-			this.liveSizing.cancelQueue();
-			this.liveSizing.stopWatchingCanvas();
+			this.liveSizing.cancelQueue(canvas);
+			this.liveSizing.stopWatchingCanvas(canvas);
 		}
-		if (this.renderResizeQueueCleanup) this.renderResizeQueueCleanup();
 		for (const id of this.pendingTimers) clearTimeout(id);
 		this.pendingTimers.clear();
 		for (const id of this.pendingRafs) cancelAnimationFrame(id);
@@ -55000,20 +61241,51 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.interceptedCanvas = null;
 		this.origCanvasMethods = {};
 	}
+	runAsync(task, label = 'async action') {
+		Promise.resolve()
+			.then(() => task())
+			.catch((error) => {
+				console.error(`ToMindMap: ${label} failed`, error);
+				new import_obsidian5.Notice(`${label} failed`);
+			});
+	}
+	pluginData() {
+		return {
+			schema: 'tomindmap.plugin-data',
+			version: 1,
+			settings: this.settings,
+			ownership: this.markdownOwnership.toJSON()
+		};
+	}
+	persistPluginData(extra = {}) {
+		if (this.unloaded) return Promise.resolve(false);
+		const payload = { ...this.pluginData(), ...extra };
+		const write = this.persistenceQueue
+			.catch(() => {})
+			.then(() => {
+				if (this.unloaded) return false;
+				return this.saveData(payload);
+			});
+		this.persistenceQueue = write.catch(() => {});
+		return write;
+	}
 	async loadSettings() {
 		const stored = (await this.loadData()) || {};
-		const migrated = { ...stored };
-		if (migrated.maxNodeWidth === 420)
-			migrated.maxNodeWidth = DEFAULT_SETTINGS.maxNodeWidth;
-		if (migrated.maxNodeHeight === 300)
-			migrated.maxNodeHeight = DEFAULT_SETTINGS.maxNodeHeight;
-		this.settings = normalizeSettings(migrated);
-		if (JSON.stringify(this.settings) !== JSON.stringify(stored))
-			await this.saveData(this.settings);
+		const settings = stored.settings && typeof stored.settings === 'object'
+			? stored.settings
+			: stored;
+		this.settings = normalizeSettings(settings);
+		const loadedOwnership = loadMarkdownSyncOwnership(
+			stored.ownership || stored.markdownSyncOwnership || stored.tomindmapMarkdownSyncOwnership
+		);
+		if (loadedOwnership?.isValid()) this.markdownOwnership = loadedOwnership;
+		if (stored.schema !== 'tomindmap.plugin-data' || !loadedOwnership?.isValid() ||
+			JSON.stringify(this.settings) !== JSON.stringify(settings))
+			await this.persistPluginData();
 	}
 	async saveSettings() {
 		this.settings = normalizeSettings(this.settings);
-		await this.saveData(this.settings);
+		await this.persistPluginData();
 		this.layoutEngine = new LayoutEngine({
 			horizontalGap: this.settings.horizontalGap,
 			verticalGap: this.settings.verticalGap,
@@ -55036,5 +61308,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.keyboardHandler.zoomPadding =
 				this.settings.navigationZoomPadding;
 		}
+		this.syncCanvasBindings(this.interceptedCanvas);
 	}
 };

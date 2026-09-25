@@ -1,15 +1,17 @@
 {
   "name": "tomindmap",
-  "version": "0.12.5",
+  "version": "0.13.0",
   "private": true,
-  "description": "Keyboard-first mind mapping for Obsidian Canvas",
+  "description": "Keyboard and touch mind mapping for Obsidian Canvas",
   "scripts": {
     "build": "npm run build:vector-pdf && node scripts/inline-runtime-modules.js",
     "build:vector-pdf": "esbuild lib/vector-pdf-entry.js --bundle --platform=browser --format=cjs --target=chrome120 --outfile=lib/vector-pdf-bundle.js",
+    "build:vector-pdf:check": "node scripts/verify-vector-pdf.js --check",
+    "verify:vector-pdf": "node scripts/verify-vector-pdf.js",
     "source:extract": "node scripts/extract-main-source.js",
     "build:check": "node scripts/inline-runtime-modules.js --check",
     "test": "node --test tests/*.test.js",
-    "check": "npm run build:check && npm test && node --check main.js && node test-load.js"
+    "check": "npm run build:check && npm run build:vector-pdf:check && npm test && node --check main.js && node test-load.js"
   },
   "engines": {
     "node": ">=20"
@@ -21,6 +23,6 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
-    "puppeteer-core": "^25.10.0"
+    "puppeteer-core": "^25.12.0"
   }
 }

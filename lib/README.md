@@ -1,21 +1,49 @@
 # Runtime modules
 
-These files are the maintainable source modules for focused runtime services:
+These files are the maintainable source modules for focused runtime services.
 
-- `tree-model.js` — deterministic, cycle-safe forest construction and iterative tree traversal.
-- `canvas-api.js` — Canvas selection, graph indexing, node/edge mutation, and camera helpers.
-- `node-operations.js` — keyboard-oriented topic creation, deletion, flipping, and collision avoidance.
-- `layout.js` — edge-side updates, branch coloring, and compact two-sided tree layout.
-- `keyboard-navigation.js` — command registration, editing lifecycle, spatial navigation, and history.
-- `freemind.js` — FreeMind XML parsing and deterministic Canvas placement.
-- `live-sizing.js` — deterministic first-pass sizing followed by measurements from the real Canvas preview. It owns the single batched observer used for virtualized cards.
-- `markdown-order.js` — visual topic chronology and lossless movement of existing Markdown source subtrees.
-- `media-drop.js` — dropped file/URL classification and native Canvas card sizing.
-- `canvas-session.js` — whole-map drag reflow and native Canvas save flushing across leaf changes.
-- `settings.js` — immutable defaults plus persisted-settings normalization.
-- `export.js` — the export chooser, rasterization, and collision-free Downloads filenames.
+## Compiler provenance
 
-Modules use explicit CommonJS imports for source development. The build replaces registered local module imports with references to the embedded runtime blocks, keeping the release bundle self-contained without maintaining a second implementation.
+`scripts/runtime-modules.js` is the single registry for embedded runtime
+module names, source paths, bindings, and local dependencies. The compiler
+derives both the generated `require` and declaration forms from each record;
+`scripts/inline-runtime-modules.js` embeds the source and
+`scripts/extract-main-source.js` reverses the marked blocks using those same
+records. Generated IIFEs carry their own strict-mode directive, and registered
+local dependencies are compiled into the surrounding runtime rather than left
+as relative `require()` calls.
+
+The current embedded source records are generated from that registry. The
+release check regenerates and compares this marked block, so adding or removing
+a runtime record cannot leave a stale hand-maintained inventory:
+
+<!-- BEGIN runtime-module-inventory -->
+- `tree-model` — `lib/tree-model.js`
+- `path-safety` — `lib/path-safety.js`
+- `settings` — `lib/settings.js`
+- `media-drop` — `lib/media-drop.js`
+- `live-sizing` — `lib/live-sizing.js`
+- `markdown-order` — `lib/markdown-order.js`
+- `clipboard-markdown` — `lib/clipboard-markdown.js`
+- `vector-pdf` — `lib/vector-pdf-bundle.js` (generated from `lib/vector-pdf-entry.js`; the entry file is not separately embedded)
+- `export` — `lib/export.js`
+- `tree-drag` — `lib/tree-drag.js`
+- `mindmap-actions` — `lib/mindmap-actions.js`
+- `drag-preview-controller` — `lib/drag-preview-controller.js`
+- `canvas-session` — `lib/canvas-session.js`
+- `canvas-api` — `lib/canvas-api.js`
+- `node-operations` — `lib/node-operations.js`
+- `layout` — `lib/layout.js`
+- `keyboard-navigation` — `lib/keyboard-navigation.js`
+- `freemind` — `lib/freemind.js`
+- `markdown-codec` — `lib/markdown-codec.js`
+- `markdown-sync` — `lib/markdown-sync.js`
+- `touch-controls` — `lib/touch-controls.js`
+<!-- END runtime-module-inventory -->
+
+The registry, rather than a second hand-maintained import list, is the source
+of truth for compiler provenance. Do not edit generated `main.js` or the
+vector bundle directly.
 
 Development commands:
 
@@ -23,9 +51,9 @@ Development commands:
 npm test
 npm run build
 npm run check
+node scripts/release-artifacts.js runtime-inventory --check
 ```
 
 Edit `src/main.js` and `lib/`; do not edit generated `main.js` directly.
-`scripts/runtime-modules.js` registers every embedded module, and
-`scripts/inline-runtime-modules.js` generates the bundle. Obsidian
-installations use only `main.js`, `manifest.json`, and `styles.css`.
+Obsidian runtime installation uses `main.js`, `manifest.json`, and `styles.css`;
+release archives additionally carry the project license and generated notices.

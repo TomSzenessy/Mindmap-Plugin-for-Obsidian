@@ -4,3 +4,8 @@ node_modules/
 main.js.map
 output/
 tmp/
+data.json
+.security/findings.json
+.security/validated-findings.json
+.security/report.md
+.security/reports/

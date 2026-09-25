@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  createApprovedPublicHttpsAssetResolver,
   embedDocumentAssets,
   paginatedPdfDocument,
   renderHtmlAsVectorPdf,
@@ -13,6 +14,22 @@ const {
   vectorPdfPageSize,
   visibleCardPaint
 } = require("../lib/export.js");
+
+function streamedBytes(bytes) {
+  let sent = false;
+  return {
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (sent) return { done: true };
+          sent = true;
+          return { done: false, value: new Uint8Array(bytes) };
+        }
+      })
+    }
+  };
+}
 
 test("creates portable, non-empty export filenames", () => {
   assert.equal(safeBaseName('  Roadmap: Q3/Q4?  '), "Roadmap- Q3-Q4-");
@@ -133,12 +150,15 @@ test("inlines vault images and styles so exports match the canvas", async () => 
       return null;
     },
     readExternalFile: async () => new Uint8Array([6, 7, 8]),
-    fetchUrl: async () => new Uint8Array([9])
+    resolveRemoteAsset: createApprovedPublicHttpsAssetResolver({
+      isApproved: () => true,
+      fetch: async () => streamedBytes([9])
+    })
   });
   assert.match(embedded, /src="data:image\/png;base64,AQID"/);
   assert.match(embedded, /src="data:image\/webp;base64,BAU="/);
   assert.match(embedded, /background:url\('data:image\/jpeg;base64,BgcI'\)/);
-  assert.match(embedded, /src="data:image\/svg\+xml;base64,CQ=="/);
+  assert.doesNotMatch(embedded, /data:image\/svg\+xml/);
   assert.match(embedded, /src="data:image\/png;base64,AAAA"/);
 });
 

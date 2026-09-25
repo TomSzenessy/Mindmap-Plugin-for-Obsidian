@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - '[0-9]*'
   pull_request:
     branches:
       - main
@@ -18,14 +20,48 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify plugin
+    name: Verify plugin and prepare release
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.release.outputs.artifact_name }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@v7
+      - name: Check out the exact event commit
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the exact release tag
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ github.ref_name }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out commit
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EVENT_SHA"
+
+      - name: Verify tag resolves to the event commit
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tag_commit" = "$EVENT_SHA"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -33,97 +69,169 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Build distributable
+      - name: Build distributable once
         run: npm run build
 
-      - name: Run verification suite
+      - name: Run no-Chrome verification suite
         run: npm run check
+
+      - name: Verify real vector PDF converter in browser
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        env:
+          PUPPETEER_CHANNEL: chrome
+        run: |
+          set -euo pipefail
+          chrome_path="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [[ -n "$chrome_path" ]]; then
+            export PUPPETEER_EXECUTABLE_PATH="$chrome_path"
+          fi
+          timeout 180s npm run verify:vector-pdf -- --output "$RUNNER_TEMP/vector-pdf-smoke.pdf" \
+            | tee "$RUNNER_TEMP/vector-pdf-smoke.log"
+          test -s "$RUNNER_TEMP/vector-pdf-smoke.pdf"
+
+      - name: Upload vector PDF smoke artifact
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vector-pdf-smoke-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/vector-pdf-smoke.pdf
+            ${{ runner.temp }}/vector-pdf-smoke.log
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Confirm version metadata
         shell: bash
         run: |
           set -euo pipefail
-          package_version="$(node -p "require('./package.json').version")"
-          manifest_version="$(node -p "require('./manifest.json').version")"
-          lock_version="$(node -p "require('./package-lock.json').version")"
-          test "$package_version" = "$manifest_version"
-          test "$package_version" = "$lock_version"
-          test "$package_version" != "0.0.0"
+          node <<'NODE'
+          const packageVersion = require('./package.json').version;
+          const manifestVersion = require('./manifest.json').version;
+          const lock = require('./package-lock.json');
+          if (packageVersion !== manifestVersion ||
+              packageVersion !== lock.version ||
+              packageVersion !== lock.packages[''].version ||
+              packageVersion === '0.0.0')
+            process.exit(1);
+          NODE
 
-      - name: Ensure generated files are committed
-        run: git diff --exit-code -- main.js lib/vector-pdf-bundle.js
+      - name: Ensure generated files and release documentation are committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- main.js lib/vector-pdf-bundle.js
+          node scripts/release-artifacts.js notices --root . --check
+          node scripts/release-artifacts.js runtime-inventory --root . --check
+
+      - name: Prepare one deterministic release handoff
+        id: release
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/release-artifacts.js prepare \
+            --root . \
+            --out "$RUNNER_TEMP/tomindmap-release" \
+            --tag "$RELEASE_TAG" \
+            --expected-sha "$EVENT_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+          echo "artifact_name=tomindmap-release-${EVENT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the verified release handoff
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.release.outputs.artifact_name }}
+          path: ${{ runner.temp }}/tomindmap-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   release:
     name: Publish GitHub release
     needs: verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Check out verified source
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
+      - name: Set up Node.js for handoff verification
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install locked dependencies
-        run: npm ci
+      - name: Download the verified release handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.verify.outputs.artifact_name }}
+          path: ${{ runner.temp }}/tomindmap-release
 
-      - name: Rebuild verified distributable
-        run: npm run build
-
-      - name: Re-run verification before publishing
-        run: npm run check
-
-      - name: Package plugin files
-        id: package
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$version" >> "$GITHUB_OUTPUT"
-          zip -q -r "tomindmap-${version}.zip" \
-            manifest.json \
-            main.js \
-            styles.css \
-            data.json
-
-      - name: Create or repair GitHub release assets
+      - name: Verify downloaded bytes and provenance
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_DIR: ${{ runner.temp }}/tomindmap-release
         run: |
           set -euo pipefail
-          tag="${{ steps.package.outputs.tag }}"
-          archive="tomindmap-${tag}.zip"
-          required_assets=(manifest.json main.js styles.css data.json "$archive")
+          (cd "$RELEASE_DIR" && sha256sum --check --strict handoff.sha256)
+          node "$RELEASE_DIR/release-artifacts.js" verify \
+            --input "$RELEASE_DIR" \
+            --tag "$RELEASE_TAG" \
+            --expected-sha "$EVENT_SHA"
+          {
+            echo "Verified ToMindMap release $RELEASE_TAG ($EVENT_SHA)"
+            echo
+            echo 'SHA-256:'
+            cat "$RELEASE_DIR/SHA256SUMS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish once without mutating an existing release
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_DIR: ${{ runner.temp }}/tomindmap-release
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          version="$(RELEASE_METADATA="$RELEASE_DIR/release-metadata.json" \
+            node -p "require(process.env.RELEASE_METADATA).version")"
+          archive="tomindmap-${version}.zip"
+          required_assets=(
+            manifest.json
+            main.js
+            styles.css
+            LICENSE
+            THIRD_PARTY_NOTICES.txt
+            "$archive"
+            SHA256SUMS
+          )
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            existing_assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
-            missing_assets=()
-            for asset in "${required_assets[@]}"; do
-              if ! grep -Fxq "$asset" <<< "$existing_assets"; then
-                missing_assets+=("$asset")
-              fi
-            done
-            if ((${#missing_assets[@]} > 0)); then
-              gh release upload "$tag" "${missing_assets[@]}" --clobber
-              echo "Repaired missing release assets for $tag."
-            else
-              echo "Release $tag already has all required assets; leaving it unchanged."
-            fi
-          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            gh release create "$tag" "${required_assets[@]}" \
-              --verify-tag \
-              --title "ToMindMap $tag" \
-              --generate-notes
-          else
-            gh release create "$tag" "${required_assets[@]}" \
-              --title "ToMindMap $tag" \
-              --generate-notes
+            echo "Release $tag already exists; refusing to mutate its assets." >&2
+            exit 1
           fi
+
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha')"
+          remote_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.type')"
+          if [[ "$remote_type" == "tag" ]]; then
+            remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_ref}" --jq '.object.sha')"
+          else
+            remote_sha="$remote_ref"
+          fi
+          test "$remote_sha" = "$EVENT_SHA"
+
+          asset_paths=()
+          for asset in "${required_assets[@]}"; do
+            asset_paths+=("$RELEASE_DIR/$asset")
+          done
+          gh release create "$tag" "${asset_paths[@]}" \
+            --verify-tag \
+            --title "ToMindMap $tag" \
+            --generate-notes

@@ -7,15 +7,9 @@ const root = path.resolve(__dirname, "..");
 const bundlePath = path.join(root, "main.js");
 const sourceDirectory = path.join(root, "src");
 const sourcePath = path.join(sourceDirectory, "main.js");
-const build = require("./runtime-modules");
+const { artifactCompiler } = require("./runtime-modules");
 
-let source = fs.readFileSync(bundlePath, "utf8");
-for (const definition of build.modules) {
-  const markerPattern = build.markerPattern(definition.name);
-  if (!markerPattern.test(source))
-    throw new Error(`Could not find bundled runtime module: ${definition.name}`);
-  source = source.replace(markerPattern, definition.requireLine);
-}
+const source = artifactCompiler.extract(fs.readFileSync(bundlePath, "utf8"));
 
 fs.mkdirSync(sourceDirectory, { recursive: true });
 fs.writeFileSync(sourcePath, source);

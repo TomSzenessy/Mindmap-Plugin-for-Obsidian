@@ -73,10 +73,19 @@ test('derives a clean title from a topic card', () => {
 test('creates portable and unique note paths', () => {
 	assert.equal(safeTopicFilename('  Q3/Q4: roadmap?  '), 'Q3-Q4- roadmap-');
 	assert.equal(safeTopicFilename('   '), 'Untitled');
+	assert.equal(safeTopicFilename('CON'), '_CON');
+	assert.equal(
+		Buffer.byteLength(safeTopicFilename('漢🙂'.repeat(100)), 'utf8') <= 255,
+		true
+	);
 	const existing = new Set(['Notes/Topic.md', 'Notes/Topic 1.md']);
 	assert.equal(
 		nextTopicNotePath('Notes', 'Topic', (path) => existing.has(path)),
 		'Notes/Topic 2.md'
+	);
+	assert.equal(
+		nextTopicNotePath('Notes', 'CON', (path) => path === 'Notes/_CON.md'),
+		'Notes/_CON 1.md'
 	);
 	assert.equal(
 		nextTopicFilePath('Notes', 'Topic', 'canvas'),
@@ -126,17 +135,49 @@ test('remaps nested linked content at the linked card anchor', () => {
 		new Set(['root']),
 		() => `new-${++next}`
 	);
-	assert.equal(result.rootId, 'new-1');
+	assert.equal(result.ok, true);
+	const remapped = result.value;
+	assert.equal(remapped.rootId, 'new-1');
 	assert.deepEqual(
-		result.nodes.map((node) => [node.id, node.x, node.y]),
+		remapped.nodes.map((node) => [node.id, node.x, node.y]),
 		[
 			['new-1', 1000, 200],
 			['new-2', 1300, 200]
 		]
 	);
-	assert.deepEqual(result.edges, [
+	assert.deepEqual(remapped.edges, [
 		{ id: 'new-3', fromNode: 'new-1', toNode: 'new-2' }
 	]);
+});
+
+test('rejects malformed linked graphs before requesting any remapped IDs', () => {
+	const cases = [
+		['missing node ID', { nodes: [{ x: 0 }, { id: 'child' }], edges: [] }, 'invalid-node-id'],
+		['duplicate node ID', { nodes: [{ id: 'root' }, { id: 'root' }], edges: [] }, 'duplicate-node-id'],
+		['missing edge ID', { nodes: [{ id: 'root' }, { id: 'child' }], edges: [{ fromNode: 'root', toNode: 'child' }] }, 'invalid-edge-id'],
+		['duplicate edge ID', { nodes: [{ id: 'root' }, { id: 'child' }], edges: [{ id: 'edge', fromNode: 'root', toNode: 'child' }, { id: 'edge', fromNode: 'child', toNode: 'root' }] }, 'duplicate-edge-id'],
+		['dangling endpoint', { nodes: [{ id: 'root' }], edges: [{ id: 'edge', fromNode: 'root', toNode: 'missing' }] }, 'dangling-edge-endpoint'],
+		['multiple roots', { nodes: [{ id: 'root' }, { id: 'child' }, { id: 'other-root' }], edges: [{ id: 'edge', fromNode: 'root', toNode: 'child' }] }, 'multiple-roots'],
+		['missing root', { nodes: [{ id: 'a' }, { id: 'b' }], edges: [{ id: 'ab', fromNode: 'a', toNode: 'b' }, { id: 'ba', fromNode: 'b', toNode: 'a' }] }, 'missing-root'],
+		['unreachable topics', { nodes: [{ id: 'root' }, { id: 'child' }, { id: 'cycle-a' }, { id: 'cycle-b' }], edges: [{ id: 'root-edge', fromNode: 'root', toNode: 'child' }, { id: 'cycle-ab', fromNode: 'cycle-a', toNode: 'cycle-b' }, { id: 'cycle-ba', fromNode: 'cycle-b', toNode: 'cycle-a' }] }, 'unreachable-node'],
+		['reachable cycle', { nodes: [{ id: 'root' }, { id: 'a' }, { id: 'b' }], edges: [{ id: 'ra', fromNode: 'root', toNode: 'a' }, { id: 'ab', fromNode: 'a', toNode: 'b' }, { id: 'ba', fromNode: 'b', toNode: 'a' }] }, 'cycle'],
+		['multi-parent topic', { nodes: [{ id: 'root' }, { id: 'a' }, { id: 'b' }, { id: 'shared' }], edges: [{ id: 'ra', fromNode: 'root', toNode: 'a' }, { id: 'rb', fromNode: 'root', toNode: 'b' }, { id: 'as', fromNode: 'a', toNode: 'shared' }, { id: 'bs', fromNode: 'b', toNode: 'shared' }] }, 'multiple-parents']
+	];
+
+	for (const [label, source, reason] of cases) {
+		let idRequests = 0;
+		const result = remapLinkedCanvasData(
+			source,
+			{ x: 0, y: 0, width: 300, height: 60 },
+			new Set(),
+			() => {
+				idRequests++;
+				return `new-${idRequests}`;
+			}
+		);
+		assert.deepEqual(result, { ok: false, reason }, label);
+		assert.equal(idRequests, 0, label);
+	}
 });
 
 test('updates a parent linked card when a nested title changes', () => {
@@ -193,6 +234,52 @@ test('toggles subtree collapse state', () => {
 	assert.equal(newState, true);
 	assert.equal(rootNode.data.collapsed, true);
 	assert.equal(childNode.class, 'tomindmap-collapsed-hidden');
+});
+
+test('synchronizes a twelve-thousand-level collapsed chain without recursion overflow', () => {
+	const nodes = new Map();
+	const data = [];
+	for (let index = 0; index < 12000; index++) {
+		const node = {
+			id: `node-${index}`,
+			data: index === 0 ? { collapsed: true } : {},
+			getData() {
+				return this.data;
+			},
+			setData(patch) {
+				this.data = { ...this.data, ...patch };
+			}
+		};
+		const shell = {
+			toggleClass() {},
+			hasClass() {
+				return false;
+			}
+		};
+		node.nodeEl = {
+			closest: () => shell,
+			toggleClass: (className, enabled) => shell.toggleClass(className, enabled)
+		};
+		nodes.set(node.id, node);
+		data.push({ id: node.id, type: 'text' });
+		if (index > 0) {
+			const edge = {
+				from: { node: nodes.get(`node-${index - 1}`) },
+				to: { node }
+			};
+			nodes.set(`edge-${index}`, edge);
+		}
+	}
+	const edges = new Map(
+		[...nodes.entries()].filter(([id]) => id.startsWith('edge-'))
+	);
+	const canvas = {
+		nodes: new Map([...nodes.entries()].filter(([id]) => !id.startsWith('edge-'))),
+		edges,
+		getData: () => ({ nodes: data })
+	};
+
+	assert.equal(syncCollapsedVisibility(canvas), 11999);
 });
 
 test('syncs persisted collapse state to nodes and edge groups', () => {

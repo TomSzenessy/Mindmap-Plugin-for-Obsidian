@@ -345,6 +345,68 @@ function mindmapCanvas(document) {
   };
 }
 
+test("claims a topic pointer gesture before the host Canvas can also drag it", () => {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeElement } = loadSource();
+  const document = new FakeDocument();
+  const wrapper = new FakeElement("div", document);
+  const target = {};
+  const nodeEl = {
+    contains: (value) => value === target,
+    closest: () => null,
+    addClass() {},
+    removeClass() {},
+    toggleClass() {},
+    classList: { toggle() {} }
+  };
+  const node = {
+    id: "topic",
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 60,
+    isEditing: false,
+    nodeEl,
+    moveTo() {}
+  };
+  const canvas = {
+    wrapperEl: wrapper,
+    nodes: new Map([[node.id, node]]),
+    edges: new Map(),
+    selection: new Set(),
+    getData: () => ({ mindmap: true, nodes: [{ id: node.id, type: "text" }], edges: [] }),
+    posFromEvt: () => ({ x: 0, y: 0 }),
+    requestSave() {},
+    requestFrame() {}
+  };
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getIncomingEdges: () => [],
+    getParentNode: () => null,
+    getSelectedNode: () => null,
+    getGraphQuery: () => ({ forest: [] })
+  };
+  plugin.isMindmapCanvas = () => true;
+  plugin.collectSubtreeNodes = () => [];
+  plugin.settings = { defaultNodeWidth: 200, defaultNodeHeight: 60 };
+  const cleanup = plugin.registerNodeDragReparentHandler(canvas);
+  let prevented = 0;
+  let stopped = 0;
+  let stoppedImmediate = 0;
+  wrapper.dispatch("pointerdown", {
+    button: 0,
+    pointerId: 1,
+    target,
+    preventDefault() { prevented++; },
+    stopPropagation() { stopped++; },
+    stopImmediatePropagation() { stoppedImmediate++; }
+  }, true);
+  cleanup.dispose("cancel");
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+  assert.equal(stoppedImmediate, 1);
+});
+
+
 test("saving touch-control settings reconfigures the active Canvas without a leaf switch", async () => {
   const { default: CanvasMindMapPlugin, obsidian, FakeDocument, FakeTFile } = loadSource();
   const document = new FakeDocument();

@@ -59759,7 +59759,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 								directionFromParent(nodeToMove)
 						: null;
 					this.layoutEngine.layout(canvas, {
-						preserveRootSides: false,
+						preserveRootSides: true,
 						branchDirectionOverride: branchDirection
 							? {
 									nodeId: nodeToMove.id,
@@ -60018,6 +60018,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
 			});
 			if (node) {
+				// Claim the gesture before Obsidian's native Canvas drag sees it.
+				// Letting both handlers move the same cards produces overlapping
+				// layouts and stale edge geometry after even a tiny drag.
+				event.preventDefault?.();
+				event.stopPropagation?.();
+				event.stopImmediatePropagation?.();
 				activePointerId = event.pointerId ?? null;
 				draggedNode = node;
 				dragStartPos = { x: node.x, y: node.y };

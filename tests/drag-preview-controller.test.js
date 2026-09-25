@@ -895,3 +895,15 @@ test("flips the preview arrow when the drag crosses its parent", () => {
   assert.equal(previewEdges(fixture)[0].from.side, "left");
   assert.equal(previewEdges(fixture)[0].to.side, "right");
 });
+
+test("excludes candidate cards specified via options.excludedIds during multi-card drag preview", () => {
+  const fixture = dragFixture();
+  fixture.newParent.x = 260;
+  fixture.controller.begin(fixture.dragged, {
+    excludedIds: new Set([fixture.newParent.id])
+  });
+  const preview = fixture.controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.notEqual(preview.target?.id, fixture.newParent.id);
+  assert.equal(preview.target?.id, fixture.oldParent.id);
+});

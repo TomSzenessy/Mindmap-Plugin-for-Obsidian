@@ -51169,7 +51169,7 @@ var {
       state = "idle";
     }
 
-    function begin(draggedNode) {
+    function begin(draggedNode, options = {}) {
       if (activeDraggedNode)
         cancel();
       activeDraggedNode = draggedNode || null;
@@ -51184,7 +51184,7 @@ var {
       originalParent =
         canvas.nodes?.get?.(originalLinks[0]?.fromNodeId) || null;
       beginTopology = permanentTopologySignature();
-      dragIndex = buildDragIndex(sessionForest, draggedNode);
+      dragIndex = buildDragIndex(sessionForest, draggedNode, options?.excludedIds);
       state = draggedNode ? "original" : "idle";
       finished = false;
       settledResult = null;
@@ -51196,8 +51196,13 @@ var {
      * of every map in one fixed order. Both are built once when the gesture
      * starts, so an animation frame only measures cards.
      */
-    function buildDragIndex(forest, draggedNode) {
+    function buildDragIndex(forest, draggedNode, excludedIds = null) {
       const descendantIds = collectSubtreeIds(forest, draggedNode?.id);
+      if (excludedIds) {
+        for (const id of excludedIds) {
+          descendantIds.add(id);
+        }
+      }
       const maps = [];
       for (const root of forest) {
         const cards = [];
@@ -53112,11 +53117,14 @@ function setCanvasNodeUnknownData(node, patch) {
 }
 
 function canvasFolderPath(canvas) {
-	return canvas?.view?.file?.parent?.path || '';
+	const raw = canvas?.view?.file?.parent?.path || '';
+	if (raw === '/') return '';
+	return raw.replace(/^\/+|\/+$/g, '');
 }
 
 function canvasPathFor(canvas) {
-	return canvas?.view?.file?.path || '';
+	const raw = canvas?.view?.file?.path || '';
+	return raw.replace(/^\/+/g, '');
 }
 
 function titleOnlyCardTitle(node) {
@@ -53173,12 +53181,43 @@ function findNativeCanvasMenuItem(menu, titlePattern) {
 }
 
 function removeNativeCanvasMenuItem(menu, titlePattern) {
-	const item = findNativeCanvasMenuItem(menu, titlePattern);
-	if (!item || !Array.isArray(menu.items)) return false;
-	const index = menu.items.indexOf(item);
-	if (index < 0) return false;
-	menu.items.splice(index, 1);
-	return true;
+	if (!menu) return false;
+	let removed = false;
+	const scrubItem = (item) => {
+		if (item?.dom) {
+			item.dom.remove?.();
+			item.dom.style?.setProperty('display', 'none', 'important');
+		}
+	};
+	if (Array.isArray(menu.items)) {
+		for (let i = menu.items.length - 1; i >= 0; i--) {
+			const item = menu.items[i];
+			const text = String(
+				item?.titleEl?.textContent ||
+				item?.title ||
+				item?.title__ ||
+				item?.dom?.textContent ||
+				''
+			).trim();
+			if (titlePattern.test(text)) {
+				menu.items.splice(i, 1);
+				scrubItem(item);
+				removed = true;
+			}
+		}
+	}
+	if (menu.dom) {
+		const domItems = menu.dom.querySelectorAll?.('.menu-item') || [];
+		for (const domItem of domItems) {
+			const text = (domItem.textContent || '').trim();
+			if (titlePattern.test(text)) {
+				domItem.remove?.();
+				domItem.style?.setProperty('display', 'none', 'important');
+				removed = true;
+			}
+		}
+	}
+	return removed;
 }
 
 function serializedBranchData(canvas, branchNodes, rootNode) {
@@ -54919,7 +54958,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		this.registerEvent(
 			this.app.workspace.on('canvas:node-menu', (menu, node) => {
-				const canvas = this.canvasApi.getActiveCanvas();
+				const canvas = node?.canvas || this.canvasApi.getActiveCanvas();
 				menu.addItem((item) => {
 					item.setTitle('Copy node link')
 						.setIcon('link')
@@ -54937,11 +54976,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							}, 'copy node link');
 						});
 				});
-				if (canvas && this.isMindmapCanvas(canvas))
-					removeNativeCanvasMenuItem(
-						menu,
-						/^Convert to file(?:\.{3}|…)$/i
-					);
+				if (canvas && this.isMindmapCanvas(canvas)) {
+					const scrubNative = () => {
+						removeNativeCanvasMenuItem(
+							menu,
+							/convert to file/i
+						);
+					};
+					scrubNative();
+					setTimeout(scrubNative, 0);
+				}
 				if (
 					canvas &&
 					this.isMindmapCanvas(canvas) &&
@@ -54961,25 +55005,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						this.runAsync(() => this.convertTopicToCleanNotes(canvas, node, false), 'convert topic to clean notes');
 					if (hasBranch) {
 						menu.addItem((item) => {
-							item.setTitle('Convert to file with subtree')
+							item.setTitle('Convert branch to note')
 								.setIcon('file-text')
 								.onClick(convertWithSubtree);
 						});
 					}
 					menu.addItem((item) => {
-						item.setTitle('Convert to file without subtree')
+						item.setTitle('Convert topic to note')
 							.setIcon('file-plus')
 							.onClick(convertWithoutSubtree);
 					});
 					menu.addItem((item) => {
-						item.setTitle(
-							hasBranch
-								? 'Convert branch to nested mind map'
-								: 'Convert to nested mind map'
-						)
+						item.setTitle('Convert to nested mind map')
 							.setIcon('network')
 							.onClick(() =>
-								void this.convertTopicToNestedMindMap(canvas, node)
+								this.runAsync(() => this.convertTopicToNestedMindMap(canvas, node), 'convert topic to nested mind map')
 							);
 					});
 				}
@@ -55609,6 +55649,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				isGroupNode: (candidate) => getGroupIds(canvas).has(candidate.id)
 			});
 			if (!node) return;
+			if (event.shiftKey || event.metaKey || event.ctrlKey) return;
+			if (canvas.selection && canvas.selection.has(node) && canvas.selection.size > 1) return;
 			canvas.selectOnly(node);
 			canvas.requestFrame();
 		};
@@ -58039,7 +58081,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const forest = buildForest(canvas);
 		const treeNode = findTreeForNode(forest, node.id);
-		if (!treeNode || treeNode.children.length === 0) return [];
+		if (!treeNode) return [];
 		const branch = MindmapActions.getTopicBranch(forest, node, true).map(
 			(item) => item.canvasNode
 		);
@@ -59161,6 +59203,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let draggedNode = null;
 		let dragStartPos = null;
 		let isSingleCardDrag = false;
+		let isMultiCardDrag = false;
+		let multiMovingNodes = [];
+		let multiTopLevelNodes = [];
+		let multiStartPositions = new Map();
+		let preservedSelection = null;
 		let resizingNode = null;
 		let previewFrame = null;
 		let pointerUpFrame = null;
@@ -59261,13 +59308,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				!latestPointerPosition
 			)
 				return;
-			draggedNode.moveTo({
-				x:
-					dragStartPos.x +
-					latestPointerPosition.x -
-					dragPointerStart.x,
-				y: dragStartPos.y + latestPointerPosition.y - dragPointerStart.y
-			});
+			if (isMultiCardDrag) {
+				const dx = latestPointerPosition.x - dragPointerStart.x;
+				const dy = latestPointerPosition.y - dragPointerStart.y;
+				for (const node of multiMovingNodes) {
+					const start = multiStartPositions.get(node.id);
+					if (start) {
+						node.moveTo({
+							x: start.x + dx,
+							y: start.y + dy
+						});
+					}
+				}
+			} else {
+				draggedNode.moveTo({
+					x:
+						dragStartPos.x +
+						latestPointerPosition.x -
+						dragPointerStart.x,
+					y: dragStartPos.y + latestPointerPosition.y - dragPointerStart.y
+				});
+			}
 		};
 
 		const getMainRootNode = (node = draggedNode) => {
@@ -59335,7 +59396,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				previewFrame = null;
 				if (!draggedNode) return;
 				applyUnsnappedDragPosition();
-				const preview = isSingleCardDrag
+				const preview = (isSingleCardDrag || isMultiCardDrag)
 					? dragAttachment.updatePreview(draggedNode)
 					: null;
 				previewResolved = Boolean(preview);
@@ -59351,15 +59412,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						(targetChanged || direction !== liveBranchDirection)
 					) {
 						liveBranchDirection = direction;
-						this.layoutEngine.layoutChildren(
-							canvas,
-							draggedNode.id,
-							direction,
-							{
-								animate: false,
-								persist: false
-							}
-						);
+						if (isSingleCardDrag) {
+							this.layoutEngine.layoutChildren(
+								canvas,
+								draggedNode.id,
+								direction,
+								{
+									animate: false,
+									persist: false
+								}
+							);
+						}
 					}
 				} else if (preview?.state === 'detached') {
 					const wasDirectional =
@@ -59367,7 +59430,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						liveBranchDirection !== null;
 					livePreviewTargetId = null;
 					liveBranchDirection = null;
-					if (wasDirectional) {
+					if (wasDirectional && isSingleCardDrag) {
 						this.layoutEngine.layoutChildren(
 							canvas,
 							draggedNode.id,
@@ -59387,15 +59450,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						(leftTargetPreview || direction !== liveBranchDirection)
 					) {
 						liveBranchDirection = direction;
-						this.layoutEngine.layoutChildren(
-							canvas,
-							draggedNode.id,
-							direction,
-							{
-								animate: false,
-								persist: false
-							}
-						);
+						if (isSingleCardDrag) {
+							this.layoutEngine.layoutChildren(
+								canvas,
+								draggedNode.id,
+								direction,
+								{
+									animate: false,
+									persist: false
+								}
+							);
+						}
 					}
 				}
 			};
@@ -59517,9 +59582,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 			if (movedDistance <= 10) {
 				dragAttachment.cancel();
+				if (isMultiCardDrag && draggedNode) {
+					canvas.selectOnly?.(draggedNode);
+					canvas.requestFrame?.();
+				}
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
+				isMultiCardDrag = false;
+				multiMovingNodes = [];
+				multiTopLevelNodes = [];
+				multiStartPositions.clear();
+				preservedSelection = null;
 				return;
 			}
 
@@ -59558,6 +59632,86 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
+				return;
+			}
+
+			if (isMultiCardDrag) {
+				if (!previewResolved) dragAttachment.updatePreview(nodeToMove);
+				const preview = dragAttachment.updatePreview(nodeToMove);
+				dragAttachment.cancel();
+
+				let targetNode = (preview?.state === 'preview' && preview?.target)
+					? preview.target
+					: (findNodeFromEvent(canvas, event) || null);
+				if (targetNode && (multiStartPositions.has(targetNode.id) || getGroupIds(canvas).has(targetNode.id))) {
+					targetNode = null;
+				}
+
+				let hierarchyChanged = false;
+				if (targetNode) {
+					for (const node of multiTopLevelNodes) {
+						if (node.id === targetNode.id) continue;
+						if (TreeDrag.reparentSubtree(
+							canvas,
+							this.canvasApi,
+							node,
+							targetNode,
+							'child',
+							forest
+						)) {
+							hierarchyChanged = true;
+						}
+					}
+				} else if (preview?.state === 'detached') {
+					for (const node of multiTopLevelNodes) {
+						TreeDrag.removeIncomingParentEdges(canvas, this.canvasApi, node);
+						hierarchyChanged = true;
+					}
+				}
+
+				if (this.isMindmapCanvas(canvas)) {
+					const branchDirection = targetNode
+						? directionFromParent(nodeToMove) || directionFromParent(targetNode) || 'right'
+						: null;
+					this.layoutEngine.layout(canvas, {
+						preserveRootSides: false,
+						branchDirectionOverride: branchDirection && targetNode
+							? {
+									nodeId: targetNode.id,
+									direction: branchDirection
+								}
+							: null
+					});
+					this.updateGroupBounds(canvas);
+				}
+				if (this.settings.autoColor && this.isMindmapCanvas(canvas))
+					this.branchColors.applyColors(canvas);
+				if (hierarchyChanged) this.markMarkdownOrderDirty(canvas);
+				canvas.requestSave();
+
+				if (preservedSelection && preservedSelection.size > 0) {
+					canvas.deselectAll?.();
+					for (const selNode of preservedSelection) {
+						canvas.select?.(selNode);
+					}
+					canvas.requestFrame?.();
+				}
+
+				for (const node of multiMovingNodes) {
+					rememberMediaPosition(node);
+				}
+				this.runAsync(() => this.flushCanvasToMarkdown(canvas), 'flush canvas to markdown');
+				if (hierarchyChanged) {
+					new import_obsidian5.Notice('Re-parented nodes to branch');
+				}
+				draggedNode = null;
+				dragStartPos = null;
+				isSingleCardDrag = false;
+				isMultiCardDrag = false;
+				multiMovingNodes = [];
+				multiTopLevelNodes = [];
+				multiStartPositions.clear();
+				preservedSelection = null;
 				return;
 			}
 
@@ -59637,12 +59791,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				terminalReason === 'commit' ? 'commit' : 'cancel',
 				draggedNode
 			);
+			if (terminalReason !== 'commit' && isMultiCardDrag) {
+				for (const [id, pos] of multiStartPositions) {
+					const node = canvas.nodes?.get(id);
+					node?.moveTo?.(pos);
+				}
+			}
 			restoreDraggedMove();
 			detachOwnedListeners();
 			activePointerId = null;
 			draggedNode = null;
 			dragStartPos = null;
 			isSingleCardDrag = false;
+			isMultiCardDrag = false;
+			multiMovingNodes = [];
+			multiTopLevelNodes = [];
+			multiStartPositions.clear();
+			preservedSelection = null;
 			liveBranchDirection = null;
 			livePreviewTargetId = null;
 			previewResolved = false;
@@ -59711,18 +59876,98 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
 				latestPointerPosition = dragPointerStart;
-				const selectionSize = canvas.selection
-					? canvas.selection.size
-					: 1;
-				isSingleCardDrag = selectionSize <= 1;
-				const parentNode = this.canvasApi.getParentNode(canvas, node);
-				liveBranchDirection = parentNode
-					? directionFromParent(node)
-					: null;
-				livePreviewTargetId = null;
-				previewResolved = false;
+				const hasMultiSelection = Boolean(
+					canvas.selection &&
+					canvas.selection.has(node) &&
+					canvas.selection.size > 1
+				);
 
-				if (isSingleCardDrag) {
+				if (hasMultiSelection) {
+					isSingleCardDrag = false;
+					isMultiCardDrag = true;
+					preservedSelection = new Set(canvas.selection);
+
+					const groupIds = getGroupIds(canvas);
+					const selectedList = Array.from(canvas.selection)
+						.filter(
+							(n) =>
+								n &&
+								typeof n.x === 'number' &&
+								typeof n.y === 'number' &&
+								!groupIds.has(n.id)
+						);
+					selectedList.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+					const forest = cachedDragForest.length > 0
+						? cachedDragForest
+						: buildForest(canvas);
+					const selectedIds = new Set(selectedList.map((n) => n.id));
+					multiTopLevelNodes = selectedList.filter((n) => {
+						let tree = findTreeForNode(forest, n.id);
+						if (!tree) return true;
+						let curr = tree.parent;
+						while (curr) {
+							if (selectedIds.has(curr.canvasNode?.id)) return false;
+							curr = curr.parent;
+						}
+						return true;
+					});
+
+					const allMovingSet = new Set();
+					for (const root of multiTopLevelNodes) {
+						allMovingSet.add(root);
+						for (const desc of this.collectSubtreeNodes(canvas, root)) {
+							allMovingSet.add(desc);
+						}
+					}
+					multiMovingNodes = Array.from(allMovingSet);
+					multiStartPositions = new Map(
+						multiMovingNodes.map((n) => [n.id, { x: n.x, y: n.y }])
+					);
+
+					liveBranchDirection = null;
+					livePreviewTargetId = null;
+					previewResolved = false;
+
+					const excluded = new Set(multiMovingNodes.map((n) => n.id));
+					dragAttachment.begin(node, { excludedIds: excluded });
+					setMindmapDragging(true);
+
+					ownerDocument.addEventListener(
+						'pointermove',
+						onPointerMove,
+						true
+					);
+					ownerDocument.addEventListener(
+						'pointerup',
+						onPointerUp,
+						true
+					);
+					ownerDocument.addEventListener(
+						'mousemove',
+						onPointerMove,
+						true
+					);
+					ownerDocument.addEventListener(
+						'mouseup',
+						onPointerUp,
+						true
+					);
+				} else {
+					isSingleCardDrag = true;
+					isMultiCardDrag = false;
+					multiMovingNodes = [];
+					multiTopLevelNodes = [];
+					multiStartPositions.clear();
+					preservedSelection = null;
+
+					const parentNode = this.canvasApi.getParentNode(canvas, node);
+					liveBranchDirection = parentNode
+						? directionFromParent(node)
+						: null;
+					livePreviewTargetId = null;
+					previewResolved = false;
+
 					if (!resizingNode) setMediaDragging(node, true);
 					dragAttachment.begin(node);
 					moveSubtreeWithDraggedNode(node);
@@ -59754,6 +59999,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				draggedNode = null;
 				dragStartPos = null;
 				isSingleCardDrag = false;
+				isMultiCardDrag = false;
+				multiMovingNodes = [];
+				multiTopLevelNodes = [];
+				multiStartPositions.clear();
+				preservedSelection = null;
 				liveBranchDirection = null;
 				livePreviewTargetId = null;
 				previewResolved = false;

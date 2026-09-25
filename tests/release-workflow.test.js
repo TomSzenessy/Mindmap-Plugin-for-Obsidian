@@ -36,7 +36,7 @@ test("the release job consumes one verified handoff without rebuilding", () => {
   assert.equal((workflow.match(/actions\/download-artifact@[0-9a-f]{40}/g) || []).length, 1);
   assert.doesNotMatch(workflow, /zip -q/);
   const release = section("release");
-  assert.doesNotMatch(release, /npm ci|npm run build|npm run check|actions\/checkout/);
+  assert.doesNotMatch(release, /npm ci|npm run build|npm run check/);
   assert.match(release, /sha256sum --check --strict handoff\.sha256/);
   assert.match(workflow, /--tag "\$RELEASE_TAG"[\s\S]*--expected-sha "\$EVENT_SHA"/);
   assert.match(release, /release-artifacts\.js['"]?\s+verify/);

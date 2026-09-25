@@ -6938,6 +6938,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let terminalReason = null;
 		let terminalResult = null;
 		let activePointerId = null;
+		let dragThresholdPassed = false;
 		const stableMediaPositions = new Map(
 			Array.from(canvas.nodes.values()).map((node) => [
 				node.id,
@@ -7099,13 +7100,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			if (!this.isMindmapCanvas(canvas)) return;
 			if (!draggedNode || !dragStartPos) return;
 			latestPointerPosition = canvas.posFromEvt(event);
-			if (
-				Math.hypot(
-					draggedNode.x - dragStartPos.x,
-					draggedNode.y - dragStartPos.y
-				) <= 10
-			)
-				return;
+			if (!dragThresholdPassed) {
+				const pointerMoved = dragPointerStart
+					? Math.hypot(
+							latestPointerPosition.x - dragPointerStart.x,
+							latestPointerPosition.y - dragPointerStart.y
+					  )
+					: Math.hypot(
+							draggedNode.x - dragStartPos.x,
+							draggedNode.y - dragStartPos.y
+					  );
+				if (pointerMoved <= 10) return;
+				dragThresholdPassed = true;
+			}
 			if (previewFrame !== null) return;
 			const view = wrapper.ownerDocument?.defaultView;
 			const run = () => {
@@ -7207,7 +7214,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				return;
 			}
 			cancelPreviewFrame();
-			applyUnsnappedDragPosition();
+			const pointerDelta = (dragPointerStart && latestPointerPosition)
+				? Math.hypot(
+						latestPointerPosition.x - dragPointerStart.x,
+						latestPointerPosition.y - dragPointerStart.y
+				  )
+				: 0;
+			if (dragThresholdPassed || pointerDelta > 10) {
+				applyUnsnappedDragPosition();
+			}
 
 			if (resizingNode) {
 				const resized = resizingNode;
@@ -7288,9 +7303,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			setMediaDragging(draggedNode, false);
 			setMindmapDragging(false);
-			const movedDistance = Math.hypot(
-				draggedNode.x - dragStartPos.x,
-				draggedNode.y - dragStartPos.y
+			const movedDistance = Math.max(
+				pointerDelta,
+				Math.hypot(
+					draggedNode.x - dragStartPos.x,
+					draggedNode.y - dragStartPos.y
+				)
 			);
 			const nodeToMove = draggedNode;
 			const wasSingleCardDrag = isSingleCardDrag;
@@ -7298,6 +7316,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 			if (movedDistance <= 10) {
 				dragAttachment.cancel();
+				if (draggedNode && dragStartPos) {
+					draggedNode.moveTo?.(dragStartPos);
+				}
 				if (isMultiCardDrag && draggedNode) {
 					canvas.selectOnly?.(draggedNode);
 					canvas.requestFrame?.();
@@ -7310,6 +7331,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				multiTopLevelNodes = [];
 				multiStartPositions.clear();
 				preservedSelection = null;
+				dragThresholdPassed = false;
 				return;
 			}
 
@@ -7531,6 +7553,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			resizingNode = null;
 			dragPointerStart = null;
 			latestPointerPosition = null;
+			dragThresholdPassed = false;
 		};
 		const finishGesture = (reason, event = null) => {
 			if (terminalReason) return terminalResult;
@@ -7599,6 +7622,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				dragStartPos = { x: node.x, y: node.y };
 				dragPointerStart = canvas.posFromEvt(event);
 				latestPointerPosition = dragPointerStart;
+				dragThresholdPassed = false;
 				const isNodeInSelection = Boolean(
 					canvas.selection && (
 						canvas.selection.has(node) ||

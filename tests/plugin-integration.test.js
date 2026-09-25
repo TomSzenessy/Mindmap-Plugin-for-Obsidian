@@ -154,11 +154,36 @@ class FakeElement {
 }
 
 class FakeDocument {
+  constructor() {
+    this.listeners = new Map();
+  }
   createElement(tagName) {
     return new FakeElement(tagName, this);
   }
-  addEventListener() {}
-  removeEventListener() {}
+  addEventListener(type, listener, options) {
+    const key = `${type}:${options === true ? "capture" : "bubble"}`;
+    const listeners = this.listeners.get(key) || new Set();
+    listeners.add(listener);
+    this.listeners.set(key, listeners);
+  }
+  removeEventListener(type, listener, options) {
+    const key = `${type}:${options === true ? "capture" : "bubble"}`;
+    this.listeners.get(key)?.delete(listener);
+  }
+  dispatch(type, event = {}, options = false) {
+    const key = `${type}:${options === true ? "capture" : "bubble"}`;
+    const payload = {
+      type,
+      target: this,
+      preventDefault() {},
+      stopPropagation() {},
+      stopImmediatePropagation() {},
+      ...event
+    };
+    for (const listener of [...(this.listeners.get(key) || [])])
+      listener(payload);
+    return payload;
+  }
 }
 
 class FakeTFile {
@@ -420,6 +445,80 @@ test("claims a topic pointer gesture before the host Canvas can also drag it", (
   assert.equal(prevented, 1);
   assert.equal(stopped, 1);
   assert.equal(stoppedImmediate, 1);
+});
+
+test("pointermove updates the dragged topic position and preview after exceeding deadzone", () => {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeElement } = loadSource();
+  const document = new FakeDocument();
+  document.defaultView = {
+    requestAnimationFrame: (cb) => cb(),
+    cancelAnimationFrame: () => {}
+  };
+  const wrapper = new FakeElement("div", document);
+  const target = {};
+  const nodeEl = {
+    contains: (value) => value === target,
+    closest: () => null,
+    addClass() {},
+    removeClass() {},
+    toggleClass() {},
+    classList: { toggle() {} }
+  };
+  const node = {
+    id: "topic",
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 60,
+    isEditing: false,
+    nodeEl,
+    moveTo(pos) {
+      this.x = pos.x;
+      this.y = pos.y;
+    }
+  };
+  let currentPointerPos = { x: 0, y: 0 };
+  const canvas = {
+    wrapperEl: wrapper,
+    nodes: new Map([[node.id, node]]),
+    edges: new Map(),
+    selection: new Set(),
+    getData: () => ({ mindmap: true, nodes: [{ id: node.id, type: "text" }], edges: [] }),
+    posFromEvt: () => ({ ...currentPointerPos }),
+    requestSave() {},
+    requestFrame() {}
+  };
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getIncomingEdges: () => [],
+    getParentNode: () => null,
+    getSelectedNode: () => null,
+    getGraphQuery: () => ({ forest: [] })
+  };
+  plugin.isMindmapCanvas = () => true;
+  plugin.collectSubtreeNodes = () => [];
+  plugin.settings = { defaultNodeWidth: 200, defaultNodeHeight: 60 };
+  const cleanup = plugin.registerNodeDragReparentHandler(canvas);
+
+  // 1. Pointer down on topic card at (0, 0)
+  wrapper.dispatch("pointerdown", {
+    button: 0,
+    pointerId: 1,
+    target
+  }, true);
+
+  // 2. Micro movement (5px <= 10px deadzone)
+  currentPointerPos = { x: 5, y: 0 };
+  document.dispatch("pointermove", { pointerId: 1 }, true);
+  assert.equal(node.x, 0, "node should not move within 10px deadzone");
+
+  // 3. Movement past deadzone (50px > 10px)
+  currentPointerPos = { x: 50, y: 20 };
+  document.dispatch("pointermove", { pointerId: 1 }, true);
+  assert.equal(node.x, 50, "node should move to pointer offset during drag");
+  assert.equal(node.y, 20, "node should move to pointer offset during drag");
+
+  cleanup.dispose("cancel");
 });
 
 

@@ -190,6 +190,13 @@ jobs:
             cat "$RELEASE_DIR/SHA256SUMS"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check out release repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Publish once without mutating an existing release
         shell: bash
         env:

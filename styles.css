@@ -420,6 +420,23 @@
 
 .tomindmap-mindmap-mode
 	.canvas-node.tomindmap-title-only-card
+	.canvas-node-container,
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
+	.canvas-node-content {
+	position: absolute !important;
+	inset: 0 !important;
+	width: 100% !important;
+	height: 100% !important;
+	min-height: 0 !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	transform: none !important;
+	box-sizing: border-box;
+}
+
+.tomindmap-mindmap-mode
+	.canvas-node.tomindmap-title-only-card
 	.canvas-node-content {
 	visibility: hidden !important;
 }

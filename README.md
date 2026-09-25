@@ -18,7 +18,7 @@ On the computer nothing changes: Tab and Enter grow the map, arrows navigate, an
 
 ## Linked topics and nested maps
 
-Right-click a text topic to create an empty, title-named Markdown note, export a whole branch as one title-named Markdown file containing its hierarchy, or move the branch into a separate nested mind map. Generated cards show only their title, open the target on double-click, and remain ordinary Canvas file links so Obsidian can index them. A nested map remembers its immediate parent; right-click its main topic and choose **Go to parent node** to return there. If a generated file target is missing, the card stays intact until you choose **Convert to normal topic** from its menu.
+Right-click a text topic to create an empty, title-named Markdown note, export a whole branch as one title-named Markdown file containing its hierarchy, or move the branch into a separate nested mind map. Generated cards show only their title, open the target on double-click, and remain ordinary Canvas file links so Obsidian can index them. A nested map remembers its immediate parent; right-click its main topic and choose **Go to parent node** to return there. For a generated card, choose **Expand linked content into mind map** to bring its nested Canvas or Markdown hierarchy back into the current map; if its target is missing, choose **Convert to normal topic** to restore only its title.
 
 The export dialog includes **Include nested maps**. When enabled, linked nested maps are expanded into the exported map and placed in available space so cards do not overlap. **Collapse subtree** hides the full descendant branch and its connecting edges; **Expand subtree** restores it.
 

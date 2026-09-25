@@ -14,6 +14,7 @@ const {
 	nextTopicNotePath,
 	isTextTopicNode,
 	getTopicBranch,
+	remapLinkedCanvasData,
 	syncCollapsedVisibility
 } = require('../lib/mindmap-actions.js');
 
@@ -107,6 +108,33 @@ test('identifies text topics and returns a complete branch', () => {
 		getTopicBranch(forest, root, false).map((item) => item.canvasNode.id),
 		['root']
 	);
+});
+
+test('remaps nested linked content at the linked card anchor', () => {
+	let next = 0;
+	const result = remapLinkedCanvasData(
+		{
+			nodes: [
+				{ id: 'root', type: 'text', text: 'Root', x: 100, y: 50, width: 200, height: 60 },
+				{ id: 'child', type: 'text', text: 'Child', x: 400, y: 50, width: 180, height: 60 }
+			],
+			edges: [{ id: 'edge', fromNode: 'root', toNode: 'child' }]
+		},
+		{ x: 1000, y: 200, width: 200, height: 60 },
+		new Set(['root']),
+		() => `new-${++next}`
+	);
+	assert.equal(result.rootId, 'new-1');
+	assert.deepEqual(
+		result.nodes.map((node) => [node.id, node.x, node.y]),
+		[
+			['new-1', 1000, 200],
+			['new-2', 1300, 200]
+		]
+	);
+	assert.deepEqual(result.edges, [
+		{ id: 'new-3', fromNode: 'new-1', toNode: 'new-2' }
+	]);
 });
 
 test('toggles subtree collapse state', () => {

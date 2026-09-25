@@ -16,6 +16,9 @@ _Avoid_: Clean note when the Markdown hierarchy is present.
 **Missing linked topic**: A generated file card whose target no longer exists. It remains a file card until the user explicitly chooses to restore it as a normal topic.
 _Avoid_: Automatically recovered topic when the user has not chosen that action.
 
+**Linked content expansion**: Replacing a generated file card with a normal topic and importing the hierarchy stored in its linked Canvas or Markdown branch while keeping the card's place in the current map.
+_Avoid_: Flattened link when the imported descendants must remain attached.
+
 **Collapsed subtree**: A topic whose descendants and their connecting edges are hidden from the interactive Canvas without being removed from the saved hierarchy.
 _Avoid_: Deleted branch when the underlying structure should remain recoverable.
 

@@ -264,6 +264,39 @@ test("balances root sides by rendered branch height, not a contiguous split", ()
   assert.ok(Math.abs(rightHeight - leftHeight) <= 20);
 });
 
+test("preserves root branch sides when an edit-triggered relayout requests it", () => {
+	const engine = new LayoutEngine({ verticalGap: 20, animate: false });
+	const makeNode = (id, x, height) => ({
+		id,
+		x,
+		y: 0,
+		width: 200,
+		height,
+		moveTo({ x: nextX, y }) {
+			this.x = nextX;
+			this.y = y;
+		},
+		nodeEl: { addClass() {}, removeClass() {} }
+	});
+	const root = makeNode("root", 500, 60);
+	const left = makeNode("left", 0, 400);
+	const right = makeNode("right", 800, 60);
+	const edges = new Map([
+		["left", { id: "left", from: { node: root, side: "left" }, to: { node: left, side: "right" } }],
+		["right", { id: "right", from: { node: root, side: "right" }, to: { node: right, side: "left" } }]
+	]);
+	const canvas = {
+		nodes: new Map([[root.id, root], [left.id, left], [right.id, right]]),
+		edges,
+		getData: () => ({ nodes: [root, left, right].map((node) => ({ id: node.id, type: "text" })) }),
+		requestSave() {},
+		requestFrame() {}
+	};
+	engine.layoutChildren(canvas, "root", null, { preserveRootSides: true });
+	assert.ok(left.x + left.width / 2 < root.x + root.width / 2);
+	assert.ok(right.x + right.width / 2 >= root.x + root.width / 2);
+});
+
 test("rebalances the surrounding root branches while keeping a dragged branch on its dropped side", () => {
   const engine = new LayoutEngine({ verticalGap: 20 });
   const branches = [

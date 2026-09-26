@@ -6529,7 +6529,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			originalMarkdown = await this.app.vault.cachedRead(file);
 			const decoded = this.layoutMarkdownDocument(
 				originalMarkdown,
-				this.markdownLayoutOptions()
+				{
+					...this.markdownLayoutOptions(),
+					fallbackTitle: file.basename
+				}
 			);
 			if (!decoded.ok) {
 				new import_obsidian5.Notice(`Could not read the Markdown hierarchy: ${decoded.reason}`);
@@ -6590,6 +6593,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				throw new Error(LINK_REASON.FAILED);
 			this.verifiedMarkdownLinks.set(created.path, link);
 			await this.app.workspace.getLeaf(false).openFile(created);
+			if (typeof setTimeout === 'function') {
+				setTimeout(() => {
+					try {
+						const activeCanvas = this.canvasApi?.getActiveCanvas?.();
+						if (activeCanvas && this.isMindmapCanvas?.(activeCanvas)) {
+							this.layoutEngine?.layout?.(activeCanvas, { spreadEqually: true });
+							const groupIds = getGroupIds ? getGroupIds(activeCanvas) : new Set();
+							const allNodes = Array.from(activeCanvas.nodes?.values?.() || []).filter((n) => !groupIds.has(n.id));
+							const edges = activeCanvas.getData?.()?.edges || [];
+							const childIds = new Set(edges.map((e) => e.toNode));
+							const roots = allNodes.filter((n) => !childIds.has(n.id));
+							const root = roots[0] || allNodes[0];
+							if (root) {
+								this.canvasApi?.zoomToNode?.(activeCanvas, root, 1.0);
+							}
+						}
+					} catch (_) {}
+				}, 150);
+			}
 			new import_obsidian5.Notice(
 				`Created "${created.path}" and linked it to "${file.path}"`
 			);
@@ -7721,14 +7743,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				// the exact locked target represented by the visible preview arrow.
 				if (!previewResolved) dragAttachment.updatePreview(nodeToMove);
 				const result = dragAttachment.commit(nodeToMove);
-				if (canvas.selection && canvas.selection.size > 1) {
-					for (const item of canvas.selection) {
-						const other = typeof item === 'string' ? canvas.nodes.get(item) : (item?.id ? canvas.nodes.get(item.id) || item : item);
-						if (other && other.id !== nodeToMove.id) {
-							TreeDrag.removeIncomingParentEdges(canvas, this.canvasApi, other);
-						}
-					}
-				}
 				// Mind-map positions are authoritative. Reflow even if the closest
 				// parent stayed the same, so media cannot remain freely positioned.
 				if (this.isMindmapCanvas(canvas)) {
@@ -7776,21 +7790,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 				let hierarchyChanged = false;
 				if (targetNode) {
-					if (TreeDrag.reparentSubtree(
-						canvas,
-						this.canvasApi,
-						nodeToMove,
-						targetNode,
-						'child',
-						forest
-					)) {
-						hierarchyChanged = true;
-					}
-					const otherNodes = new Set([...multiMovingNodes, ...multiTopLevelNodes]);
-					for (const node of otherNodes) {
-						if (node.id === nodeToMove.id || node.id === targetNode.id) continue;
-						TreeDrag.removeIncomingParentEdges(canvas, this.canvasApi, node);
-						hierarchyChanged = true;
+					const rootsToReparent = multiTopLevelNodes.length > 0
+						? [...multiTopLevelNodes]
+						: [nodeToMove];
+					rootsToReparent.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+					for (const root of rootsToReparent) {
+						if (root.id === targetNode.id) continue;
+						if (TreeDrag.reparentSubtree(
+							canvas,
+							this.canvasApi,
+							root,
+							targetNode,
+							'child',
+							forest
+						)) {
+							hierarchyChanged = true;
+						}
 					}
 				} else if (preview?.state === 'detached') {
 					for (const node of multiTopLevelNodes) {
@@ -8089,7 +8104,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					previewResolved = false;
 
 					const excluded = new Set(multiMovingNodes.map((n) => n.id));
-					dragAttachment.begin(node, { excludedIds: excluded });
+					dragAttachment.begin(node, {
+						excludedIds: excluded,
+						movingNodes: multiMovingNodes
+					});
 					setMindmapDragging(true);
 
 					ownerDocument.addEventListener(

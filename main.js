@@ -3301,6 +3301,7 @@ var MarkdownMindMapCodec = (() => {
     const headingStack = [];
     const listStack = [];
     let listAnchor = null;
+    let plainSection = null;
     let lastItem = null;
     let pendingBlank = false;
     let sawH1 = false;
@@ -3470,6 +3471,7 @@ var MarkdownMindMapCodec = (() => {
         });
         headingStack.push({ level: line.level, node });
         listAnchor = node;
+        plainSection = null;
         listStack.length = 0;
         lastItem = { node, heading: true, markerIndent: line.indent };
         continue;
@@ -3491,27 +3493,66 @@ var MarkdownMindMapCodec = (() => {
 
       if (line.kind !== "plain") continue;
       if (line.content === "") continue;
-      const owned =
+
+      const isIndentedContinuation = lastItem && !lastItem.heading && line.indent > lastItem.markerIndent;
+      const isHeadingContinuation = lastItem && lastItem.heading && line.indent <= 3;
+      const isLazyListContinuation =
         lastItem &&
-        (lastItem.heading
-          ? line.indent <= 3
-          : line.indent > lastItem.markerIndent ||
-            (listStack.length > 0 && line.indent >= listStack[listStack.length - 1].indent));
+        !lastItem.heading &&
+        !lastItem.isSection &&
+        !lastItem.isPlain &&
+        !sawBlank &&
+        listStack.length > 0 &&
+        line.indent >= listStack[listStack.length - 1].indent;
+      const owned = isIndentedContinuation || isHeadingContinuation || isLazyListContinuation;
       if (owned) {
         // A lazy continuation - and a second paragraph that stayed inside the
         // same item - belongs to the topic above it, never to a new child.
         continueLast(lastItem.node, line.content, sawBlank, index + 1);
         continue;
       }
-      const node = addIndented(line.content, line.indent, listAnchor, {
+
+      if (plainSection) {
+        plainSection = null;
+        listAnchor = headingStack.length > 0 ? headingStack[headingStack.length - 1].node : null;
+        listStack.length = 0;
+      }
+
+      const isFollowedByList = (startIndex) => {
+        for (let k = startIndex + 1; k < classified.lines.length; k++) {
+          const candidate = classified.lines[k];
+          if (candidate.kind === "blank" || candidate.kind === "comment-open" || candidate.kind === "comment-body") continue;
+          return candidate.kind === "list";
+        }
+        return false;
+      };
+
+      const introducesList = isFollowedByList(index) && line.indent === 0 && line.content.length <= 250;
+      if (introducesList) {
+        const parent = headingStack.length > 0 ? headingStack[headingStack.length - 1].node : null;
+        const node = addTopic(line.content, parent, null, {
+          startLine: index,
+          endLine: index + 1,
+          kind: "plain",
+          indent: line.text.slice(0, line.text.length - line.content.length),
+          prefix: line.text.slice(0, line.text.length - line.content.length)
+        });
+        plainSection = node;
+        listAnchor = node;
+        listStack.length = 0;
+        lastItem = { node, heading: false, markerIndent: line.indent, isSection: true };
+        continue;
+      }
+
+      const parent = headingStack.length > 0 ? headingStack[headingStack.length - 1].node : listAnchor;
+      const node = addIndented(line.content, line.indent, parent, {
         startLine: index,
         endLine: index + 1,
         kind: "plain",
         indent: line.text.slice(0, line.text.length - line.content.length),
         prefix: line.text.slice(0, line.text.length - line.content.length)
       });
-      listStack.push({ indent: line.indent, node });
-      lastItem = { node, heading: false, markerIndent: line.indent };
+      lastItem = { node, heading: false, markerIndent: line.indent, isPlain: true };
     }
     if (budgetError) return budgetError;
 
@@ -3519,7 +3560,11 @@ var MarkdownMindMapCodec = (() => {
     if (depth > budgets.maxDepth)
       return failure(MARKDOWN_CODEC_REASON.DEPTH_BUDGET, { depth, maxDepth: budgets.maxDepth });
 
-    const title = frontmatterTitle(classified.frontmatter);
+    const title =
+      frontmatterTitle(classified.frontmatter) ||
+      (typeof options.fallbackTitle === "string" && options.fallbackTitle.trim()
+        ? options.fallbackTitle.trim()
+        : null);
     if (title && !sawH1 && roots.length > 0) {
       roots.unshift({
         id: uniqueId(null),
@@ -51388,8 +51433,19 @@ var {
        * reuses it: preview, commit, and rollback all re-point the same authored
        * object instead of rebuilding a default arrow.
        */
-      originalEdgeObjects = draggedNode ? incomingEdges(draggedNode) : [];
-      originalLinks = originalEdgeObjects.map(snapshotEdgePayload);
+      const moving = options?.movingNodes && options.movingNodes.length > 0
+        ? options.movingNodes
+        : (draggedNode ? [draggedNode] : []);
+      originalEdgeObjects = [];
+      for (const mNode of moving) {
+        if (!mNode) continue;
+        for (const edge of incomingEdges(mNode)) {
+          if (!originalEdgeObjects.includes(edge)) {
+            originalEdgeObjects.push(edge);
+          }
+        }
+      }
+      originalLinks = draggedNode ? incomingEdges(draggedNode).map(snapshotEdgePayload) : [];
       originalParent =
         canvas.nodes?.get?.(originalLinks[0]?.fromNodeId) || null;
       beginTopology = permanentTopologySignature();
@@ -59174,7 +59230,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			originalMarkdown = await this.app.vault.cachedRead(file);
 			const decoded = this.layoutMarkdownDocument(
 				originalMarkdown,
-				this.markdownLayoutOptions()
+				{
+					...this.markdownLayoutOptions(),
+					fallbackTitle: file.basename
+				}
 			);
 			if (!decoded.ok) {
 				new import_obsidian5.Notice(`Could not read the Markdown hierarchy: ${decoded.reason}`);
@@ -59235,6 +59294,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				throw new Error(LINK_REASON.FAILED);
 			this.verifiedMarkdownLinks.set(created.path, link);
 			await this.app.workspace.getLeaf(false).openFile(created);
+			if (typeof setTimeout === 'function') {
+				setTimeout(() => {
+					try {
+						const activeCanvas = this.canvasApi?.getActiveCanvas?.();
+						if (activeCanvas && this.isMindmapCanvas?.(activeCanvas)) {
+							this.layoutEngine?.layout?.(activeCanvas, { spreadEqually: true });
+							const groupIds = getGroupIds ? getGroupIds(activeCanvas) : new Set();
+							const allNodes = Array.from(activeCanvas.nodes?.values?.() || []).filter((n) => !groupIds.has(n.id));
+							const edges = activeCanvas.getData?.()?.edges || [];
+							const childIds = new Set(edges.map((e) => e.toNode));
+							const roots = allNodes.filter((n) => !childIds.has(n.id));
+							const root = roots[0] || allNodes[0];
+							if (root) {
+								this.canvasApi?.zoomToNode?.(activeCanvas, root, 1.0);
+							}
+						}
+					} catch (_) {}
+				}, 150);
+			}
 			new import_obsidian5.Notice(
 				`Created "${created.path}" and linked it to "${file.path}"`
 			);
@@ -60366,14 +60444,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				// the exact locked target represented by the visible preview arrow.
 				if (!previewResolved) dragAttachment.updatePreview(nodeToMove);
 				const result = dragAttachment.commit(nodeToMove);
-				if (canvas.selection && canvas.selection.size > 1) {
-					for (const item of canvas.selection) {
-						const other = typeof item === 'string' ? canvas.nodes.get(item) : (item?.id ? canvas.nodes.get(item.id) || item : item);
-						if (other && other.id !== nodeToMove.id) {
-							TreeDrag.removeIncomingParentEdges(canvas, this.canvasApi, other);
-						}
-					}
-				}
 				// Mind-map positions are authoritative. Reflow even if the closest
 				// parent stayed the same, so media cannot remain freely positioned.
 				if (this.isMindmapCanvas(canvas)) {
@@ -60421,21 +60491,22 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 				let hierarchyChanged = false;
 				if (targetNode) {
-					if (TreeDrag.reparentSubtree(
-						canvas,
-						this.canvasApi,
-						nodeToMove,
-						targetNode,
-						'child',
-						forest
-					)) {
-						hierarchyChanged = true;
-					}
-					const otherNodes = new Set([...multiMovingNodes, ...multiTopLevelNodes]);
-					for (const node of otherNodes) {
-						if (node.id === nodeToMove.id || node.id === targetNode.id) continue;
-						TreeDrag.removeIncomingParentEdges(canvas, this.canvasApi, node);
-						hierarchyChanged = true;
+					const rootsToReparent = multiTopLevelNodes.length > 0
+						? [...multiTopLevelNodes]
+						: [nodeToMove];
+					rootsToReparent.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+					for (const root of rootsToReparent) {
+						if (root.id === targetNode.id) continue;
+						if (TreeDrag.reparentSubtree(
+							canvas,
+							this.canvasApi,
+							root,
+							targetNode,
+							'child',
+							forest
+						)) {
+							hierarchyChanged = true;
+						}
 					}
 				} else if (preview?.state === 'detached') {
 					for (const node of multiTopLevelNodes) {
@@ -60734,7 +60805,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					previewResolved = false;
 
 					const excluded = new Set(multiMovingNodes.map((n) => n.id));
-					dragAttachment.begin(node, { excludedIds: excluded });
+					dragAttachment.begin(node, {
+						excludedIds: excluded,
+						movingNodes: multiMovingNodes
+					});
 					setMindmapDragging(true);
 
 					ownerDocument.addEventListener(

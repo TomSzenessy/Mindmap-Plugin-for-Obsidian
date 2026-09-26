@@ -188,16 +188,44 @@
 	display: none;
 }
 
+.tomindmap-outline .tree-item-self {
+	display: flex;
+	align-items: center;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	padding: 2px 4px;
+}
+
+.tomindmap-outline .collapse-icon {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	outline: none !important;
+	padding: 0 !important;
+	margin: 0 !important;
+	appearance: none !important;
+	-webkit-appearance: none !important;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
 .tomindmap-outline .tomindmap-outline-item {
 	background: transparent !important;
 	border: none !important;
 	box-shadow: none !important;
-	padding: 0 !important;
+	outline: none !important;
+	padding: 0 4px !important;
 	margin: 0 !important;
+	appearance: none !important;
+	-webkit-appearance: none !important;
 	font: inherit;
 	color: inherit;
 	text-align: left;
 	cursor: pointer;
+	flex: 1;
+	min-width: 0;
 }
 
 .tomindmap-outline .tomindmap-outline-item .tree-item-inner {
@@ -206,6 +234,10 @@
 	white-space: nowrap;
 	width: 0;
 	flex: 1;
+}
+
+.tomindmap-outline .tree-item-self:hover {
+	background-color: var(--background-modifier-hover);
 }
 
 .tomindmap-outline .tree-item-self:has(.tomindmap-outline-item.is-active),
@@ -242,6 +274,9 @@
 	transition: opacity 150ms ease-in-out;
 }
 
+.tomindmap-outline
+	.tree-item-self:hover
+	.tomindmap-outline-drag-handle,
 .tomindmap-outline
 	.tomindmap-outline-item:hover
 	.tomindmap-outline-drag-handle {

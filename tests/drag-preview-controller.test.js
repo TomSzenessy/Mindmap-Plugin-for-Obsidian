@@ -1007,3 +1007,26 @@ test("cancelling a detached drag restores the original edge", () => {
   assert.equal(fixture.activeEdges.length, 1);
 });
 
+test("hides incoming edges of all movingNodes during drag and restores on cancel", () => {
+  const fixture = dragFixture({ withOriginalParent: true });
+  const otherMoving = cardWithClasses({ id: "other-moving", x: 150, y: 80, width: 100, height: 60 });
+  fixture.canvas.nodes.set(otherMoving.id, otherMoving);
+  const otherEdge = fixture.canvasApi.createEdge(
+    fixture.canvas,
+    fixture.oldParent,
+    otherMoving,
+    "right",
+    "left",
+    "#4c8bf5"
+  );
+  const draggedEdge = fixture.canvasApi.getIncomingEdges(null, fixture.dragged)[0];
+
+  fixture.controller.begin(fixture.dragged, { movingNodes: [fixture.dragged, otherMoving] });
+  assert.equal(draggedEdge.lineGroupEl.style.display, "none");
+  assert.equal(otherEdge.lineGroupEl.style.display, "none");
+
+  fixture.controller.cancel();
+  assert.equal(draggedEdge.lineGroupEl.style.display, "");
+  assert.equal(otherEdge.lineGroupEl.style.display, "");
+});
+

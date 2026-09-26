@@ -1399,6 +1399,57 @@ test("layout produces flat nodes, edges, and root ids from a decoded document", 
   assert.deepEqual(empty.value.rootIds, []);
 });
 
+test("plain lines introducing lists become section topics and synthesize central root with fallbackTitle", () => {
+  const source = [
+    "- Quick bullet 1",
+    "- Quick bullet 2",
+    "",
+    "Standalone thought",
+    "",
+    "Instagram",
+    "- Show product",
+    "- Show process",
+    "",
+    "Publishing considerations",
+    "- Royalties are low",
+    "- Need exclusive contract",
+    "",
+    "Final thoughts"
+  ].join("\n");
+
+  const decodedWithFallback = decode(source, { fallbackTitle: "Board Game Notes" });
+  assert.equal(decodedWithFallback.roots.length, 1);
+  assert.equal(decodedWithFallback.roots[0].text, "Board Game Notes");
+  const topLabels = decodedWithFallback.roots[0].children.map((c) => c.text);
+  assert.deepEqual(topLabels, [
+    "Quick bullet 1",
+    "Quick bullet 2",
+    "Standalone thought",
+    "Instagram",
+    "Publishing considerations",
+    "Final thoughts"
+  ]);
+
+  const instagram = decodedWithFallback.roots[0].children.find((c) => c.text === "Instagram");
+  assert.ok(instagram);
+  assert.deepEqual(
+    instagram.children.map((c) => c.text),
+    ["Show product", "Show process"]
+  );
+
+  const publishing = decodedWithFallback.roots[0].children.find((c) => c.text === "Publishing considerations");
+  assert.ok(publishing);
+  assert.deepEqual(
+    publishing.children.map((c) => c.text),
+    ["Royalties are low", "Need exclusive contract"]
+  );
+
+  // Sides are assigned to branches
+  const positions = decodedWithFallback.roots[0].children.map((c) => c.position);
+  assert.ok(positions.includes("right"));
+  assert.ok(positions.includes("left"));
+});
+
 /* ------------------------------------------------------------------ */
 /* registry compatibility                                             */
 /* ------------------------------------------------------------------ */

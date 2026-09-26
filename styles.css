@@ -189,79 +189,103 @@
 }
 
 .tomindmap-outline .tree-item-self {
-	display: flex;
-	align-items: center;
-	padding: 1px 0;
+	position: relative !important;
+	display: flex !important;
+	align-items: center !important;
+	gap: 6px !important;
+	padding: 2px 0 !important;
 	background: transparent !important;
 	border: none !important;
 }
 
 .tomindmap-outline .collapse-icon {
+	position: static !important;
+	left: auto !important;
+	top: auto !important;
+	right: auto !important;
+	bottom: auto !important;
+	flex-shrink: 0 !important;
+	width: 20px !important;
+	height: 20px !important;
+	min-width: 20px !important;
+	margin: 0 !important;
+	padding: 0 !important;
 	background: transparent !important;
 	border: none !important;
 	box-shadow: none !important;
 	outline: none !important;
-	padding: 0 !important;
-	margin: 0 4px 0 0 !important;
 	appearance: none !important;
 	-webkit-appearance: none !important;
-	cursor: pointer;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	height: 18px;
-	min-width: 18px;
-	color: var(--text-muted);
+	cursor: pointer !important;
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	color: var(--text-muted) !important;
+	border-radius: var(--radius-s) !important;
+	transition: color 120ms ease, background-color 120ms ease, transform 150ms ease !important;
 }
 
 .tomindmap-outline .collapse-icon:hover {
-	color: var(--text-normal);
+	color: var(--text-normal) !important;
+	background-color: var(--background-modifier-hover) !important;
 }
 
 .tomindmap-outline .collapse-icon:disabled {
-	opacity: 0.35;
-	cursor: default;
-	pointer-events: none;
+	opacity: 0.35 !important;
+	cursor: default !important;
+	pointer-events: none !important;
 }
 
 .tomindmap-outline .tomindmap-outline-item {
+	position: relative !important;
+	left: auto !important;
+	top: auto !important;
 	background-color: var(--background-secondary) !important;
 	border: 1px solid var(--background-modifier-border) !important;
-	border-radius: var(--radius-s) !important;
-	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
-	padding: 4px 10px !important;
+	border-radius: 8px !important;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+	padding: 6px 12px !important;
 	margin: 2px 0 !important;
-	font: inherit;
-	font-size: var(--font-ui-small);
-	color: var(--text-normal);
-	cursor: pointer;
-	flex: 1;
-	min-width: 0;
+	margin-inline-start: 0 !important;
+	margin-inline-end: 0 !important;
+	font: inherit !important;
+	font-size: var(--font-ui-small, 13px) !important;
+	font-weight: 500 !important;
+	line-height: 1.4 !important;
+	letter-spacing: -0.01em !important;
+	color: var(--text-normal) !important;
+	cursor: pointer !important;
+	flex: 1 1 auto !important;
+	min-width: 0 !important;
 	display: block !important;
 	text-align: left !important;
 	white-space: nowrap !important;
 	overflow: hidden !important;
 	text-overflow: ellipsis !important;
-	transition: background-color 100ms ease, border-color 100ms ease;
+	transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease !important;
 }
 
 .tomindmap-outline .tomindmap-outline-item:hover {
 	background-color: var(--background-modifier-hover) !important;
-	border-color: var(--interactive-accent) !important;
+	border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border)) !important;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12) !important;
 	color: var(--text-normal) !important;
 }
 
 .tomindmap-outline .tomindmap-outline-item.is-active,
 .tomindmap-outline .tomindmap-outline-item.is-selected {
-	background-color: var(--background-modifier-active-hover) !important;
+	background-color: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-secondary)) !important;
 	border-color: var(--interactive-accent) !important;
-	box-shadow: 0 0 0 1px var(--interactive-accent) !important;
+	box-shadow: 0 0 0 1px var(--interactive-accent), 0 2px 8px rgba(0, 0, 0, 0.16) !important;
 	color: var(--text-normal) !important;
+	font-weight: 600 !important;
 }
 
 .tomindmap-outline .collapse-icon svg {
-	transition: transform 100ms ease-in-out;
+	width: 14px !important;
+	height: 14px !important;
+	display: block !important;
+	transition: transform 120ms ease-in-out !important;
 	transform: rotate(-90deg);
 }
 

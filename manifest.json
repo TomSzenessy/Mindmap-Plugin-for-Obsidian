@@ -1,7 +1,7 @@
 {
 	"id": "tomindmap",
 	"name": "ToMindMap",
-	"version": "0.13.14",
+	"version": "0.13.15",
 	"minAppVersion": "1.5.0",
 	"description": "A keyboard and touch mind mapper for Obsidian Canvas with linked topics, auto-layout, and export.",
 	"author": "tom",

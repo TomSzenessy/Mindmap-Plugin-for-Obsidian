@@ -55136,24 +55136,26 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.runAsync(() => this.showOutline(canvas, true), 'show outline');
 		};
 		this.keyboardHandler.register();
-		this.registerDomEvent(
-			document,
-			'copy',
-			(event) => this.handleMindMapClipboardCopy(event, false),
-			true
-		);
-		this.registerDomEvent(
-			document,
-			'cut',
-			(event) => this.handleMindMapClipboardCopy(event, true),
-			true
-		);
-		this.registerDomEvent(
-			document,
-			'paste',
-			(event) => this.handleMindMapClipboardPaste(event),
-			true
-		);
+		if (typeof document !== 'undefined') {
+			this.registerDomEvent(
+				document,
+				'copy',
+				(event) => this.handleMindMapClipboardCopy(event, false),
+				true
+			);
+			this.registerDomEvent(
+				document,
+				'cut',
+				(event) => this.handleMindMapClipboardCopy(event, true),
+				true
+			);
+			this.registerDomEvent(
+				document,
+				'paste',
+				(event) => this.handleMindMapClipboardPaste(event),
+				true
+			);
+		}
 		this.addCommand({
 			id: 'mindmap-relayout',
 			name: 'Re-layout mind map',
@@ -55300,7 +55302,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.addCommand({
 			id: 'mindmap-toggle-subtree',
 			name: 'Collapse or expand selected subtree',
-			hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'C' }],
 			checkCallback: (checking) => {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas || !this.isMindmapCanvas(canvas)) return false;
@@ -55416,6 +55417,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		});
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
+				if (menu) menu.__tomindmap_file = file;
 				this.interceptCanvasFileMenu(menu, file);
 				if (file instanceof import_obsidian5.TFolder) {
 					const hasMindMap = (menu.items || []).some((item) =>
@@ -55529,6 +55531,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							);
 						})
 				);
+			})
+		);
+		this.registerEvent(
+			this.app.workspace.on('files-menu', (menu, files) => {
+				const file = Array.isArray(files) && files.length > 0 ? files[0] : null;
+				if (menu) menu.__tomindmap_file = file;
+				this.interceptCanvasFileMenu(menu, file);
 			})
 		);
 		this.registerEvent(
@@ -56264,8 +56273,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return;
 		}
 		const canvasData = canvas.getData();
+		const isMindmap = this.isMindmapCanvas(canvas);
+		canvas.wrapperEl?.toggleClass('tomindmap-mindmap-mode', isMindmap);
 		this.captureCanvasDecorations(canvas);
-		if (this.isMindmapCanvas(canvas)) {
+		if (isMindmap) {
 			MindmapActions.syncCollapsedVisibility(canvas);
 			this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
 		}
@@ -62710,7 +62721,71 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 
+	patchMenuPrototype() {
+		if (this.__menuPatched) return;
+		this.__menuPatched = true;
+		const self = this;
+		const origSetTitle = import_obsidian5.MenuItem?.prototype?.setTitle;
+		const origOnClick = import_obsidian5.MenuItem?.prototype?.onClick;
+		this.__origMenuItemSetTitle = origSetTitle;
+		this.__origMenuItemOnClick = origOnClick;
+
+		if (typeof origSetTitle === 'function') {
+			import_obsidian5.MenuItem.prototype.setTitle = function (title) {
+				if (self.settings?.renameCreateCanvas) {
+					const text = typeof title === 'string'
+						? title
+						: (title?.textContent || '');
+					if (/^(?:create\s+)?new\s+canvas$/i.test(text.trim())) {
+						this.__tomindmap_was_canvas = true;
+						this.setIcon?.('git-fork');
+						return origSetTitle.call(this, 'New mind map');
+					}
+				}
+				return origSetTitle.call(this, title);
+			};
+		}
+
+		if (typeof origOnClick === 'function') {
+			import_obsidian5.MenuItem.prototype.onClick = function (callback) {
+				if (this.__tomindmap_was_canvas) {
+					return origOnClick.call(this, (evt) => {
+						const menuFile = this.menu?.__tomindmap_file;
+						let folder = '';
+						if (menuFile) {
+							const isFile = Boolean(
+								(typeof menuFile?.extension === 'string' && menuFile.extension.length > 0) ||
+								(typeof menuFile?.path === 'string' && /\.[a-z0-9]+$/i.test(menuFile.path))
+							);
+							folder = isFile ? (menuFile.parent?.path || '') : (menuFile.path || '');
+						}
+						self.runAsync(() => self.createNewMindMap(folder), 'create new mind map');
+					});
+				}
+				return origOnClick.call(this, callback);
+			};
+		}
+	}
+
+	unpatchMenuPrototype() {
+		if (!this.__menuPatched) return;
+		if (this.__origMenuItemSetTitle && import_obsidian5.MenuItem?.prototype) {
+			import_obsidian5.MenuItem.prototype.setTitle = this.__origMenuItemSetTitle;
+			this.__origMenuItemSetTitle = null;
+		}
+		if (this.__origMenuItemOnClick && import_obsidian5.MenuItem?.prototype) {
+			import_obsidian5.MenuItem.prototype.onClick = this.__origMenuItemOnClick;
+			this.__origMenuItemOnClick = null;
+		}
+		this.__menuPatched = false;
+	}
+
 	applyCanvasCommandRename(restore = false) {
+		if (restore || !this.settings.renameCreateCanvas) {
+			this.unpatchMenuPrototype();
+		} else {
+			this.patchMenuPrototype();
+		}
 		const cmd = this.app.commands?.commands?.['canvas:new-file'];
 		if (cmd) {
 			if (restore || !this.settings.renameCreateCanvas) {
@@ -62736,12 +62811,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		if (this.settings.renameCreateCanvas && !restore) {
 			if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
-				const ribbonIcons = document.querySelectorAll('.side-dock-ribbon-action');
-				if (ribbonIcons) {
-					for (const icon of ribbonIcons) {
-						const label = icon.getAttribute?.('aria-label') || '';
-						if (/^create new canvas$/i.test(label) || /^new canvas$/i.test(label)) {
-							icon.setAttribute?.('aria-label', 'Create new mind map');
+				const candidateIcons = document.querySelectorAll(
+					'.side-dock-ribbon-action, .workspace-ribbon .clickable-icon, [aria-label*="canvas" i]'
+				);
+				for (const icon of candidateIcons) {
+					const label = icon.getAttribute?.('aria-label') || '';
+					if (/^(?:create\s+)?new\s+canvas$/i.test(label.trim())) {
+						icon.setAttribute?.('aria-label', 'Create new mind map');
+						if (!icon.__tomindmap_click_hooked) {
+							icon.__tomindmap_click_hooked = true;
+							icon.addEventListener('click', (e) => {
+								e.preventDefault();
+								e.stopImmediatePropagation();
+								this.runAsync(() => this.createNewMindMap(), 'create new mind map');
+							}, true);
 						}
 					}
 				}
@@ -62753,12 +62836,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!menu) return;
 		const rename = () => {
 			if (!this.settings.renameCreateCanvas) return;
-			const isFolder = file instanceof import_obsidian5.TFolder ||
-				Array.isArray(file?.children) ||
-				(typeof file?.path === 'string' && !file?.extension);
-			const folderPath = isFolder
-				? file.path
-				: (file?.parent?.path || '');
+			const isFile = Boolean(
+				(typeof file?.extension === 'string' && file.extension.length > 0) ||
+				(typeof file?.path === 'string' && /\.[a-z0-9]+$/i.test(file.path))
+			);
+			const folderPath = isFile
+				? (file?.parent?.path || '')
+				: (file?.path || '');
 			if (Array.isArray(menu.items)) {
 				for (const item of menu.items) {
 					const title = String(item.title || item.titleEl?.textContent || item.dom?.textContent || '').trim();
@@ -62796,28 +62880,39 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (typeof targetFolder === 'string') {
 			folderPath = targetFolder;
 		} else {
+			let focusedFile = null;
+			if (typeof document !== 'undefined') {
+				const activeEl = document.querySelector?.(
+					'.nav-file-title.is-active, .nav-folder-title.is-active, .nav-file.is-active, .nav-folder.is-active, .nav-file.is-selected, .nav-folder.is-selected'
+				);
+				const dataPath = activeEl?.getAttribute?.('data-path') || activeEl?.closest?.('[data-path]')?.getAttribute?.('data-path');
+				if (dataPath) {
+					focusedFile = this.app.vault.getAbstractFileByPath(dataPath);
+				}
+			}
+			if (!focusedFile) {
+				const leaves = this.app.workspace.getLeavesOfType('file-explorer');
+				const explorer = leaves[0]?.view;
+				focusedFile = explorer?.activeFileItem?.file ||
+					explorer?.selectedItem?.file ||
+					explorer?.tree?.focusedItem?.file;
+			}
+
 			const activeFile = this.app.workspace.getActiveFile() ||
 				this.app.workspace.getActiveViewOfType(import_obsidian5.ItemView)?.file ||
 				this.app.workspace.activeLeaf?.view?.file;
 
-			if (activeFile && activeFile.parent) {
-				folderPath = activeFile.parent.path;
-			} else {
-				const leaves = this.app.workspace.getLeavesOfType('file-explorer');
-				const explorer = leaves[0]?.view;
-				const focused = explorer?.activeFileItem?.file ||
-					explorer?.selectedItem?.file ||
-					explorer?.tree?.focusedItem?.file;
-				if (focused) {
-					const isFolder = focused instanceof import_obsidian5.TFolder ||
-						Array.isArray(focused?.children) ||
-						(typeof focused?.path === 'string' && !focused?.extension);
-					folderPath = isFolder ? focused.path : (focused.parent?.path || '');
-				} else if (this.app.fileManager?.getNewFileParent) {
-					const parent = this.app.fileManager.getNewFileParent(activeFile?.path || '');
-					if (parent && parent.path) {
-						folderPath = parent.path;
-					}
+			const reference = focusedFile || activeFile;
+			if (reference) {
+				const isFile = Boolean(
+					(typeof reference?.extension === 'string' && reference.extension.length > 0) ||
+					(typeof reference?.path === 'string' && /\.[a-z0-9]+$/i.test(reference.path))
+				);
+				folderPath = isFile ? (reference.parent?.path || '') : (reference.path || '');
+			} else if (this.app.fileManager?.getNewFileParent) {
+				const parent = this.app.fileManager.getNewFileParent(activeFile?.path || '');
+				if (parent && parent.path) {
+					folderPath = parent.path;
 				}
 			}
 		}

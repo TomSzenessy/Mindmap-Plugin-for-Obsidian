@@ -447,6 +447,8 @@
 
 /* Collapsed subtrees remain in the saved graph, but their cards are hidden
  * from the interactive Canvas and from automatic layout. */
+.canvas-node.tomindmap-collapsed-hidden,
+.canvas-node .tomindmap-collapsed-hidden,
 .tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-hidden,
 .tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-hidden {
 	display: none !important;

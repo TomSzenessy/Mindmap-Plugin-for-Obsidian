@@ -242,7 +242,11 @@ function obsidianStub() {
     showAtPosition() {}
     showAtMouseEvent() {}
   }
-  class MenuItem {}
+  class MenuItem {
+    setTitle(title) { this.title = title; return this; }
+    setIcon(icon) { this.icon = icon; return this; }
+    onClick(callback) { this.callback = callback; return this; }
+  }
   class Notice {
     constructor(message) { this.message = message; FakeElement.notices ||= []; FakeElement.notices.push(message); }
   }
@@ -1287,5 +1291,98 @@ test("createNewMindMap resolves folder from file-explorer when no active file", 
 
   await plugin.createNewMindMap();
   assert.equal(createdPath, "Docs/ActiveFolder/Untitled.canvas");
+});
+
+test("mindmap-toggle-subtree has no default hotkey conflicting with canvas creation", async () => {
+  const { default: CanvasMindMapPlugin, FakeDocument } = loadSource();
+  const prevDoc = global.document;
+  global.document = new FakeDocument();
+  try {
+    const commands = [];
+    const app = {
+      workspace: {
+        on: () => ({}),
+        onLayoutReady: () => {},
+        getActiveViewOfType: () => null,
+        getLeavesOfType: () => []
+      },
+      vault: {
+        on: () => ({})
+      }
+    };
+    const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+    plugin.loadData = async () => ({});
+    plugin.saveData = async () => {};
+    plugin.addCommand = (cmd) => { commands.push(cmd); };
+    await plugin.onload();
+
+    const toggleCmd = commands.find((c) => c.id === "mindmap-toggle-subtree");
+    assert.ok(toggleCmd);
+    assert.equal(toggleCmd.hotkeys, undefined);
+  } finally {
+    global.document = prevDoc;
+  }
+});
+
+test("createNewMindMap creates root topic and creates in folder of active mindmap canvas", async () => {
+  const { default: CanvasMindMapPlugin, FakeTFile } = loadSource();
+  let createdPath = null;
+  let createdContent = null;
+  const activeCanvasFile = new FakeTFile("MindMaps/Work/Project.canvas");
+  const app = {
+    workspace: {
+      getActiveFile: () => activeCanvasFile,
+      getActiveViewOfType: () => null,
+      getLeavesOfType: () => [],
+      getLeaf: () => ({ openFile: async () => {} })
+    },
+    vault: {
+      getAbstractFileByPath: () => null,
+      create: async (p, content) => {
+        createdPath = p;
+        createdContent = content;
+        return { path: p, basename: "Untitled" };
+      }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getActiveCanvas: () => null,
+    zoomToNode: () => {},
+    startEditing: () => {}
+  };
+
+  await plugin.createNewMindMap();
+  assert.equal(createdPath, "MindMaps/Work/Untitled.canvas");
+  const parsed = JSON.parse(createdContent);
+  assert.equal(parsed.mindmap, true);
+  assert.equal(parsed.nodes.length, 1);
+  assert.equal(parsed.nodes[0].text, "# Mind map");
+});
+
+test("patchMenuPrototype intercepts MenuItem.prototype.setTitle and onClick", async () => {
+  const { default: CanvasMindMapPlugin, obsidian } = loadSource();
+  let createdInFolder = null;
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.settings = { renameCreateCanvas: true };
+  plugin.createNewMindMap = async (folder) => { createdInFolder = folder; };
+
+  plugin.applyCanvasCommandRename();
+
+  const item = new obsidian.MenuItem();
+  item.menu = { __tomindmap_file: { path: "Vault/Subfolder" } };
+  item.setTitle("New canvas");
+  assert.equal(item.title, "New mind map");
+  assert.equal(item.icon, "git-fork");
+
+  item.onClick(() => {});
+  item.callback();
+  await Promise.resolve();
+  assert.equal(createdInFolder, "Vault/Subfolder");
+
+  plugin.applyCanvasCommandRename(true);
+  const unpatchedItem = new obsidian.MenuItem();
+  unpatchedItem.setTitle("New canvas");
+  assert.equal(unpatchedItem.title, "New canvas");
 });
 

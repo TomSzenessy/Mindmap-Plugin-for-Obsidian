@@ -191,9 +191,9 @@
 .tomindmap-outline .tree-item-self {
 	display: flex;
 	align-items: center;
-	border-radius: var(--radius-s);
-	cursor: pointer;
-	padding: 2px 4px;
+	padding: 1px 0;
+	background: transparent !important;
+	border: none !important;
 }
 
 .tomindmap-outline .collapse-icon {
@@ -202,54 +202,62 @@
 	box-shadow: none !important;
 	outline: none !important;
 	padding: 0 !important;
-	margin: 0 !important;
+	margin: 0 4px 0 0 !important;
 	appearance: none !important;
 	-webkit-appearance: none !important;
 	cursor: pointer;
-	display: flex;
+	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	width: 18px;
+	height: 18px;
+	min-width: 18px;
+	color: var(--text-muted);
+}
+
+.tomindmap-outline .collapse-icon:hover {
+	color: var(--text-normal);
+}
+
+.tomindmap-outline .collapse-icon:disabled {
+	opacity: 0.35;
+	cursor: default;
+	pointer-events: none;
 }
 
 .tomindmap-outline .tomindmap-outline-item {
-	background: transparent !important;
-	border: none !important;
-	box-shadow: none !important;
-	outline: none !important;
-	padding: 0 4px !important;
-	margin: 0 !important;
-	appearance: none !important;
-	-webkit-appearance: none !important;
+	background-color: var(--background-secondary) !important;
+	border: 1px solid var(--background-modifier-border) !important;
+	border-radius: var(--radius-s) !important;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
+	padding: 4px 10px !important;
+	margin: 2px 0 !important;
 	font: inherit;
-	color: inherit;
-	text-align: left;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
 	cursor: pointer;
 	flex: 1;
 	min-width: 0;
+	display: block !important;
+	text-align: left !important;
+	white-space: nowrap !important;
+	overflow: hidden !important;
+	text-overflow: ellipsis !important;
+	transition: background-color 100ms ease, border-color 100ms ease;
 }
 
-.tomindmap-outline .tomindmap-outline-item .tree-item-inner {
-	text-overflow: ellipsis;
-	overflow: hidden;
-	white-space: nowrap;
-	width: 0;
-	flex: 1;
+.tomindmap-outline .tomindmap-outline-item:hover {
+	background-color: var(--background-modifier-hover) !important;
+	border-color: var(--interactive-accent) !important;
+	color: var(--text-normal) !important;
 }
 
-.tomindmap-outline .tree-item-self:hover {
-	background-color: var(--background-modifier-hover);
-}
-
-.tomindmap-outline .tree-item-self:has(.tomindmap-outline-item.is-active),
-.tomindmap-outline .tree-item-self.is-active {
-	background-color: var(--background-modifier-hover);
-	border-radius: var(--radius-s);
-}
-
-.tomindmap-outline .tree-item-self:has(.tomindmap-outline-item.is-selected),
-.tomindmap-outline .tree-item-self.is-selected {
-	background-color: var(--background-modifier-active-hover);
-	border-radius: var(--radius-s);
+.tomindmap-outline .tomindmap-outline-item.is-active,
+.tomindmap-outline .tomindmap-outline-item.is-selected {
+	background-color: var(--background-modifier-active-hover) !important;
+	border-color: var(--interactive-accent) !important;
+	box-shadow: 0 0 0 1px var(--interactive-accent) !important;
+	color: var(--text-normal) !important;
 }
 
 .tomindmap-outline .collapse-icon svg {

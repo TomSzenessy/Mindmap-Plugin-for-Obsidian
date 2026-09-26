@@ -461,26 +461,37 @@
 	pointer-events: none !important;
 }
 
-.tomindmap-mindmap-mode
-	.canvas-node.tomindmap-collapsed-node
-	.canvas-node-container,
-.tomindmap-mindmap-mode
-	.canvas-node .tomindmap-collapsed-node
-	.canvas-node-container {
+.canvas-node.tomindmap-collapsed-node .canvas-node-container,
+.canvas-node .tomindmap-collapsed-node .canvas-node-container,
+.canvas-node.tomindmap-collapsed-node.canvas-node-container,
+.canvas-node .canvas-node-container.tomindmap-collapsed-node,
+.canvas-node-container.tomindmap-collapsed-node,
+.tomindmap-collapsed-node .canvas-node-container,
+.tomindmap-collapsed-node.canvas-node-container,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-node .canvas-node-container,
+.tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-node .canvas-node-container,
+.tomindmap-mindmap-mode .canvas-node .canvas-node-container.tomindmap-collapsed-node,
+.tomindmap-mindmap-mode .canvas-node-container.tomindmap-collapsed-node {
 	outline: 2px dashed var(--interactive-accent) !important;
-	outline-offset: 2px;
+	outline-offset: 2px !important;
 }
 
-.tomindmap-mindmap-mode
-	.canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
-.tomindmap-mindmap-mode
-	.canvas-node .tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before {
-	content: '＋';
+.canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.canvas-node .tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.canvas-node.tomindmap-collapsed-node .canvas-node-container:not(.tomindmap-title-only-card)::before,
+.canvas-node .canvas-node-container.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.canvas-node-container.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-node .canvas-node-container:not(.tomindmap-title-only-card)::before,
+.tomindmap-mindmap-mode .canvas-node .canvas-node-container.tomindmap-collapsed-node:not(.tomindmap-title-only-card)::before {
+	content: '＋' !important;
 	position: absolute;
 	z-index: 2;
 	inset-block-start: 7px;
 	inset-inline-end: 9px;
-	color: var(--interactive-accent);
+	color: var(--interactive-accent) !important;
 	font-family: var(--font-interface);
 	font-size: var(--font-ui-small);
 	font-weight: var(--font-semibold);
@@ -626,11 +637,15 @@
 	pointer-events: none;
 }
 
-.tomindmap-mindmap-mode
-	.canvas-node.tomindmap-file-card.tomindmap-collapsed-node::before {
-	content: '＋';
-	color: var(--interactive-accent);
-	font-weight: var(--font-semibold);
+.canvas-node.tomindmap-file-card.tomindmap-collapsed-node::before,
+.canvas-node.tomindmap-title-only-card.tomindmap-collapsed-node::before,
+.canvas-node.tomindmap-collapsed-node.tomindmap-title-only-card::before,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-file-card.tomindmap-collapsed-node::before,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-title-only-card.tomindmap-collapsed-node::before,
+.tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-node.tomindmap-title-only-card::before {
+	content: '＋' !important;
+	color: var(--interactive-accent) !important;
+	font-weight: var(--font-semibold) !important;
 }
 
 .tomindmap-mindmap-mode

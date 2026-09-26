@@ -45919,14 +45919,16 @@ var {
       ? Array.from(canvas.edges.values())
       : Array.isArray(canvas?.edges)
         ? canvas.edges
-        : Array.isArray(canvas?.getData?.()?.edges)
-          ? canvas.getData().edges
-          : [];
+        : Array.isArray(canvas?.data?.edges)
+          ? canvas.data.edges
+          : Array.isArray(canvas?.getData?.()?.edges)
+            ? canvas.getData().edges
+            : [];
     for (const edge of edgeList) {
       if (!edge || edge.__mindMapPreview)
         continue;
-      const fromId = validCanvasNodeId(edge.from?.node?.id || edge.from?.id || edge.fromNode);
-      const toId = validCanvasNodeId(edge.to?.node?.id || edge.to?.id || edge.toNode);
+      const fromId = validCanvasNodeId(typeof edge.from === "string" ? edge.from : (edge.from?.node?.id || edge.from?.id || edge.fromNode));
+      const toId = validCanvasNodeId(typeof edge.to === "string" ? edge.to : (edge.to?.node?.id || edge.to?.id || edge.toNode));
       let parent = nodeMap.get(fromId);
       let child = nodeMap.get(toId);
       if (!parent || !child || parent === child)
@@ -52069,16 +52071,20 @@ var MindmapActions = (() => {
 
   function setCanvasNodeClass(node, className, enabled) {
   	const nodeElement = node?.nodeEl;
+  	const container = node?.containerEl;
   	const shell =
   		nodeElement?.closest?.('.canvas-node') ||
-  		node?.containerEl?.closest?.('.canvas-node') ||
-  		node?.containerEl ||
+  		container?.closest?.('.canvas-node') ||
+  		container ||
   		node?.placeholderEl;
-  	for (const element of new Set([nodeElement, shell].filter(Boolean))) {
+  	for (const element of new Set([nodeElement, container, shell].filter(Boolean))) {
   		if (typeof element.toggleClass === 'function') {
   			element.toggleClass(className, enabled);
-  		} else {
-  			element.classList?.toggle(className, enabled);
+  		} else if (typeof element.removeClass === 'function') {
+  			if (enabled) element.addClass(className);
+  			else element.removeClass(className);
+  		} else if (typeof element.classList?.toggle === 'function') {
+  			element.classList.toggle(className, Boolean(enabled));
   		}
   		if (className === 'tomindmap-collapsed-hidden' && element.style) {
   			element.style.display = enabled ? 'none' : '';
@@ -52141,7 +52147,8 @@ var MindmapActions = (() => {
   		const node = treeNode.canvasNode;
   		if (!node) continue;
   		const hasChildren = Array.isArray(treeNode.children) && treeNode.children.length > 0;
-  		const collapsed = hasChildren && getData(node).collapsed === true;
+  		const isDirectlyCollapsed = getData(node).collapsed === true;
+  		const collapsed = (hasChildren || isDirectlyCollapsed) && isDirectlyCollapsed;
   		if (collapsed) {
   			collapsedNodeIds.add(node.id);
   		}
@@ -52157,6 +52164,9 @@ var MindmapActions = (() => {
   		}
   	}
   	for (const node of canvas.nodes.values()) {
+  		if (getData(node).collapsed === true) {
+  			collapsedNodeIds.add(node.id);
+  		}
   		setCanvasNodeClass(node, 'tomindmap-collapsed-node', collapsedNodeIds.has(node.id));
   		setCanvasNodeClass(node, 'tomindmap-collapsed-hidden', hiddenIds.has(node.id));
   	}
@@ -63147,29 +63157,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (typeof targetFolder === 'string') {
 			folderPath = targetFolder;
 		} else {
-			let focusedFile = null;
-			if (typeof document !== 'undefined') {
-				const activeEl = document.querySelector?.(
-					'.nav-file-title.is-active, .nav-folder-title.is-active, .nav-file.is-active, .nav-folder.is-active, .nav-file.is-selected, .nav-folder.is-selected'
-				);
-				const dataPath = activeEl?.getAttribute?.('data-path') || activeEl?.closest?.('[data-path]')?.getAttribute?.('data-path');
-				if (dataPath) {
-					focusedFile = this.app.vault.getAbstractFileByPath(dataPath);
-				}
-			}
-			if (!focusedFile) {
-				const leaves = this.app.workspace.getLeavesOfType('file-explorer');
-				const explorer = leaves[0]?.view;
-				focusedFile = explorer?.activeFileItem?.file ||
-					explorer?.selectedItem?.file ||
-					explorer?.tree?.focusedItem?.file;
-			}
-
 			const activeFile = this.app.workspace.getActiveFile() ||
 				this.app.workspace.getActiveViewOfType(import_obsidian5.ItemView)?.file ||
 				this.app.workspace.activeLeaf?.view?.file;
 
-			const reference = focusedFile || activeFile;
+			const activeViewType = this.app.workspace.activeLeaf?.view?.getViewType?.();
+			let focusedFile = null;
+			if (activeViewType === 'file-explorer' || !activeFile) {
+				if (typeof document !== 'undefined') {
+					const activeEl = document.querySelector?.(
+						'.nav-file-title.is-active, .nav-folder-title.is-active, .nav-file.is-active, .nav-folder.is-active, .nav-file.is-selected, .nav-folder.is-selected'
+					);
+					const dataPath = activeEl?.getAttribute?.('data-path') || activeEl?.closest?.('[data-path]')?.getAttribute?.('data-path');
+					if (dataPath) {
+						focusedFile = this.app.vault.getAbstractFileByPath(dataPath);
+					}
+				}
+				if (!focusedFile) {
+					const leaves = this.app.workspace.getLeavesOfType('file-explorer');
+					const explorer = leaves[0]?.view;
+					focusedFile = explorer?.activeFileItem?.file ||
+						explorer?.selectedItem?.file ||
+						explorer?.tree?.focusedItem?.file;
+				}
+			}
+
+			const reference = (activeViewType === 'file-explorer' ? (focusedFile || activeFile) : (activeFile || focusedFile));
 			if (reference) {
 				const isFile = Boolean(
 					(typeof reference?.extension === 'string' && reference.extension.length > 0) ||

@@ -445,4 +445,40 @@ test('syncs collapse state with edge fromNode/toNode identifiers and raw data fa
 	assert.equal(edgeLineEl.style.display, 'none');
 });
 
+test('syncs tomindmap-collapsed-node to both nodeEl and containerEl simultaneously', () => {
+	const makeNode = (id, collapsed = false) => {
+		const nodeEl = {
+			classes: new Set(),
+			toggleClass(cls, val) { if (val) this.classes.add(cls); else this.classes.delete(cls); }
+		};
+		const containerEl = {
+			classes: new Set(),
+			toggleClass(cls, val) { if (val) this.classes.add(cls); else this.classes.delete(cls); }
+		};
+		return {
+			id,
+			nodeEl,
+			containerEl,
+			collapsed,
+			getData: () => ({ collapsed })
+		};
+	};
+	const root = makeNode('r', true);
+	const child = makeNode('c', false);
+	const edge = {
+		from: 'r',
+		to: 'c',
+		lineGroupEl: { style: {} }
+	};
+	const canvas = {
+		nodes: new Map([['r', root], ['c', child]]),
+		edges: new Map([['e', edge]])
+	};
+	syncCollapsedVisibility(canvas);
+	assert.equal(root.nodeEl.classes.has('tomindmap-collapsed-node'), true);
+	assert.equal(root.containerEl.classes.has('tomindmap-collapsed-node'), true);
+	assert.equal(child.nodeEl.classes.has('tomindmap-collapsed-hidden'), true);
+	assert.equal(child.containerEl.classes.has('tomindmap-collapsed-hidden'), true);
+});
+
 

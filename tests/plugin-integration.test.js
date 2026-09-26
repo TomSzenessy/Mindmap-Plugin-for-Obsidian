@@ -1293,6 +1293,45 @@ test("createNewMindMap resolves folder from file-explorer when no active file", 
   assert.equal(createdPath, "Docs/ActiveFolder/Untitled.canvas");
 });
 
+test("createNewMindMap prioritizes active file folder over file explorer selection", async () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  let createdPath = null;
+  const app = {
+    workspace: {
+      getActiveFile: () => ({ path: "Subfolder/Notes.md", parent: { path: "Subfolder" } }),
+      getActiveViewOfType: () => ({ getViewType: () => "markdown" }),
+      activeLeaf: { view: { getViewType: () => "markdown" } },
+      getLeavesOfType: (type) => {
+        if (type === "file-explorer") {
+          return [{
+            view: {
+              activeFileItem: { file: { path: "RootFile.md", parent: { path: "" } } }
+            }
+          }];
+        }
+        return [];
+      },
+      getLeaf: () => ({ openFile: async () => {} })
+    },
+    vault: {
+      getAbstractFileByPath: () => null,
+      create: async (p) => {
+        createdPath = p;
+        return { path: p, basename: "Untitled" };
+      }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getActiveCanvas: () => null,
+    zoomToNode: () => {},
+    startEditing: () => {}
+  };
+
+  await plugin.createNewMindMap();
+  assert.equal(createdPath, "Subfolder/Untitled.canvas");
+});
+
 test("mindmap-toggle-subtree has no default hotkey conflicting with canvas creation", async () => {
   const { default: CanvasMindMapPlugin, FakeDocument } = loadSource();
   const prevDoc = global.document;

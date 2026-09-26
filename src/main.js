@@ -9544,29 +9544,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (typeof targetFolder === 'string') {
 			folderPath = targetFolder;
 		} else {
-			let focusedFile = null;
-			if (typeof document !== 'undefined') {
-				const activeEl = document.querySelector?.(
-					'.nav-file-title.is-active, .nav-folder-title.is-active, .nav-file.is-active, .nav-folder.is-active, .nav-file.is-selected, .nav-folder.is-selected'
-				);
-				const dataPath = activeEl?.getAttribute?.('data-path') || activeEl?.closest?.('[data-path]')?.getAttribute?.('data-path');
-				if (dataPath) {
-					focusedFile = this.app.vault.getAbstractFileByPath(dataPath);
-				}
-			}
-			if (!focusedFile) {
-				const leaves = this.app.workspace.getLeavesOfType('file-explorer');
-				const explorer = leaves[0]?.view;
-				focusedFile = explorer?.activeFileItem?.file ||
-					explorer?.selectedItem?.file ||
-					explorer?.tree?.focusedItem?.file;
-			}
-
 			const activeFile = this.app.workspace.getActiveFile() ||
 				this.app.workspace.getActiveViewOfType(import_obsidian5.ItemView)?.file ||
 				this.app.workspace.activeLeaf?.view?.file;
 
-			const reference = focusedFile || activeFile;
+			const activeViewType = this.app.workspace.activeLeaf?.view?.getViewType?.();
+			let focusedFile = null;
+			if (activeViewType === 'file-explorer' || !activeFile) {
+				if (typeof document !== 'undefined') {
+					const activeEl = document.querySelector?.(
+						'.nav-file-title.is-active, .nav-folder-title.is-active, .nav-file.is-active, .nav-folder.is-active, .nav-file.is-selected, .nav-folder.is-selected'
+					);
+					const dataPath = activeEl?.getAttribute?.('data-path') || activeEl?.closest?.('[data-path]')?.getAttribute?.('data-path');
+					if (dataPath) {
+						focusedFile = this.app.vault.getAbstractFileByPath(dataPath);
+					}
+				}
+				if (!focusedFile) {
+					const leaves = this.app.workspace.getLeavesOfType('file-explorer');
+					const explorer = leaves[0]?.view;
+					focusedFile = explorer?.activeFileItem?.file ||
+						explorer?.selectedItem?.file ||
+						explorer?.tree?.focusedItem?.file;
+				}
+			}
+
+			const reference = (activeViewType === 'file-explorer' ? (focusedFile || activeFile) : (activeFile || focusedFile));
 			if (reference) {
 				const isFile = Boolean(
 					(typeof reference?.extension === 'string' && reference.extension.length > 0) ||

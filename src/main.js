@@ -3241,9 +3241,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origDeselectAll = canvas.deselectAll.bind(canvas);
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
-		const origRemoveNode = canvas.removeNode.bind(canvas);
+		const origRequestFrame = typeof canvas.requestFrame === 'function' ? canvas.requestFrame.bind(canvas) : null;
 		let structuralReflowQueued = false;
 		this.origCanvasMethods = {
+			requestFrame: origRequestFrame,
 			requestSave: origSave,
 			createGroupNode: origCreateGroup,
 			undo: origUndo,
@@ -3254,6 +3255,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			removeEdge: origRemoveEdge,
 			removeNode: origRemoveNode
 		};
+		if (origRequestFrame) {
+			canvas.requestFrame = () => {
+				origRequestFrame();
+				if (this.isMindmapCanvas(canvas)) {
+					MindmapActions.syncCollapsedVisibility(canvas);
+				}
+			};
+		}
 		this.interceptedCanvas = canvas;
 		canvas.deselectAll = () => {
 			origDeselectAll();
@@ -3415,7 +3424,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.updateGroupBounds(canvas);
 				}
 			});
-			for (const delay of [120, 450]) {
+			for (const delay of [20, 60, 150, 300, 600]) {
 				this.trackedTimeout(() => {
 					if (
 						this.canvasApi.getActiveCanvas() !== canvas ||
@@ -9103,6 +9112,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	/** Restore wrapped canvas methods to originals. */
 	unwrapCanvasMethods() {
 		if (this.interceptedCanvas) {
+			if (this.origCanvasMethods.requestFrame) {
+				this.interceptedCanvas.requestFrame =
+					this.origCanvasMethods.requestFrame;
+			}
 			if (this.origCanvasMethods.requestSave) {
 				this.interceptedCanvas.requestSave =
 					this.origCanvasMethods.requestSave;
@@ -9460,6 +9473,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 		const leaf = this.app.workspace.getLeaf(false);
 		await leaf.openFile(created);
+		this.app.workspace.setActiveLeaf?.(leaf, { focus: true });
 
 		const targetPath = created.path;
 		let attempts = 0;
@@ -9485,7 +9499,33 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const current = this.canvasApi?.getActiveCanvas?.();
 				if (current?.view?.file?.path === targetPath && root.nodeEl) {
 					activeCanvas.selectOnly(root);
-					this.canvasApi.startEditing(activeCanvas, root);
+					if (typeof root.startEditing === 'function') {
+						root.startEditing();
+					} else if (typeof this.canvasApi?.selectAndEdit === 'function') {
+						this.canvasApi.selectAndEdit(activeCanvas, root);
+					} else if (typeof this.canvasApi?.startEditing === 'function') {
+						this.canvasApi.startEditing(activeCanvas, root);
+					}
+					const focusInput = () => {
+						const cm = root.nodeEl?.querySelector?.('.cm-content, textarea, input');
+						if (cm) {
+							cm.focus?.();
+							if (typeof window !== 'undefined' && window.getSelection) {
+								try {
+									const range = document.createRange();
+									range.selectNodeContents(cm);
+									range.collapse(false);
+									const sel = window.getSelection();
+									sel.removeAllRanges();
+									sel.addRange(range);
+								} catch (_) {}
+							}
+						}
+					};
+					focusInput();
+					setTimeout(focusInput, 30);
+					setTimeout(focusInput, 80);
+					setTimeout(focusInput, 150);
 				}
 			}, 30);
 		};

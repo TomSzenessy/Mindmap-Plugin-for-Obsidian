@@ -334,3 +334,60 @@ test('syncs persisted collapse state to nodes and edge groups', () => {
 	assert.equal(child.shell.classes.has('tomindmap-collapsed-hidden'), false);
 	assert.equal(edge.lineGroupEl.style.display, '');
 });
+
+test('syncs collapse state from unknownData when getData lacks collapsed property', () => {
+	const makeNode = (id, unknownData = {}) => {
+		const shell = {
+			classes: new Set(),
+			toggleClass(className, enabled) {
+				if (enabled) this.classes.add(className);
+				else this.classes.delete(className);
+			},
+			hasClass(className) {
+				return this.classes.has(className);
+			}
+		};
+		return {
+			id,
+			unknownData,
+			shell,
+			nodeEl: {
+				closest: () => shell,
+				toggleClass(className, enabled) {
+					shell.toggleClass(className, enabled);
+				}
+			},
+			getData() {
+				return { id, x: 0, y: 0 };
+			}
+		};
+	};
+	const root = makeNode('root', { collapsed: true });
+	const child = makeNode('child');
+	const edgeLineEl = {
+		style: {},
+		classList: {
+			classes: new Set(),
+			toggle(cls, val) {
+				if (val) this.classes.add(cls);
+				else this.classes.delete(cls);
+			}
+		}
+	};
+	const edge = {
+		from: { node: root },
+		to: { node: child },
+		lineGroupEl: edgeLineEl
+	};
+	const canvas = {
+		nodes: new Map([[root.id, root], [child.id, child]]),
+		edges: new Map([['edge', edge]]),
+		getData: () => ({ nodes: [{ id: 'root', type: 'text' }, { id: 'child', type: 'text' }] })
+	};
+	assert.equal(syncCollapsedVisibility(canvas), 1);
+	assert.equal(root.shell.classes.has('tomindmap-collapsed-node'), true);
+	assert.equal(child.shell.classes.has('tomindmap-collapsed-hidden'), true);
+	assert.equal(edgeLineEl.style.display, 'none');
+	assert.equal(edgeLineEl.classList.classes.has('tomindmap-collapsed-hidden'), true);
+});
+

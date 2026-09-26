@@ -43649,6 +43649,13 @@ var {
   			node.startEditing();
   		}, 50);
   	}
+  	startEditing(canvas, node) {
+  		if (typeof node?.startEditing === 'function') {
+  			node.startEditing();
+  		} else {
+  			this.selectAndEdit(canvas, node);
+  		}
+  	}
   };
 
   module.exports = { CanvasAPI, findNodeFromEvent, genId };
@@ -45843,18 +45850,22 @@ var {
     } catch (_) {
       data = null;
     }
-    const record = canvasDataRecord(data);
-    if (record)
-      return record;
+    const record = canvasDataRecord(data) || {};
+    let unknown = {};
     try {
-      return canvasDataRecord(node?.unknownData) || {};
+      unknown = canvasDataRecord(node?.unknownData) || {};
     } catch (_) {
-      return {};
+      unknown = {};
     }
+    const collapsed = unknown.collapsed !== undefined
+      ? unknown.collapsed
+      : (record.collapsed !== undefined ? record.collapsed : node?.collapsed);
+    return { ...unknown, ...record, collapsed };
   }
 
   function isPersistedCollapsedNode(node) {
-    return getCanvasNodeData(node).collapsed === true;
+    const data = getCanvasNodeData(node);
+    return data.collapsed === true || node?.collapsed === true || node?.unknownData?.collapsed === true;
   }
 
   function buildForest(canvas, options = {}) {
@@ -52069,9 +52080,12 @@ var MindmapActions = (() => {
   		edge?.lineGroupEl,
   		edge?.lineEndGroupEl,
   		edge?.el,
-  		edge?.edgeEl
+  		edge?.edgeEl,
+  		edge?.labelElement?.containerEl
   	]) {
   		if (element?.style) element.style.display = hidden ? 'none' : '';
+  		if (element?.classList) element.classList.toggle('tomindmap-collapsed-hidden', hidden);
+  		if (typeof element?.toggleClass === 'function') element.toggleClass('tomindmap-collapsed-hidden', hidden);
   	}
   }
 
@@ -52087,11 +52101,12 @@ var MindmapActions = (() => {
   	const collapsedNodeIds = new Set();
   	const getData = (node) => {
   		try {
-  			return typeof node.getData === 'function'
-  				? node.getData() || {}
-  				: node.unknownData || {};
+  			const d = typeof node.getData === 'function' ? node.getData() || {} : {};
+  			const u = node?.unknownData || {};
+  			const collapsed = u.collapsed !== undefined ? u.collapsed : (d.collapsed !== undefined ? d.collapsed : node?.collapsed);
+  			return { ...u, ...d, collapsed };
   		} catch (_) {
-  			return {};
+  			return node?.unknownData || {};
   		}
   	};
   	const stack = [];
@@ -52178,26 +52193,29 @@ var MindmapActions = (() => {
   	const treeNode = findFn ? findFn(forest, node.id) : null;
   	if (!treeNode || treeNode.children.length === 0) return false;
 
-  	const data =
-  		typeof node.getData === 'function'
-  			? node.getData()
-  			: node.unknownData || {};
-  	const currentlyCollapsed = data.collapsed === true;
+  	const data = typeof node.getData === 'function'
+  		? node.getData() || {}
+  		: node.unknownData || {};
+  	const currentlyCollapsed = data.collapsed === true || node.unknownData?.collapsed === true || node.collapsed === true;
   	const nextState = !currentlyCollapsed;
 
+  	node.collapsed = nextState;
+  	node.unknownData = {
+  		...(node.unknownData || {}),
+  		collapsed: nextState
+  	};
+
   	if (typeof node.setData === 'function') {
-  		node.setData({ ...data, collapsed: nextState });
-  	} else {
-  		node.unknownData = {
-  			...(node.unknownData || {}),
-  			collapsed: nextState
-  		};
+  		try {
+  			node.setData({ ...data, ...node.unknownData, collapsed: nextState });
+  		} catch (_) {}
   	}
 
   	if (canvas?.data?.nodes && Array.isArray(canvas.data.nodes)) {
   		const rawNode = canvas.data.nodes.find((n) => n && n.id === node.id);
   		if (rawNode) {
   			rawNode.unknownData = { ...(rawNode.unknownData || {}), collapsed: nextState };
+  			rawNode.collapsed = nextState;
   		}
   	}
   	if (typeof canvas?.requestSave === 'function') {
@@ -56803,9 +56821,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origDeselectAll = canvas.deselectAll.bind(canvas);
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
-		const origRemoveNode = canvas.removeNode.bind(canvas);
+		const origRequestFrame = typeof canvas.requestFrame === 'function' ? canvas.requestFrame.bind(canvas) : null;
 		let structuralReflowQueued = false;
 		this.origCanvasMethods = {
+			requestFrame: origRequestFrame,
 			requestSave: origSave,
 			createGroupNode: origCreateGroup,
 			undo: origUndo,
@@ -56816,6 +56835,14 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			removeEdge: origRemoveEdge,
 			removeNode: origRemoveNode
 		};
+		if (origRequestFrame) {
+			canvas.requestFrame = () => {
+				origRequestFrame();
+				if (this.isMindmapCanvas(canvas)) {
+					MindmapActions.syncCollapsedVisibility(canvas);
+				}
+			};
+		}
 		this.interceptedCanvas = canvas;
 		canvas.deselectAll = () => {
 			origDeselectAll();
@@ -56977,7 +57004,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.updateGroupBounds(canvas);
 				}
 			});
-			for (const delay of [120, 450]) {
+			for (const delay of [20, 60, 150, 300, 600]) {
 				this.trackedTimeout(() => {
 					if (
 						this.canvasApi.getActiveCanvas() !== canvas ||
@@ -62665,6 +62692,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	/** Restore wrapped canvas methods to originals. */
 	unwrapCanvasMethods() {
 		if (this.interceptedCanvas) {
+			if (this.origCanvasMethods.requestFrame) {
+				this.interceptedCanvas.requestFrame =
+					this.origCanvasMethods.requestFrame;
+			}
 			if (this.origCanvasMethods.requestSave) {
 				this.interceptedCanvas.requestSave =
 					this.origCanvasMethods.requestSave;
@@ -63022,6 +63053,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 
 		const leaf = this.app.workspace.getLeaf(false);
 		await leaf.openFile(created);
+		this.app.workspace.setActiveLeaf?.(leaf, { focus: true });
 
 		const targetPath = created.path;
 		let attempts = 0;
@@ -63047,7 +63079,33 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const current = this.canvasApi?.getActiveCanvas?.();
 				if (current?.view?.file?.path === targetPath && root.nodeEl) {
 					activeCanvas.selectOnly(root);
-					this.canvasApi.startEditing(activeCanvas, root);
+					if (typeof root.startEditing === 'function') {
+						root.startEditing();
+					} else if (typeof this.canvasApi?.selectAndEdit === 'function') {
+						this.canvasApi.selectAndEdit(activeCanvas, root);
+					} else if (typeof this.canvasApi?.startEditing === 'function') {
+						this.canvasApi.startEditing(activeCanvas, root);
+					}
+					const focusInput = () => {
+						const cm = root.nodeEl?.querySelector?.('.cm-content, textarea, input');
+						if (cm) {
+							cm.focus?.();
+							if (typeof window !== 'undefined' && window.getSelection) {
+								try {
+									const range = document.createRange();
+									range.selectNodeContents(cm);
+									range.collapse(false);
+									const sel = window.getSelection();
+									sel.removeAllRanges();
+									sel.addRange(range);
+								} catch (_) {}
+							}
+						}
+					};
+					focusInput();
+					setTimeout(focusInput, 30);
+					setTimeout(focusInput, 80);
+					setTimeout(focusInput, 150);
 				}
 			}, 30);
 		};

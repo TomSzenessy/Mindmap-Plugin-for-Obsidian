@@ -449,8 +449,14 @@
  * from the interactive Canvas and from automatic layout. */
 .canvas-node.tomindmap-collapsed-hidden,
 .canvas-node .tomindmap-collapsed-hidden,
+.canvas-edge.tomindmap-collapsed-hidden,
+.canvas-edge-line.tomindmap-collapsed-hidden,
+.canvas-edge-label.tomindmap-collapsed-hidden,
 .tomindmap-mindmap-mode .canvas-node.tomindmap-collapsed-hidden,
-.tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-hidden {
+.tomindmap-mindmap-mode .canvas-node .tomindmap-collapsed-hidden,
+.tomindmap-mindmap-mode .canvas-edge.tomindmap-collapsed-hidden,
+.tomindmap-mindmap-mode .canvas-edge-line.tomindmap-collapsed-hidden,
+.tomindmap-mindmap-mode g.tomindmap-collapsed-hidden {
 	display: none !important;
 	pointer-events: none !important;
 }

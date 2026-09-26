@@ -1386,3 +1386,98 @@ test("patchMenuPrototype intercepts MenuItem.prototype.setTitle and onClick", as
   assert.equal(unpatchedItem.title, "New canvas");
 });
 
+test("patchCanvasPrototype hooks setData and syncs collapse state without requiring click/focus", async () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.settings = { defaultMindmapMode: true };
+
+  class FakeCanvasProto {
+    constructor() {
+      this.nodes = new Map();
+      this.edges = new Map();
+      this.data = null;
+      this.wrapperEl = {
+        classes: new Set(),
+        toggleClass(cls, val) {
+          if (val) this.classes.add(cls);
+          else this.classes.delete(cls);
+        },
+        isConnected: true
+      };
+    }
+    getData() {
+      return this.data;
+    }
+    setData(data) {
+      this.data = data;
+      this.nodes.clear();
+      this.edges.clear();
+      for (const n of data.nodes || []) {
+        const shell = {
+          classes: new Set(),
+          toggleClass(cls, val) {
+            if (val) this.classes.add(cls);
+            else this.classes.delete(cls);
+          },
+          setAttribute() {},
+          removeAttribute() {}
+        };
+        this.nodes.set(n.id, {
+          id: n.id,
+          unknownData: n.unknownData || {},
+          nodeEl: {
+            closest: () => shell,
+            toggleClass(cls, val) {
+              shell.toggleClass(cls, val);
+            },
+            setAttribute() {},
+            removeAttribute() {}
+          },
+          getData: () => n
+        });
+      }
+      for (const e of data.edges || []) {
+        const lineEl = {
+          style: {},
+          classList: {
+            classes: new Set(),
+            toggle(cls, val) {
+              if (val) this.classes.add(cls);
+              else this.classes.delete(cls);
+            }
+          }
+        };
+        this.edges.set(e.id, {
+          fromNode: e.fromNode,
+          toNode: e.toNode,
+          lineGroupEl: lineEl
+        });
+      }
+    }
+  }
+
+  const canvasInstance = new FakeCanvasProto();
+  plugin.patchCanvasPrototype(canvasInstance);
+
+  const testData = {
+    mindmap: true,
+    nodes: [
+      { id: "root", text: "Root", unknownData: { collapsed: true } },
+      { id: "child", text: "Child", unknownData: {} }
+    ],
+    edges: [
+      { id: "edge1", fromNode: "root", toNode: "child" }
+    ]
+  };
+
+  canvasInstance.setData(testData);
+
+  const childNode = canvasInstance.nodes.get("child");
+  const childShell = childNode.nodeEl.closest();
+  assert.equal(childShell.classes.has("tomindmap-collapsed-hidden"), true);
+  assert.equal(canvasInstance.wrapperEl.classes.has("tomindmap-mindmap-mode"), true);
+
+  plugin.unpatchCanvasPrototype();
+});
+
+

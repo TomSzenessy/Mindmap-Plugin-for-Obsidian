@@ -1570,6 +1570,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.pendingObservers = /* @__PURE__ */ new Set();
 		/** Original canvas methods for unwrapping on cleanup. */
 		this.origCanvasMethods = {};
+		this.__canvasProtoPatched = false;
+		this.__origCanvasProtoSetData = null;
 		/** Set to true on unload to prevent deferred callbacks from running. */
 		this.unloaded = false;
 		/** Navigation history for back/forward. */
@@ -1644,6 +1646,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.runAsync(() => this.showOutline(canvas, true), 'show outline');
 		};
 		this.keyboardHandler.register();
+		this.patchCanvasPrototype();
 		if (typeof document !== 'undefined') {
 			this.registerDomEvent(
 				document,
@@ -1923,6 +1926,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.registerView(OUTLINE_VIEW_TYPE, (leaf) => new OutlineView(leaf));
 		this.app.workspace.onLayoutReady(() => {
 			this.runAsync(() => this.rebuildMarkdownSyncIndex(), 'rebuild markdown sync index');
+			this.patchCanvasPrototype();
+			this.syncAllCanvasLeaves();
 			const view = this.app.workspace.getActiveViewOfType(
 				import_obsidian5.ItemView
 			);
@@ -2564,6 +2569,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	async onunload() {
 		this.unloaded = true;
+		this.unpatchCanvasPrototype();
 		this.applyCanvasCommandRename(true);
 		if (this.ribbonIconEl) {
 			this.ribbonIconEl.remove();
@@ -2674,6 +2680,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.canvasLifecycleTimer = setTimeout(() => {
 			this.canvasLifecycleTimer = null;
 			if (this.unloaded) return;
+			this.syncAllCanvasLeaves();
 			const activeLeaf = this.app.workspace.activeLeaf;
 			const view = this.app.workspace.getActiveViewOfType(
 				import_obsidian5.ItemView
@@ -2689,16 +2696,25 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: _a.getViewType()) === OUTLINE_VIEW_TYPE
 		)
 			return;
-		let canvas = (leaf?.view?.getViewType?.() === 'canvas' ? leaf.view.canvas : null) || this.canvasApi.getActiveCanvas(leaf) || this.canvasApi.getActiveCanvas();
-		if (canvas && this.isMindmapCanvas(canvas)) {
-			MindmapActions.syncCollapsedVisibility(canvas);
-			for (const delay of [20, 60, 150, 300, 600]) {
-				this.trackedTimeout(() => {
-					if (this.isMindmapCanvas(canvas)) {
-						MindmapActions.syncCollapsedVisibility(canvas);
+		if (leaf?.view?.getViewType?.() === 'canvas' && !leaf.view.canvas) {
+			for (const delay of [50, 150, 300, 600, 1200]) {
+				setTimeout(() => {
+					if (this.unloaded) return;
+					if (leaf.view?.canvas) {
+						this.onLeafChange(leaf);
 					}
 				}, delay);
 			}
+			return;
+		}
+		let canvas = (leaf?.view?.getViewType?.() === 'canvas' ? leaf.view.canvas : null) || this.canvasApi.getActiveCanvas(leaf) || this.canvasApi.getActiveCanvas();
+		if (canvas) {
+			this.patchCanvasPrototype(canvas);
+		}
+		if (canvas && this.isMindmapCanvas(canvas)) {
+			canvas.wrapperEl?.toggleClass?.('tomindmap-mindmap-mode', true);
+			MindmapActions.syncCollapsedVisibility(canvas);
+			this.scheduleCollapsedSync(canvas);
 		}
 		if (canvas && canvas === this.interceptedCanvas) return;
 		const previousCanvas = this.interceptedCanvas;
@@ -3258,8 +3274,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
 		const origRequestFrame = typeof canvas.requestFrame === 'function' ? canvas.requestFrame.bind(canvas) : null;
+		const origSetData = typeof canvas.setData === 'function' ? canvas.setData.bind(canvas) : null;
 		let structuralReflowQueued = false;
 		this.origCanvasMethods = {
+			setData: origSetData,
 			requestFrame: origRequestFrame,
 			requestSave: origSave,
 			createGroupNode: origCreateGroup,
@@ -3271,6 +3289,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			removeEdge: origRemoveEdge,
 			removeNode: origRemoveNode
 		};
+		if (origSetData) {
+			canvas.setData = (...args) => {
+				const result = origSetData(...args);
+				this.canvasApi.invalidateEdgeIndex();
+				if (this.isMindmapCanvas(canvas)) {
+					canvas.wrapperEl?.toggleClass?.('tomindmap-mindmap-mode', true);
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
+					this.updateNodeTypeAttributes(canvas);
+					this.scheduleCollapsedSync(canvas);
+				}
+				return result;
+			};
+		}
 		if (origRequestFrame) {
 			canvas.requestFrame = () => {
 				origRequestFrame();
@@ -3443,8 +3475,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			for (const delay of [20, 60, 150, 300, 600]) {
 				this.trackedTimeout(() => {
 					if (
-						this.canvasApi.getActiveCanvas() !== canvas ||
-						!this.isMindmapCanvas(canvas)
+						!this.isMindmapCanvas(canvas) ||
+						(canvas.wrapperEl && !canvas.wrapperEl.isConnected)
 					)
 						return;
 					// Virtualized cards can materialize after the first frame, so keep
@@ -6296,7 +6328,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	updateNodeTypeAttributes(canvas) {
 		if (!canvas || !canvas.nodes) return;
-		const graph = this.canvasApi.getGraphQuery?.(canvas) || null;
+		const graph = this.canvasApi?.getGraphQuery?.(canvas) || null;
 		for (const node of canvas.nodes.values()) {
 			if (!node || !node.nodeEl) continue;
 			const nodeFilePath = canvasNodeFilePath(node);
@@ -6351,7 +6383,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				shell,
 				controlsOwner
 			])) {
-				if (!element) continue;
+				if (!element || typeof element.setAttribute !== 'function') continue;
 				element.setAttribute('data-node-type', type);
 				if (titleOnly) {
 					element.setAttribute(
@@ -8836,10 +8868,16 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	}
 	isMindmapCanvas(canvas) {
 		try {
-			if (!canvas || typeof canvas.getData !== 'function') return false;
-			const data = canvas.getData();
-			if (!data || typeof data !== 'object') return false;
-			if (typeof data.mindmap === 'boolean') return data.mindmap;
+			if (!canvas) return false;
+			if (typeof canvas.getData === 'function') {
+				const data = canvas.getData();
+				if (data && typeof data === 'object') {
+					if (typeof data.mindmap === 'boolean') return data.mindmap;
+				}
+			}
+			if (canvas.data && typeof canvas.data === 'object' && typeof canvas.data.mindmap === 'boolean') {
+				return canvas.data.mindmap;
+			}
 			return this.settings.defaultMindmapMode;
 		} catch (_) {
 			return false;
@@ -9128,6 +9166,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	/** Restore wrapped canvas methods to originals. */
 	unwrapCanvasMethods() {
 		if (this.interceptedCanvas) {
+			if (this.origCanvasMethods.setData) {
+				this.interceptedCanvas.setData =
+					this.origCanvasMethods.setData;
+			}
 			if (this.origCanvasMethods.requestFrame) {
 				this.interceptedCanvas.requestFrame =
 					this.origCanvasMethods.requestFrame;
@@ -9312,6 +9354,94 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.__origMenuItemOnClick = null;
 		}
 		this.__menuPatched = false;
+	}
+
+	scheduleCollapsedSync(canvas, delays = [20, 60, 150, 300, 600, 1200]) {
+		if (!canvas) return;
+		if (typeof requestAnimationFrame !== 'undefined') {
+			requestAnimationFrame(() => {
+				if (this.unloaded || !this.isMindmapCanvas(canvas)) return;
+				MindmapActions.syncCollapsedVisibility(canvas);
+			});
+		}
+		for (const delay of delays) {
+			setTimeout(() => {
+				if (this.unloaded || !this.isMindmapCanvas(canvas)) return;
+				if (canvas.wrapperEl && !canvas.wrapperEl.isConnected) return;
+				MindmapActions.syncCollapsedVisibility(canvas);
+			}, delay);
+		}
+	}
+
+	syncAllCanvasLeaves() {
+		const leaves = this.app.workspace?.getLeavesOfType?.('canvas') || [];
+		for (const leaf of leaves) {
+			const canvas = leaf?.view?.canvas;
+			if (canvas) {
+				this.patchCanvasPrototype(canvas);
+				if (this.isMindmapCanvas(canvas)) {
+					canvas.wrapperEl?.toggleClass?.('tomindmap-mindmap-mode', true);
+					MindmapActions.syncCollapsedVisibility(canvas);
+					this.scheduleCollapsedSync(canvas);
+				}
+			}
+		}
+	}
+
+	patchCanvasPrototype(canvas = null) {
+		if (this.__canvasProtoPatched) return;
+		let proto = null;
+		if (canvas && typeof canvas.setData === 'function') {
+			proto = Object.getPrototypeOf(canvas);
+		} else {
+			const leaves = this.app.workspace?.getLeavesOfType?.('canvas') || [];
+			for (const leaf of leaves) {
+				if (leaf.view?.canvas && typeof leaf.view.canvas.setData === 'function') {
+					proto = Object.getPrototypeOf(leaf.view.canvas);
+					break;
+				}
+			}
+		}
+		if (!proto || typeof proto.setData !== 'function') return;
+		this.__canvasProtoPatched = true;
+		const self = this;
+		const origProtoSetData = proto.setData;
+		this.__origCanvasProtoSetData = origProtoSetData;
+		proto.setData = function (...args) {
+			const result = origProtoSetData.apply(this, args);
+			try {
+				if (self.isMindmapCanvas(this)) {
+					this.wrapperEl?.toggleClass?.('tomindmap-mindmap-mode', true);
+					MindmapActions.syncCollapsedVisibility(this);
+					self.layoutEngine?.updateEdgeSides?.(this, { persist: false });
+					self.updateNodeTypeAttributes?.(this);
+					self.scheduleCollapsedSync(this);
+				}
+			} catch (e) {
+				console.warn('ToMindMap: error in canvas setData prototype hook', e);
+			}
+			return result;
+		};
+	}
+
+	unpatchCanvasPrototype() {
+		if (!this.__canvasProtoPatched) return;
+		if (this.__origCanvasProtoSetData) {
+			const leaves = this.app.workspace?.getLeavesOfType?.('canvas') || [];
+			for (const leaf of leaves) {
+				if (leaf.view?.canvas) {
+					const proto = Object.getPrototypeOf(leaf.view.canvas);
+					if (proto && proto.setData === this.__origCanvasProtoSetData) {
+						// already original
+					} else if (proto) {
+						proto.setData = this.__origCanvasProtoSetData;
+					}
+					break;
+				}
+			}
+			this.__origCanvasProtoSetData = null;
+		}
+		this.__canvasProtoPatched = false;
 	}
 
 	applyCanvasCommandRename(restore = false) {

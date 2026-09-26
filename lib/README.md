@@ -39,6 +39,7 @@ a runtime record cannot leave a stale hand-maintained inventory:
 - `markdown-codec` — `lib/markdown-codec.js`
 - `markdown-sync` — `lib/markdown-sync.js`
 - `touch-controls` — `lib/touch-controls.js`
+- `outline-view` — `lib/outline-view.js`
 <!-- END runtime-module-inventory -->
 
 The registry, rather than a second hand-maintained import list, is the source

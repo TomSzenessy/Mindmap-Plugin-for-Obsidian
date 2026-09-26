@@ -236,6 +236,20 @@ const modules = [
     source: "lib/touch-controls.js",
     bindings: { named: ["TouchControlsController"] },
     dependencies: []
+  },
+  {
+    name: "outline-view",
+    source: "lib/outline-view.js",
+    bindings: {
+      named: [
+        "OUTLINE_VIEW_TYPE",
+        "OutlineView",
+        "buildOutlineModel",
+        "outlineTreeDescendants",
+        "writeClipboardText"
+      ]
+    },
+    dependencies: ["tree-model", "markdown-codec"]
   }
 ];
 

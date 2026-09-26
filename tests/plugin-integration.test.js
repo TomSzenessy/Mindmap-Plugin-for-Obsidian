@@ -1184,7 +1184,7 @@ test("createNewMindMap creates mind map in active note folder by default or root
   const parsed = JSON.parse(createdContent);
   assert.equal(parsed.mindmap, true);
   assert.equal(parsed.nodes.length, 1);
-  assert.equal(parsed.nodes[0].text, "# Mind map");
+  assert.equal(parsed.nodes[0].text, "");
 });
 
 test("applyCanvasCommandRename updates canvas:new-file command name and hooks callbacks", async () => {
@@ -1357,7 +1357,7 @@ test("createNewMindMap creates root topic and creates in folder of active mindma
   const parsed = JSON.parse(createdContent);
   assert.equal(parsed.mindmap, true);
   assert.equal(parsed.nodes.length, 1);
-  assert.equal(parsed.nodes[0].text, "# Mind map");
+  assert.equal(parsed.nodes[0].text, "");
 });
 
 test("patchMenuPrototype intercepts MenuItem.prototype.setTitle and onClick", async () => {

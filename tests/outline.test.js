@@ -414,3 +414,12 @@ test("OutlineView renders semantic native controls and a 12,000-level chain iter
   assert.equal(root.querySelectorAll("button").length >= 2, true);
   assert.equal(view.contentEl.querySelector("[aria-label*='Topic 11999']") !== null, true);
 });
+
+test("lib/outline-view exports OutlineView, OUTLINE_VIEW_TYPE, and outline helpers", () => {
+  const outlineModule = require("../lib/outline-view.js");
+  assert.equal(typeof outlineModule.OutlineView, "function");
+  assert.equal(outlineModule.OUTLINE_VIEW_TYPE, "tomindmap-outline");
+  assert.equal(typeof outlineModule.buildOutlineModel, "function");
+  assert.equal(typeof outlineModule.outlineTreeDescendants, "function");
+  assert.equal(typeof outlineModule.writeClipboardText, "function");
+});

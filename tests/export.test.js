@@ -196,10 +196,12 @@ test("exports SVG with clean vector text and reveals fallback vector text", () =
 
 test("expands selection in exports to include entire topic branches", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
-  // canvasPrintDocument expands selectedIds via directed edges:
-  assert.match(source, /for \(const edge of data\.edges \|\| \[\]\) \{\s*if \(!outgoing\.has\(edge\.fromNode\)\) outgoing\.set\(edge\.fromNode, \[\]\);/);
-  // prepareCanvasForExport expands exportSelection via directed edges:
-  assert.match(source, /for \(const edge of exportData\.edges \|\| \[\]\) \{\s*if \(!outgoing\.has\(edge\.fromNode\)\) outgoing\.set\(edge\.fromNode, \[\]\);/);
+  // canvasPrintDocument expands selectedIds via buildForest descendants and directed edges:
+  assert.match(source, /const forest = buildForest\(canvas, \{ includeHidden: true \}\);/);
+  assert.match(source, /for \(const desc of getDescendants\(treeNode\)\)/);
+  assert.match(source, /for \(const edge of data\.edges \|\| \[\]\)/);
+  // prepareCanvasForExport expands exportSelection via buildForest and directed edges:
+  assert.match(source, /for \(const edge of exportData\.edges \|\| \[\]\)/);
 });
 
 test("ensures text contrast against card fill in exported documents", () => {
@@ -207,4 +209,14 @@ test("ensures text contrast against card fill in exported documents", () => {
   assert.match(source, /if \(!textRgb \|\| colorDistance\(textRgb, fillRgb\) < 110\)/);
   assert.match(source, /effectiveTextColor = fillLum < 145 \? '#f8fafc' : '#0f172a'/);
 });
+
+test("supports exporting mind map as FreeMind (.mm)", () => {
+  const exportSource = fs.readFileSync(path.join(__dirname, "..", "lib", "export.js"), "utf8");
+  assert.match(exportSource, /\['freemind', 'FreeMind mind map \(\.mm\)'\]/);
+
+  const mainSource = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  assert.match(mainSource, /if \(request\.format === 'freemind'\)/);
+  assert.match(mainSource, /const xml = exportToFreeMind\(forest, \{ title: base \}\);/);
+});
+
 

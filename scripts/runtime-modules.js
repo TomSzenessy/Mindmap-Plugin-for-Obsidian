@@ -180,6 +180,7 @@ const modules = [
         "DEFAULT_FREEMIND_BUDGETS",
         "FREEMIND_REASON",
         "decodeFreeMind",
+        "exportToFreeMind",
         "freemindToCanvas",
         "layoutTree",
         "parseFreeMindXml"

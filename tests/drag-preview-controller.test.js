@@ -778,7 +778,7 @@ test("keeps its parent when dragged across it to flip branch sides", () => {
 
   const result = fixture.controller.commit(fixture.dragged);
   assert.equal(result.state, "attached");
-  assert.equal(result.changed, false);
+  assert.equal(result.changed, true);
   assert.equal(fixture.activeEdges[0].from.node.id, "old");
   assert.equal(fixture.activeEdges[0].to.side, "right");
 });

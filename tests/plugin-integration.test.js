@@ -1098,3 +1098,109 @@ test("decoration restore covers the selected controlsOwner and resizer elements"
   assert.equal(resizer.hasClass("tomindmap-title-only-card"), false);
   assert.equal(resizer.getAttribute("aria-label"), "original");
 });
+
+test("filterMindmapPaneMenu removes Better Export PDF and Export as image menu items", () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+
+  const items = [
+    { title: "Bookmark...", dom: { remove() {}, style: {} } },
+    { title: "Better Export PDF", dom: { remove() {}, style: {} } },
+    { title: "Export as image", dom: { remove() {}, style: {} } },
+    { title: "Copy whole map as Markdown", dom: { remove() {}, style: {} } }
+  ];
+  const menu = { items, showAtMouseEvent: () => {}, showAtPosition: () => {} };
+
+  plugin.filterMindmapPaneMenu(menu);
+
+  assert.equal(menu.items.length, 2);
+  assert.equal(menu.items[0].title, "Bookmark...");
+  assert.equal(menu.items[1].title, "Copy whole map as Markdown");
+});
+
+test("checkNestedMindMapUndo deletes the created nested canvas file when card is undone", async () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  let trashedPath = null;
+  const app = {
+    vault: {
+      getAbstractFileByPath: (p) => ({ path: p, name: p }),
+      trash: async (file) => { trashedPath = file.path; }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  const canvas = {
+    view: { file: { path: "Parent.canvas" } },
+    nodes: new Map([["card-1", { id: "card-1" }]])
+  };
+
+  plugin.pendingNestedMindMapUndo = {
+    canvas,
+    canvasPath: "Parent.canvas",
+    nestedPath: "Nested.canvas",
+    nestedFile: { path: "Nested.canvas", name: "Nested.canvas" },
+    cardId: "nested-card-id"
+  };
+
+  // card-1 is on canvas, but cardId "nested-card-id" was removed by undo
+  await plugin.checkNestedMindMapUndo(canvas);
+
+  assert.equal(trashedPath, "Nested.canvas");
+  assert.equal(plugin.pendingNestedMindMapUndo, null);
+});
+
+test("createNewMindMap creates mind map in active note folder by default or root", async () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  let createdPath = null;
+  let createdContent = null;
+  let openedFile = null;
+  const app = {
+    workspace: {
+      getActiveFile: () => ({ path: "Work/Project/Notes.md", parent: { path: "Work/Project" } }),
+      getLeavesOfType: () => [],
+      getLeaf: () => ({ openFile: async (f) => { openedFile = f; } })
+    },
+    vault: {
+      getAbstractFileByPath: () => null,
+      create: async (p, content) => {
+        createdPath = p;
+        createdContent = content;
+        return { path: p, basename: "Untitled" };
+      }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getActiveCanvas: () => null,
+    zoomToNode: () => {},
+    startEditing: () => {}
+  };
+
+  const file = await plugin.createNewMindMap();
+  assert.equal(createdPath, "Work/Project/Untitled.canvas");
+  const parsed = JSON.parse(createdContent);
+  assert.equal(parsed.mindmap, true);
+  assert.equal(parsed.nodes.length, 1);
+  assert.equal(parsed.nodes[0].text, "# Mind map");
+});
+
+test("applyCanvasCommandRename updates canvas:new-file command name", () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  const command = { id: "canvas:new-file", name: "Create new canvas" };
+  const app = {
+    commands: {
+      commands: {
+        "canvas:new-file": command
+      }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.settings = { renameCreateCanvas: true };
+
+  plugin.applyCanvasCommandRename();
+  assert.equal(command.name, "Create new mind map");
+
+  plugin.settings = { renameCreateCanvas: false };
+  plugin.applyCanvasCommandRename();
+  assert.equal(command.name, "Create new canvas");
+});
+

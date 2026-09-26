@@ -188,6 +188,18 @@
 	display: none;
 }
 
+.tomindmap-outline .tomindmap-outline-item {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	padding: 0 !important;
+	margin: 0 !important;
+	font: inherit;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
 .tomindmap-outline .tomindmap-outline-item .tree-item-inner {
 	text-overflow: ellipsis;
 	overflow: hidden;
@@ -196,13 +208,16 @@
 	flex: 1;
 }
 
-.tomindmap-outline .tomindmap-outline-item.is-active {
+.tomindmap-outline .tree-item-self:has(.tomindmap-outline-item.is-active),
+.tomindmap-outline .tree-item-self.is-active {
 	background-color: var(--background-modifier-hover);
 	border-radius: var(--radius-s);
 }
 
-.tomindmap-outline .tomindmap-outline-item.is-selected {
+.tomindmap-outline .tree-item-self:has(.tomindmap-outline-item.is-selected),
+.tomindmap-outline .tree-item-self.is-selected {
 	background-color: var(--background-modifier-active-hover);
+	border-radius: var(--radius-s);
 }
 
 .tomindmap-outline .collapse-icon svg {

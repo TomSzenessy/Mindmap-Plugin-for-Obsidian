@@ -392,3 +392,38 @@ test("removeIncomingParentEdges cleans up all surplus parent edges including tho
   assert.equal(canvas.edges.size, 1);
   assert.ok(canvas.edges.has("e3"));
 });
+
+test("multi-selection drag removes incoming parent edges from other moving nodes", () => {
+  const node1 = { id: "node1" };
+  const node2 = { id: "node2" };
+  const target = { id: "target" };
+  const oldParent = { id: "oldParent" };
+
+  const edge1 = { id: "e1", from: { node: oldParent }, to: { node: node1 } };
+  const edge2 = { id: "e2", from: { node: oldParent }, to: { node: node2 } };
+  const removed = [];
+
+  const canvas = {
+    edges: new Map([
+      ["e1", edge1],
+      ["e2", edge2]
+    ])
+  };
+  const canvasApi = {
+    getIncomingEdges: (c, n) => {
+      return Array.from(canvas.edges.values()).filter(e => e.to.node.id === n.id);
+    },
+    removeEdge: (c, edge) => {
+      removed.push(edge.id);
+      canvas.edges.delete(edge.id);
+    }
+  };
+
+  // Node 1 is directly dragged and reparented to target; Node 2 moves along with it.
+  // Other moving nodes should have all incoming parent edges removed.
+  removeIncomingParentEdges(canvas, canvasApi, node2);
+  assert.deepEqual(removed, ["e2"]);
+  assert.equal(canvas.edges.has("e2"), false);
+  assert.equal(canvas.edges.has("e1"), true);
+});
+

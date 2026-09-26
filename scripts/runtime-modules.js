@@ -91,6 +91,7 @@ const modules = [
     source: "lib/export.js",
     bindings: {
       named: [
+        "colorDistance",
         "createApprovedPublicHttpsAssetResolver",
         "createExportAssetResolver",
         "createExportDelivery",
@@ -99,6 +100,7 @@ const modules = [
         "createRasterExportSession",
         "embedDocumentAssets",
         "paginatedPdfDocument",
+        "parseCssColor",
         "rasterizeSvg",
         "renderHtmlAsVectorPdf",
         "sanitizeExportElement",

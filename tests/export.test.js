@@ -6,9 +6,11 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  colorDistance,
   createApprovedPublicHttpsAssetResolver,
   embedDocumentAssets,
   paginatedPdfDocument,
+  parseCssColor,
   renderHtmlAsVectorPdf,
   safeBaseName,
   vectorPdfPageSize,
@@ -171,3 +173,38 @@ test("skips oversized and unresolvable assets without failing", async () => {
   });
   assert.equal(embedded, html);
 });
+
+test("parses hex and rgb CSS colors reliably and rejects unresolved variables", () => {
+  assert.deepEqual(parseCssColor("#fff"), [255, 255, 255]);
+  assert.deepEqual(parseCssColor("#1e293b"), [30, 41, 59]);
+  assert.deepEqual(parseCssColor("rgb(38, 38, 38)"), [38, 38, 38]);
+  assert.deepEqual(parseCssColor("rgba(36, 36, 36, 1)"), [36, 36, 36]);
+  assert.equal(parseCssColor("var(--text-normal, #1e293b)"), null);
+  assert.equal(parseCssColor(""), null);
+});
+
+test("calculates color distance correctly for contrast checking", () => {
+  assert.equal(colorDistance([0, 0, 0], [0, 0, 0]), 0);
+  assert.equal(Math.round(colorDistance([0, 0, 0], [255, 255, 255])), 442);
+  assert.ok(colorDistance([38, 38, 38], [248, 250, 252]) > 200);
+});
+
+test("exports SVG with clean vector text and reveals fallback vector text", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  assert.match(source, /if \(request\.format === 'svg'\) \{\s*const svg = pdfSvgFromDocument\(embedded, true\);/);
+});
+
+test("expands selection in exports to include entire topic branches", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  // canvasPrintDocument expands selectedIds via directed edges:
+  assert.match(source, /for \(const edge of data\.edges \|\| \[\]\) \{\s*if \(!outgoing\.has\(edge\.fromNode\)\) outgoing\.set\(edge\.fromNode, \[\]\);/);
+  // prepareCanvasForExport expands exportSelection via directed edges:
+  assert.match(source, /for \(const edge of exportData\.edges \|\| \[\]\) \{\s*if \(!outgoing\.has\(edge\.fromNode\)\) outgoing\.set\(edge\.fromNode, \[\]\);/);
+});
+
+test("ensures text contrast against card fill in exported documents", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  assert.match(source, /if \(!textRgb \|\| colorDistance\(textRgb, fillRgb\) < 110\)/);
+  assert.match(source, /effectiveTextColor = fillLum < 145 \? '#f8fafc' : '#0f172a'/);
+});
+

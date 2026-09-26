@@ -53,6 +53,7 @@ var {
 var MarkdownMindMapCodec = require('./lib/markdown-codec.js');
 var { normalizeClipboardMarkdown } = require('./lib/clipboard-markdown.js');
 var {
+	colorDistance,
 	createExportAssetResolver,
 	createExportDelivery,
 	createExportMindMapModal,
@@ -60,6 +61,7 @@ var {
 	createRasterExportSession,
 	embedDocumentAssets,
 	paginatedPdfDocument,
+	parseCssColor,
 	rasterizeSvg,
 	renderHtmlAsVectorPdf,
 	sanitizeExportElement,
@@ -1688,12 +1690,53 @@ function exportMarkerId(color) {
 function canvasPrintDocument(canvas, scope) {
 	const data = canvas.getData();
 	const dataById = new Map(data.nodes.map((node) => [node.id, node]));
-	const wrapperRect = canvas.wrapperEl.getBoundingClientRect();
+	const wrapperRect =
+		canvas.wrapperEl?.getBoundingClientRect?.() || {
+			left: 0,
+			top: 0,
+			right: 1600,
+			bottom: 900,
+			width: 1600,
+			height: 900
+		};
+	const wrapperStyle =
+		canvas.wrapperEl?.ownerDocument?.defaultView?.getComputedStyle(
+			canvas.wrapperEl
+		);
+	const background = safeCssValue(
+		wrapperStyle?.backgroundColor,
+		nearestPaintedBackground(canvas.wrapperEl)
+	);
+	const backdropRgb = parseCssColor(background) || [255, 255, 255];
+	const isDarkTheme =
+		(backdropRgb[0] * 299 + backdropRgb[1] * 587 + backdropRgb[2] * 114) / 1000 <= 145 ||
+		Boolean(canvas.wrapperEl?.ownerDocument?.body?.classList?.contains('theme-dark'));
+	const defaultCardFill = isDarkTheme ? 'rgb(36, 36, 36)' : '#ffffff';
+	const defaultCardTextColor = isDarkTheme ? '#f8fafc' : '#0f172a';
+	const defaultFontFamily =
+		wrapperStyle?.fontFamily ||
+		"system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+
 	const selectedIds = new Set();
 	if (scope === 'selection') {
-		for (const item of canvas.selection) {
+		for (const item of canvas.selection || []) {
 			if (typeof item === 'string') selectedIds.add(item);
-			else if (item && typeof item === 'object' && 'nodeEl' in item) selectedIds.add(item.id);
+			else if (item && typeof item === 'object' && 'id' in item) selectedIds.add(item.id);
+		}
+		const queue = Array.from(selectedIds);
+		const outgoing = new Map();
+		for (const edge of data.edges || []) {
+			if (!outgoing.has(edge.fromNode)) outgoing.set(edge.fromNode, []);
+			outgoing.get(edge.fromNode).push(edge.toNode);
+		}
+		while (queue.length > 0) {
+			const curr = queue.shift();
+			for (const next of outgoing.get(curr) || []) {
+				if (!selectedIds.has(next)) {
+					selectedIds.add(next);
+					queue.push(next);
+				}
+			}
 		}
 	}
 	const records = [];
@@ -1772,6 +1815,17 @@ function canvasPrintDocument(canvas, scope) {
 				? 'missing-media'
 				: ''
 		].filter(Boolean).join(' ');
+		const rawFill = safeCssValue(
+			nodeStyle?.backgroundColor,
+			nearestPaintedBackground(node.nodeEl, defaultCardFill)
+		);
+		const rawTextColor = safeCssValue(
+			nodeStyle?.color,
+			defaultCardTextColor
+		);
+		const radius = parseFloat(nodeStyle?.borderRadius);
+		const cardRadius = Number.isFinite(radius) && radius > 0 ? radius : (nodeData.type === 'group' ? 4 : 8);
+
 		records.push({
 			id: node.id,
 			state: cardState,
@@ -1784,18 +1838,12 @@ function canvasPrintDocument(canvas, scope) {
 			contentRect,
 			color: node.color || nodeData.color || '',
 			group: nodeData.type === 'group',
-			fill: safeCssValue(
-				nodeStyle?.backgroundColor,
-				nearestPaintedBackground(node.nodeEl)
-			),
+			fill: rawFill,
 			stroke: safeCssValue(nodeStyle?.borderColor, ''),
 			strokeWidth: parseFloat(nodeStyle?.borderWidth) || 2,
-			radius: parseFloat(nodeStyle?.borderRadius) || 0,
-			textColor: safeCssValue(
-				nodeStyle?.color,
-				'var(--text-normal, #1e293b)'
-			),
-			fontFamily: nodeStyle?.fontFamily || 'system-ui, sans-serif',
+			radius: cardRadius,
+			textColor: rawTextColor,
+			fontFamily: nodeStyle?.fontFamily || defaultFontFamily,
 			fontSize: parseFloat(nodeStyle?.fontSize) || 14,
 			lineHeight: parseFloat(nodeStyle?.lineHeight) || 20
 		});
@@ -1909,14 +1957,6 @@ function canvasPrintDocument(canvas, scope) {
 			return `<path d="${path}" fill="none" stroke="${escapeXml(stroke)}" stroke-width="2"${start}${end}/>${labelMarkup}`;
 		})
 		.join('');
-	const wrapperStyle =
-		canvas.wrapperEl.ownerDocument?.defaultView?.getComputedStyle(
-			canvas.wrapperEl
-		);
-	const background = safeCssValue(
-		wrapperStyle?.backgroundColor,
-		nearestPaintedBackground(canvas.wrapperEl)
-	);
 	const nodeSvg = records
 		.map((record) => {
 			const accent = colorOf(
@@ -1937,9 +1977,18 @@ function canvasPrintDocument(canvas, scope) {
 			} else if (record.state.split(/\s+/).includes('missing-media')) {
 				stroke = '#dc2626';
 			}
+
+			const fillRgb = parseCssColor(paint.fill) || (isDarkTheme ? [36, 36, 36] : [255, 255, 255]);
+			const fillLum = (fillRgb[0] * 299 + fillRgb[1] * 587 + fillRgb[2] * 114) / 1000;
+			let textRgb = parseCssColor(record.textColor);
+			let effectiveTextColor = record.textColor;
+			if (!textRgb || colorDistance(textRgb, fillRgb) < 110) {
+				effectiveTextColor = fillLum < 145 ? '#f8fafc' : '#0f172a';
+			}
+
 			const stateAttribute = ` data-tomindmap-card-state="${escapeXml(record.state)}"`;
 			if (record.group) {
-				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${escapeXml(MarkdownMindMapCodec.topicTitle(record.text))}</text></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${record.y + 22}" font-size="${record.fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(effectiveTextColor)}">${escapeXml(MarkdownMindMapCodec.topicTitle(record.text))}</text></g>`;
 			}
 			const fontSize = record.fontSize;
 			if (record.renderedHtml) {
@@ -1970,7 +2019,7 @@ function canvasPrintDocument(canvas, scope) {
 					width: record.width,
 					height: record.height
 				};
-				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
+				return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text data-tomindmap-pdf-fallback="true" opacity="0" x="${record.x + 12}" y="${fallbackY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(effectiveTextColor)}">${fallbackSpans}</text><foreignObject x="${box.x}" y="${box.y}" width="${Math.max(1, box.width)}" height="${Math.max(1, box.height)}"><div xmlns="http://www.w3.org/1999/xhtml" class="tomindmap-pdf-card">${record.renderedHtml}</div></foreignObject></g>`;
 			}
 			const lines = wrapSvgText(record.text, record.width, fontSize);
 			const lineHeight = record.lineHeight;
@@ -1986,7 +2035,7 @@ function canvasPrintDocument(canvas, scope) {
 						`<tspan x="${record.x + 12}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
 				)
 				.join('');
-			return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(record.textColor)}">${tspans}</text></g>`;
+			return `<g${stateAttribute}><rect x="${record.x}" y="${record.y}" width="${record.width}" height="${record.height}" rx="${record.radius}" fill="${escapeXml(paint.fill)}" stroke="${escapeXml(stroke)}" stroke-width="${stateStrokeWidth}"/><text x="${record.x + 12}" y="${textY}" font-size="${fontSize}" font-family="${escapeXml(record.fontFamily)}" fill="${escapeXml(effectiveTextColor)}">${tspans}</text></g>`;
 		})
 		.join('');
 	const title =
@@ -8795,6 +8844,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const output = [];
 			const outputEdges = [];
 			const replacements = new Map();
+			const replacementsAll = new Map();
 			const nestedCards = new Set(
 				nodes.filter((node) => isNestedCard(node)).map((node) => node.id)
 			);
@@ -8860,6 +8910,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				outputEdges.push(...child.edges);
 				for (const placedNode of placed) occupiedHere.push(rectOf(placedNode));
 				replacements.set(node.id, child.rootIds);
+				replacementsAll.set(node.id, child.nodes.map((item) => item.id));
 			}
 			const mapEndpoint = (id) => replacements.get(id) || [id];
 			for (const [edgeIndex, edge] of sourceEdges.entries()) {
@@ -8887,7 +8938,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				nodes: output,
 				edges: outputEdges,
 				rootIds,
-				replacements
+				replacements,
+				replacementsAll
 			};
 		};
 		const expanded = await expandLevel(sourceData, '', [], active);
@@ -8934,7 +8986,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			const width = (Number(node.width) || 260) * exportScale;
 			const height = (Number(node.height) || 60) * exportScale;
 			return {
-				parentElement: null,
+				ownerDocument: canvas.wrapperEl?.ownerDocument || document,
+				parentElement: canvas.wrapperEl || null,
 				querySelector: () => null,
 				matches: () => false,
 				getBoundingClientRect: () => ({
@@ -8951,26 +9004,44 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		for (const item of canvas.selection || []) {
 			const id = typeof item === 'string' ? item : item?.id;
 			if (!id) continue;
-			const roots = expanded.replacements.get(id) || [id];
-			for (const rootId of roots) exportSelection.add(rootId);
+			const allMapped = expanded.replacementsAll?.get(id) || expanded.replacements?.get(id) || [id];
+			for (const childId of allMapped) exportSelection.add(childId);
+		}
+		const queue = Array.from(exportSelection);
+		const outgoing = new Map();
+		for (const edge of exportData.edges || []) {
+			if (!outgoing.has(edge.fromNode)) outgoing.set(edge.fromNode, []);
+			outgoing.get(edge.fromNode).push(edge.toNode);
+		}
+		while (queue.length > 0) {
+			const curr = queue.shift();
+			for (const next of outgoing.get(curr) || []) {
+				if (!exportSelection.has(next)) {
+					exportSelection.add(next);
+					queue.push(next);
+				}
+			}
 		}
 		const syntheticNodes = new Map(
-			expanded.nodes.map((node) => [
-				node.id,
-				{
-					...node,
-					id: node.id,
-					x: Number(node.x) || 0,
-					y: Number(node.y) || 0,
-					width: Number(node.width) || 260,
-					height: Number(node.height) || 60,
-					color: node.color || '',
-					text: nodeText(node),
-					unknownData: { ...(node.unknownData || {}) },
-					nodeEl: exportNodeElement(node),
-					contentEl: null
-				}
-			])
+			expanded.nodes.map((node) => {
+				const existing = canvas.nodes?.get?.(node.id);
+				return [
+					node.id,
+					{
+						...node,
+						id: node.id,
+						x: Number(node.x) || 0,
+						y: Number(node.y) || 0,
+						width: Number(node.width) || 260,
+						height: Number(node.height) || 60,
+						color: node.color || existing?.color || '',
+						text: nodeText(node),
+						unknownData: { ...(node.unknownData || existing?.unknownData || {}) },
+						nodeEl: existing?.nodeEl || exportNodeElement(node),
+						contentEl: existing?.contentEl || null
+					}
+				];
+			})
 		);
 		const syntheticEdges = new Map(
 			exportData.edges.map((edge) => [
@@ -9053,7 +9124,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.exportAssetResolvers()
 			);
 			if (request.format === 'svg') {
-				const svg = pdfSvgFromDocument(embedded, false);
+				const svg = pdfSvgFromDocument(embedded, true);
 				if (!svg) throw new Error('Could not build SVG');
 				const filename = await this.deliverExport({
 					baseName: base,

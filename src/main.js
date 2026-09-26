@@ -1915,6 +1915,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.scheduleCanvasLifecycleRefresh();
 			})
 		);
+		this.registerEvent(
+			this.app.workspace.on('layout-change', () => {
+				this.scheduleCanvasLifecycleRefresh();
+			})
+		);
 		this.registerView(OUTLINE_VIEW_TYPE, (leaf) => new OutlineView(leaf));
 		this.app.workspace.onLayoutReady(() => {
 			this.runAsync(() => this.rebuildMarkdownSyncIndex(), 'rebuild markdown sync index');
@@ -2669,10 +2674,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.canvasLifecycleTimer = setTimeout(() => {
 			this.canvasLifecycleTimer = null;
 			if (this.unloaded) return;
+			const activeLeaf = this.app.workspace.activeLeaf;
 			const view = this.app.workspace.getActiveViewOfType(
 				import_obsidian5.ItemView
 			);
-			this.onLeafChange(view?.leaf || null);
+			this.onLeafChange(activeLeaf || view?.leaf || null);
 		}, 50);
 	}
 	onLeafChange(leaf) {
@@ -2683,8 +2689,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: _a.getViewType()) === OUTLINE_VIEW_TYPE
 		)
 			return;
-		const activeCanvas = this.canvasApi.getActiveCanvas();
-		if (activeCanvas && activeCanvas === this.interceptedCanvas) return;
+		let canvas = (leaf?.view?.getViewType?.() === 'canvas' ? leaf.view.canvas : null) || this.canvasApi.getActiveCanvas(leaf) || this.canvasApi.getActiveCanvas();
+		if (canvas && this.isMindmapCanvas(canvas)) {
+			MindmapActions.syncCollapsedVisibility(canvas);
+			for (const delay of [20, 60, 150, 300, 600]) {
+				this.trackedTimeout(() => {
+					if (this.isMindmapCanvas(canvas)) {
+						MindmapActions.syncCollapsedVisibility(canvas);
+					}
+				}, delay);
+			}
+		}
+		if (canvas && canvas === this.interceptedCanvas) return;
 		const previousCanvas = this.interceptedCanvas;
 		const previousCanvasPath = previousCanvas?.view?.file?.path;
 		const pendingMarkdownWrite = previousCanvasPath
@@ -2764,7 +2780,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.autoResizeHandle.cleanup();
 			this.autoResizeHandle = null;
 		}
-		const canvas = this.canvasApi.getActiveCanvas();
+		canvas = canvas || this.canvasApi.getActiveCanvas(leaf);
 		if (canvas && canvas !== this.lastNavCanvas) {
 			this.navHistory = [];
 			this.navHistoryIndex = -1;
@@ -9479,55 +9495,64 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		let attempts = 0;
 		const tryFocus = () => {
 			if (this.unloaded) return;
-			const activeCanvas = this.canvasApi?.getActiveCanvas?.();
-			if (!activeCanvas) {
-				if (++attempts < 20) setTimeout(tryFocus, 50);
+			const canvasView = leaf?.view?.getViewType?.() === 'canvas' ? leaf.view : null;
+			const canvas = canvasView?.canvas || this.canvasApi?.getActiveCanvas?.(leaf);
+			const canvasPathNow = canvas?.view?.file?.path || canvasView?.file?.path || '';
+			if (!canvas || canvasPathNow !== targetPath) {
+				if (++attempts < 50) setTimeout(tryFocus, 50);
 				return;
 			}
-			const canvasPathNow = activeCanvas.view?.file?.path || '';
-			if (canvasPathNow !== targetPath) {
-				return;
-			}
-			const root = activeCanvas.nodes?.values()?.next()?.value;
+			const root = canvas.nodes?.values()?.next()?.value;
 			if (!root || !root.nodeEl) {
-				if (++attempts < 20) setTimeout(tryFocus, 50);
+				if (++attempts < 50) setTimeout(tryFocus, 50);
 				return;
 			}
-			this.canvasApi.zoomToNode(activeCanvas, root, 1.2);
-			setTimeout(() => {
+			this.app.workspace.setActiveLeaf?.(leaf, { focus: true });
+			if (typeof canvas.zoomToNode === 'function') {
+				this.canvasApi?.zoomToNode?.(canvas, root, 1.2);
+			}
+			canvas.selectOnly?.(root);
+			if (typeof root.startEditing === 'function') {
+				root.startEditing();
+			} else if (typeof this.canvasApi?.selectAndEdit === 'function') {
+				this.canvasApi.selectAndEdit(canvas, root);
+			} else if (typeof this.canvasApi?.startEditing === 'function') {
+				this.canvasApi.startEditing(canvas, root);
+			}
+			let focusAttempts = 0;
+			const focusEditor = () => {
 				if (this.unloaded) return;
-				const current = this.canvasApi?.getActiveCanvas?.();
-				if (current?.view?.file?.path === targetPath && root.nodeEl) {
-					activeCanvas.selectOnly(root);
-					if (typeof root.startEditing === 'function') {
-						root.startEditing();
-					} else if (typeof this.canvasApi?.selectAndEdit === 'function') {
-						this.canvasApi.selectAndEdit(activeCanvas, root);
-					} else if (typeof this.canvasApi?.startEditing === 'function') {
-						this.canvasApi.startEditing(activeCanvas, root);
-					}
-					const focusInput = () => {
-						const cm = root.nodeEl?.querySelector?.('.cm-content, textarea, input');
-						if (cm) {
-							cm.focus?.();
-							if (typeof window !== 'undefined' && window.getSelection) {
-								try {
-									const range = document.createRange();
-									range.selectNodeContents(cm);
-									range.collapse(false);
-									const sel = window.getSelection();
-									sel.removeAllRanges();
-									sel.addRange(range);
-								} catch (_) {}
-							}
-						}
-					};
-					focusInput();
-					setTimeout(focusInput, 30);
-					setTimeout(focusInput, 80);
-					setTimeout(focusInput, 150);
+				const iframe = root.contentEl?.querySelector?.('iframe');
+				const container = iframe?.contentDocument || root.contentEl || root.nodeEl;
+				const cmContent = container?.querySelector?.('.cm-content');
+				const editorView = cmContent?.cmView?.view;
+				if (editorView) {
+					editorView.focus();
+					const end = editorView.state?.doc?.length || 0;
+					editorView.dispatch?.({ selection: { anchor: end, head: end } });
+					return;
 				}
-			}, 30);
+				if (cmContent) {
+					cmContent.focus();
+					return;
+				}
+				const anyInput = container?.querySelector?.('textarea, input');
+				if (anyInput) {
+					anyInput.focus();
+					return;
+				}
+				if (++focusAttempts < 25) {
+					if (typeof root.startEditing === 'function' && !root.isEditing) {
+						root.startEditing();
+					}
+					setTimeout(focusEditor, 30);
+				}
+			};
+			focusEditor();
+			setTimeout(focusEditor, 40);
+			setTimeout(focusEditor, 100);
+			setTimeout(focusEditor, 250);
+			setTimeout(focusEditor, 500);
 		};
 		setTimeout(tryFocus, 50);
 

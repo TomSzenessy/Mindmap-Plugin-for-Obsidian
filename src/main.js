@@ -152,67 +152,113 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 			await this.plugin.saveSettings();
 			return this.plugin.settings;
 		};
-		const descriptions = {
-			defaultMindmapMode: [
-				'Default mindmap mode',
-				'Whether canvases default to mindmap mode (can be toggled per canvas).'
-			],
-			autoCreateRootTopic: [
-				'Create a central topic on blank canvases',
-				'Open an empty mindmap canvas with an editable, distinctly colored central topic already selected.'
-			],
-			renameCanvasFromRootTopic: [
-				'Rename canvas from central topic',
-				'Reuse the Canvas filename for the central topic after it is edited.'
-			],
-			autoColor: ['Auto-color branches', 'Assign distinct colors to top-level branches.'],
-			mouseNavigation: [
-				'Mouse back/forward navigation',
-				"Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's note navigation."
-			],
-			wrapArrowNavigation: [
-				'Wrap arrow navigation',
-				'At the edge of the map, continue from the opposite edge instead of stopping.'
-			],
-			exportMarkmapFrontmatter: [
-				'Markmap export frontmatter',
-				'Include portable Markmap YAML options in new Markdown exports. Imported frontmatter is preserved.'
-			],
-			createNewMindMapRibbon: [
-				"Show 'Create new mind map' ribbon icon",
-				"Add an icon to the left ribbon to quickly create a new mind map in the current folder."
-			],
-			renameCreateCanvas: [
-				"Rename 'Create new canvas' to 'Create new mind map'",
-				"Change Obsidian's default canvas creation command name to 'Create new mind map'."
-			]
-		};
-		for (const field of SETTINGS_FIELDS) {
-			if (field.type === 'boolean') {
-				const [name, description] = descriptions[field.key] || [field.key, field.key];
-				new import_obsidian3.Setting(containerEl)
-					.setName(name)
-					.setDesc(description)
-					.addToggle((toggle) =>
-						toggle
-							.setValue(this.plugin.settings[field.key])
-							.onChange(async (value) => {
-								const settings = await save({ [field.key]: value });
-								toggle.setValue(settings[field.key]);
-							})
-					);
-			}
-		}
+
 		new import_obsidian3.Setting(containerEl)
-			.setName('Keyboard workflow')
-			.setDesc(
-				'Type to edit · Enter creates a sibling · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+F opens the outline.'
-			);
+			.setName('Mind map creation & Canvas integration')
+			.setHeading();
+
 		new import_obsidian3.Setting(containerEl)
-			.setName('Customizable mind-map actions')
-			.setDesc(
-				'Open Settings → Hotkeys to customize collapse, conversions, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod.'
+			.setName("Rename 'New canvas' to 'New mind map'")
+			.setDesc("Replace Obsidian's native 'New canvas' option across context menus, the command palette, and ribbon with 'New mind map', creating mind maps in the active folder with a central topic.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.renameCreateCanvas)
+					.onChange(async (value) => {
+						const settings = await save({ renameCreateCanvas: value });
+						this.plugin.applyCanvasCommandRename();
+						toggle.setValue(settings.renameCreateCanvas);
+					})
 			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName("Show 'Create new mind map' ribbon icon")
+			.setDesc("Add a dedicated icon to Obsidian's left ribbon to quickly create a new mind map in the current folder.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.createNewMindMapRibbon)
+					.onChange(async (value) => {
+						const settings = await save({ createNewMindMapRibbon: value });
+						this.plugin.updateRibbonIcon();
+						toggle.setValue(settings.createNewMindMapRibbon);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Default mind map mode')
+			.setDesc('Whether canvases default to mind map mode (can be toggled per canvas).')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.defaultMindmapMode)
+					.onChange(async (value) => {
+						const settings = await save({ defaultMindmapMode: value });
+						toggle.setValue(settings.defaultMindmapMode);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Create central topic on blank canvases')
+			.setDesc('Open empty canvases with an editable, distinctly colored central topic already selected.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoCreateRootTopic)
+					.onChange(async (value) => {
+						const settings = await save({ autoCreateRootTopic: value });
+						toggle.setValue(settings.autoCreateRootTopic);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Rename canvas from central topic')
+			.setDesc('Automatically rename the canvas file when the central topic is edited.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.renameCanvasFromRootTopic)
+					.onChange(async (value) => {
+						const settings = await save({ renameCanvasFromRootTopic: value });
+						toggle.setValue(settings.renameCanvasFromRootTopic);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Navigation & Behavior')
+			.setHeading();
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Auto-color branches')
+			.setDesc('Assign distinct colors to top-level branches.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoColor)
+					.onChange(async (value) => {
+						const settings = await save({ autoColor: value });
+						toggle.setValue(settings.autoColor);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Wrap arrow navigation')
+			.setDesc('At the edge of the map, continue from the opposite edge instead of stopping.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.wrapArrowNavigation)
+					.onChange(async (value) => {
+						const settings = await save({ wrapArrowNavigation: value });
+						toggle.setValue(settings.wrapArrowNavigation);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Mouse back/forward navigation')
+			.setDesc("Use mouse back/forward buttons for in-canvas navigation instead of Obsidian's note navigation.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.mouseNavigation)
+					.onChange(async (value) => {
+						const settings = await save({ mouseNavigation: value });
+						toggle.setValue(settings.mouseNavigation);
+					})
+			);
+
 		new import_obsidian3.Setting(containerEl)
 			.setName('Touch controls')
 			.setDesc(
@@ -228,6 +274,23 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 						dropdown.setValue(settings.touchControls);
 					});
 			});
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Markmap export frontmatter')
+			.setDesc('Include portable Markmap YAML options in new Markdown exports. Imported frontmatter is preserved.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.exportMarkmapFrontmatter)
+					.onChange(async (value) => {
+						const settings = await save({ exportMarkmapFrontmatter: value });
+						toggle.setValue(settings.exportMarkmapFrontmatter);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Layout & Dimensions')
+			.setHeading();
+
 		const numericNames = {
 			horizontalGap: ['Horizontal gap', 'Space between parent and child topics (px).'],
 			verticalGap: ['Vertical gap', 'Space between sibling topics (px).'],
@@ -255,6 +318,21 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 						})
 				);
 		}
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Workflow & Shortcuts')
+			.setHeading();
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Keyboard workflow')
+			.setDesc(
+				'Type to edit · Enter creates a sibling · Tab creates a child · Arrows navigate · Delete removes a branch · Mod+F opens the outline.'
+			);
+		new import_obsidian3.Setting(containerEl)
+			.setName('Customizable mind-map actions')
+			.setDesc(
+				'Open Settings → Hotkeys to customize collapse, conversions, linked-card expansion, parent navigation, relayout, outline, colors, and mode switching. Defaults use Mod.'
+			);
 	}
 };
 
@@ -2644,12 +2722,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		});
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
+				this.interceptCanvasFileMenu(menu, file);
 				if (file instanceof import_obsidian5.TFolder) {
-					menu.addItem((item) => {
-						item.setTitle('Create new mind map')
-							.setIcon('git-fork')
-							.onClick(() => this.createNewMindMap(file.path));
-					});
+					const hasMindMap = (menu.items || []).some((item) =>
+						/mind map/i.test(String(item.title || item.titleEl?.textContent || ''))
+					);
+					if (!hasMindMap && !this.settings.renameCreateCanvas) {
+						menu.addItem((item) => {
+							item.setTitle('Create new mind map')
+								.setIcon('git-fork')
+								.onClick(() => this.createNewMindMap(file.path));
+						});
+					}
 					menu.addItem((item) => {
 						item.setTitle('Import mind map (.mm) to canvas')
 							.setIcon('file-input')
@@ -3202,6 +3286,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		});
 		this.updateRibbonIcon();
 		this.applyCanvasCommandRename();
+		this.app.workspace.onLayoutReady(() => {
+			this.applyCanvasCommandRename();
+		});
 		this.addSettingTab(new MindMapSettingTab(this.app, this));
 	}
 	pushNavHistory(nodeId) {
@@ -3360,6 +3447,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.toggleBtnEl.remove();
 			this.toggleBtnEl = null;
 		}
+		this.detachOutlineLeaves();
 	}
 	/**
 	 * Called when the active leaf changes — set up canvas-specific UI.
@@ -3394,7 +3482,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (previousCanvas) {
 			this.disposeCanvasGestures('leaf-change');
 			this.cancelPendingAsync(previousCanvas);
-			this.disposeCanvasDecorations(previousCanvas);
 			void flushCanvasView(previousCanvas, this.app.vault).catch(
 				(error) => {
 					console.error(
@@ -4547,10 +4634,21 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			leaf.view.openSearch();
 	}
 	hideOutline() {
-		for (const leaf of this.app.workspace.getLeavesOfType(
+		const leaves = this.app?.workspace?.getLeavesOfType?.(
 			OUTLINE_VIEW_TYPE
-		)) {
-			leaf.detach();
+		) || [];
+		for (const leaf of leaves) {
+			if (leaf?.view instanceof OutlineView) {
+				leaf.view.clear();
+			}
+		}
+	}
+	detachOutlineLeaves() {
+		const leaves = this.app?.workspace?.getLeavesOfType?.(
+			OUTLINE_VIEW_TYPE
+		) || [];
+		for (const leaf of leaves) {
+			leaf?.detach?.();
 		}
 	}
 	reorderOutlineToTop(leaf) {
@@ -9923,9 +10021,78 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (cmd) {
 			if (restore || !this.settings.renameCreateCanvas) {
 				if (cmd.__tomindmap_orig_name) cmd.name = cmd.__tomindmap_orig_name;
+				if (cmd.__tomindmap_orig_callback) cmd.callback = cmd.__tomindmap_orig_callback;
+				if (cmd.__tomindmap_orig_checkCallback) cmd.checkCallback = cmd.__tomindmap_orig_checkCallback;
 			} else {
 				if (!cmd.__tomindmap_orig_name) cmd.__tomindmap_orig_name = cmd.name;
+				if (!cmd.__tomindmap_orig_callback && cmd.callback) cmd.__tomindmap_orig_callback = cmd.callback;
+				if (!cmd.__tomindmap_orig_checkCallback && cmd.checkCallback) cmd.__tomindmap_orig_checkCallback = cmd.checkCallback;
 				cmd.name = 'Create new mind map';
+				cmd.callback = () => {
+					this.runAsync(() => this.createNewMindMap(), 'create new mind map');
+				};
+				if (cmd.checkCallback || cmd.__tomindmap_orig_checkCallback) {
+					cmd.checkCallback = (checking) => {
+						if (checking) return true;
+						this.runAsync(() => this.createNewMindMap(), 'create new mind map');
+						return true;
+					};
+				}
+			}
+		}
+		if (this.settings.renameCreateCanvas && !restore) {
+			if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+				const ribbonIcons = document.querySelectorAll('.side-dock-ribbon-action');
+				if (ribbonIcons) {
+					for (const icon of ribbonIcons) {
+						const label = icon.getAttribute?.('aria-label') || '';
+						if (/^create new canvas$/i.test(label) || /^new canvas$/i.test(label)) {
+							icon.setAttribute?.('aria-label', 'Create new mind map');
+						}
+					}
+				}
+			}
+		}
+	}
+
+	interceptCanvasFileMenu(menu, file) {
+		if (!menu) return;
+		const rename = () => {
+			if (!this.settings.renameCreateCanvas) return;
+			const isFolder = file instanceof import_obsidian5.TFolder ||
+				Array.isArray(file?.children) ||
+				(typeof file?.path === 'string' && !file?.extension);
+			const folderPath = isFolder
+				? file.path
+				: (file?.parent?.path || '');
+			if (Array.isArray(menu.items)) {
+				for (const item of menu.items) {
+					const title = String(item.title || item.titleEl?.textContent || item.dom?.textContent || '').trim();
+					if (/^new canvas$/i.test(title) || /^create new canvas$/i.test(title)) {
+						item.setTitle(title.toLowerCase().startsWith('create') ? 'Create new mind map' : 'New mind map');
+						item.setIcon('git-fork');
+						item.onClick(() => this.createNewMindMap(folderPath));
+					}
+				}
+			}
+		};
+		rename();
+		if (!menu.__tomindmap_hooked) {
+			menu.__tomindmap_hooked = true;
+			const origShowAtPosition = menu.showAtPosition;
+			const origShowAtMouseEvent = menu.showAtMouseEvent;
+			const self = this;
+			if (typeof origShowAtPosition === 'function') {
+				menu.showAtPosition = function (...args) {
+					rename();
+					return origShowAtPosition.apply(this, args);
+				};
+			}
+			if (typeof origShowAtMouseEvent === 'function') {
+				menu.showAtMouseEvent = function (...args) {
+					rename();
+					return origShowAtMouseEvent.apply(this, args);
+				};
 			}
 		}
 	}
@@ -9935,14 +10102,28 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (typeof targetFolder === 'string') {
 			folderPath = targetFolder;
 		} else {
-			const activeFile = this.app.workspace.getActiveFile();
+			const activeFile = this.app.workspace.getActiveFile() ||
+				this.app.workspace.getActiveViewOfType(import_obsidian5.ItemView)?.file ||
+				this.app.workspace.activeLeaf?.view?.file;
+
 			if (activeFile && activeFile.parent) {
 				folderPath = activeFile.parent.path;
 			} else {
 				const leaves = this.app.workspace.getLeavesOfType('file-explorer');
-				const focused = leaves[0]?.view?.tree?.focusedItem?.file;
+				const explorer = leaves[0]?.view;
+				const focused = explorer?.activeFileItem?.file ||
+					explorer?.selectedItem?.file ||
+					explorer?.tree?.focusedItem?.file;
 				if (focused) {
-					folderPath = focused instanceof import_obsidian5.TFolder ? focused.path : focused.parent?.path || '';
+					const isFolder = focused instanceof import_obsidian5.TFolder ||
+						Array.isArray(focused?.children) ||
+						(typeof focused?.path === 'string' && !focused?.extension);
+					folderPath = isFolder ? focused.path : (focused.parent?.path || '');
+				} else if (this.app.fileManager?.getNewFileParent) {
+					const parent = this.app.fileManager.getNewFileParent(activeFile?.path || '');
+					if (parent && parent.path) {
+						folderPath = parent.path;
+					}
 				}
 			}
 		}

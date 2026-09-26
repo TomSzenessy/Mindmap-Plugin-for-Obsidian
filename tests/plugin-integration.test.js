@@ -1183,9 +1183,17 @@ test("createNewMindMap creates mind map in active note folder by default or root
   assert.equal(parsed.nodes[0].text, "# Mind map");
 });
 
-test("applyCanvasCommandRename updates canvas:new-file command name", () => {
+test("applyCanvasCommandRename updates canvas:new-file command name and hooks callbacks", async () => {
   const { default: CanvasMindMapPlugin } = loadSource();
-  const command = { id: "canvas:new-file", name: "Create new canvas" };
+  let created = false;
+  const origCallback = () => {};
+  const origCheckCallback = (checking) => !checking;
+  const command = {
+    id: "canvas:new-file",
+    name: "Create new canvas",
+    callback: origCallback,
+    checkCallback: origCheckCallback
+  };
   const app = {
     commands: {
       commands: {
@@ -1195,12 +1203,89 @@ test("applyCanvasCommandRename updates canvas:new-file command name", () => {
   };
   const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
   plugin.settings = { renameCreateCanvas: true };
+  plugin.createNewMindMap = async () => { created = true; };
 
   plugin.applyCanvasCommandRename();
   assert.equal(command.name, "Create new mind map");
+  assert.notEqual(command.callback, origCallback);
+  assert.equal(command.checkCallback(true), true);
+  command.callback();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(created, true);
 
   plugin.settings = { renameCreateCanvas: false };
   plugin.applyCanvasCommandRename();
   assert.equal(command.name, "Create new canvas");
+  assert.equal(command.callback, origCallback);
+  assert.equal(command.checkCallback, origCheckCallback);
+});
+
+test("interceptCanvasFileMenu renames New canvas item and routes creation to target folder", () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  let createdInFolder = null;
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.settings = { renameCreateCanvas: true };
+  plugin.createNewMindMap = async (folder) => { createdInFolder = folder; };
+
+  let clickHandler = null;
+  const item = {
+    title: "New canvas",
+    setTitle(t) { this.title = t; return this; },
+    setIcon(i) { this.icon = i; return this; },
+    onClick(cb) { clickHandler = cb; return this; }
+  };
+  const menu = {
+    items: [item],
+    showAtPosition() {},
+    showAtMouseEvent() {}
+  };
+
+  const folder = { path: "Projects/MindMaps" };
+  plugin.interceptCanvasFileMenu(menu, folder);
+
+  assert.equal(item.title, "New mind map");
+  assert.equal(item.icon, "git-fork");
+  assert.equal(typeof clickHandler, "function");
+
+  clickHandler();
+  assert.equal(createdInFolder, "Projects/MindMaps");
+});
+
+test("createNewMindMap resolves folder from file-explorer when no active file", async () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  let createdPath = null;
+  const app = {
+    workspace: {
+      getActiveFile: () => null,
+      getActiveViewOfType: () => null,
+      getLeavesOfType: (type) => {
+        if (type === "file-explorer") {
+          return [{
+            view: {
+              activeFileItem: { file: { path: "Docs/ActiveFolder" } }
+            }
+          }];
+        }
+        return [];
+      },
+      getLeaf: () => ({ openFile: async () => {} })
+    },
+    vault: {
+      getAbstractFileByPath: () => null,
+      create: async (p) => {
+        createdPath = p;
+        return { path: p, basename: "Untitled" };
+      }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.canvasApi = {
+    getActiveCanvas: () => null,
+    zoomToNode: () => {},
+    startEditing: () => {}
+  };
+
+  await plugin.createNewMindMap();
+  assert.equal(createdPath, "Docs/ActiveFolder/Untitled.canvas");
 });
 

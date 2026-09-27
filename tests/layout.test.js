@@ -269,7 +269,7 @@ test("keeps sibling topics in the same column even when a branch has 4 or more c
 });
 
 
-test("balances root sides by rendered branch height, not a contiguous split", () => {
+test("balances root sides into contiguous circular split preserving branch order", () => {
   const engine = new LayoutEngine({ verticalGap: 20 });
   const branches = [
     tree("tall-a", [], 400),
@@ -277,20 +277,13 @@ test("balances root sides by rendered branch height, not a contiguous split", ()
     tree("short-a", [], 60),
     tree("short-b", [], 60)
   ];
+  branches.forEach((b, i) => { b.canvasNode.y = i * 50; });
   const root = tree("root", branches);
   const { rightChildren, leftChildren } = engine.balanceRootChildren(root);
   assert.equal(rightChildren.length, 2);
   assert.equal(leftChildren.length, 2);
-  assert.notEqual(rightChildren[0].canvasNode.id, rightChildren[1].canvasNode.id);
-  const rightHeight = rightChildren.reduce(
-    (sum, child) => sum + child.canvasNode.height,
-    0
-  );
-  const leftHeight = leftChildren.reduce(
-    (sum, child) => sum + child.canvasNode.height,
-    0
-  );
-  assert.ok(Math.abs(rightHeight - leftHeight) <= 20);
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["tall-a", "tall-b"]);
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["short-a", "short-b"]);
 });
 
 test("preserves root branch sides when an edit-triggered relayout requests it", () => {
@@ -348,18 +341,12 @@ test("rebalances the surrounding root branches while keeping a dragged branch on
     { nodeId: "moved-left", direction: "left" }
   );
 
+  assert.equal(rightChildren.length, 2);
+  assert.equal(leftChildren.length, 2);
   assert.ok(leftChildren.includes(branches[3]));
   assert.ok(leftChildren.some((branch) => branch !== branches[3]));
-  assert.ok(rightChildren.length > 0);
-  const rightHeight = rightChildren.reduce(
-    (sum, child) => sum + engine.measureSubtreeHeight(child),
-    0
-  );
-  const leftHeight = leftChildren.reduce(
-    (sum, child) => sum + engine.measureSubtreeHeight(child),
-    0
-  );
-  assert.ok(Math.abs(rightHeight - leftHeight) <= 100);
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["right-a", "right-b"]);
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["right-c", "moved-left"]);
 });
 
 test("keeps collapsed subtree colors synchronized through the structural forest", () => {
@@ -593,7 +580,7 @@ test("cascades each root branch outward after one branch crosses the root", () =
   assert.ok(otherLeaf.x > other.x);
 });
 
-test("preserves existing root sides while moving an overridden branch", () => {
+test("refloats root sides to maintain balance when a branch is dragged to the opposite side", () => {
   const engine = new LayoutEngine({ verticalGap: 20 });
   const root = tree("root", []);
   root.canvasNode.x = 100;
@@ -601,13 +588,17 @@ test("preserves existing root sides while moving an overridden branch", () => {
 
   const leftA = tree("left-a", []);
   leftA.canvasNode.x = -200;
+  leftA.canvasNode.y = 0;
   const leftB = tree("left-b", []);
   leftB.canvasNode.x = -200;
+  leftB.canvasNode.y = 50;
 
   const rightA = tree("right-a", []);
   rightA.canvasNode.x = 400;
+  rightA.canvasNode.y = 0;
   const rightB = tree("right-b", []);
   rightB.canvasNode.x = 400;
+  rightB.canvasNode.y = 50;
 
   root.children = [leftA, leftB, rightA, rightB];
 
@@ -617,8 +608,11 @@ test("preserves existing root sides while moving an overridden branch", () => {
     { nodeId: "right-b", direction: "left" }
   );
 
-  assert.equal(leftChildren.map((c) => c.canvasNode.id).sort().join(","), "left-a,left-b,right-b");
-  assert.equal(rightChildren.map((c) => c.canvasNode.id).join(","), "right-a");
+  assert.equal(rightChildren.length, 2);
+  assert.equal(leftChildren.length, 2);
+  // right-b is kept on left side; left-a (top left) refloated to right
+  assert.equal(leftChildren.map((c) => c.canvasNode.id).sort().join(","), "left-b,right-b");
+  assert.equal(rightChildren.map((c) => c.canvasNode.id).sort().join(","), "left-a,right-a");
 });
 
 test("invokes edge.render when updating edge sides and applying positions", () => {
@@ -734,6 +728,99 @@ test("automatically spreads one-sided branches equally in nested mind maps", () 
   assert.equal(edges.get("e-a").to.side, "left");
   assert.equal(edges.get("e-c").from.side, "left");
   assert.equal(edges.get("e-c").to.side, "right");
+});
+
+test("refloats 8 children all stacked on left into 4 on right and 4 on left preserving circular order", () => {
+  const engine = new LayoutEngine({ verticalGap: 20 });
+  const root = tree("root", []);
+  root.canvasNode.x = 500;
+  root.canvasNode.width = 200;
+
+  // 8 nodes stacked on the left, top to bottom: g, e, c, a, b, d, f, h
+  const ids = ["g", "e", "c", "a", "b", "d", "f", "h"];
+  const children = ids.map((id, index) => {
+    const node = tree(id, []);
+    node.canvasNode.x = 100; // on left
+    node.canvasNode.y = index * 50;
+    return node;
+  });
+  root.children = children;
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(root, true);
+  assert.equal(rightChildren.length, 4);
+  assert.equal(leftChildren.length, 4);
+  // Top 4 from left move to right: g, e, c, a
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["g", "e", "c", "a"]);
+  // Bottom 4 stay on left: b, d, f, h
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["b", "d", "f", "h"]);
+});
+
+test("transfers bottom right to top left when right is too large", () => {
+  const engine = new LayoutEngine({ verticalGap: 20 });
+  const root = tree("root", []);
+  root.canvasNode.x = 500;
+  root.canvasNode.width = 200;
+
+  // 4 on right, 0 on left
+  const ids = ["r1", "r2", "r3", "r4"];
+  const children = ids.map((id, index) => {
+    const node = tree(id, []);
+    node.canvasNode.x = 800; // on right
+    node.canvasNode.y = index * 50;
+    return node;
+  });
+  root.children = children;
+
+  const { rightChildren, leftChildren } = engine.balanceRootChildren(root);
+  assert.equal(rightChildren.length, 2);
+  assert.equal(leftChildren.length, 2);
+  assert.deepEqual(rightChildren.map((c) => c.canvasNode.id), ["r1", "r2"]);
+  assert.deepEqual(leftChildren.map((c) => c.canvasNode.id), ["r3", "r4"]);
+});
+
+test("sequential addition from main node maintains circular ring order (top right -> bottom right -> top left -> bottom left)", () => {
+  const engine = new LayoutEngine({ verticalGap: 20 });
+  const root = tree("root", []);
+  root.canvasNode.x = 500;
+  root.canvasNode.width = 200;
+
+  // Simulate adding nodes sequentially:
+  // Node 1: added on right
+  const n1 = tree("1", []); n1.canvasNode.x = 800; n1.canvasNode.y = 0;
+  root.children = [n1];
+  let res = engine.balanceRootChildren(root);
+  assert.deepEqual(res.rightChildren.map((c) => c.canvasNode.id), ["1"]);
+  assert.deepEqual(res.leftChildren.map((c) => c.canvasNode.id), []);
+
+  // Node 2: added on left
+  const n2 = tree("2", []); n2.canvasNode.x = 200; n2.canvasNode.y = 0;
+  root.children = [n1, n2];
+  res = engine.balanceRootChildren(root);
+  assert.deepEqual(res.rightChildren.map((c) => c.canvasNode.id), ["1"]);
+  assert.deepEqual(res.leftChildren.map((c) => c.canvasNode.id), ["2"]);
+
+  // Node 3: added at bottom of left
+  const n3 = tree("3", []); n3.canvasNode.x = 200; n3.canvasNode.y = 50;
+  root.children = [n1, n2, n3];
+  res = engine.balanceRootChildren(root);
+  // Left was too big ([2, 3]), so top left (2) moved to bottom right
+  assert.deepEqual(res.rightChildren.map((c) => c.canvasNode.id), ["1", "2"]);
+  assert.deepEqual(res.leftChildren.map((c) => c.canvasNode.id), ["3"]);
+
+  // Node 4: added at bottom of left
+  const n4 = tree("4", []); n4.canvasNode.x = 200; n4.canvasNode.y = 100;
+  root.children = [n1, n2, n3, n4];
+  res = engine.balanceRootChildren(root);
+  assert.deepEqual(res.rightChildren.map((c) => c.canvasNode.id), ["1", "2"]);
+  assert.deepEqual(res.leftChildren.map((c) => c.canvasNode.id), ["3", "4"]);
+
+  // Node 5: added at bottom of left
+  const n5 = tree("5", []); n5.canvasNode.x = 200; n5.canvasNode.y = 150;
+  root.children = [n1, n2, n3, n4, n5];
+  res = engine.balanceRootChildren(root);
+  // Left was too big ([3, 4, 5]), so top left (3) moved to bottom right
+  assert.deepEqual(res.rightChildren.map((c) => c.canvasNode.id), ["1", "2", "3"]);
+  assert.deepEqual(res.leftChildren.map((c) => c.canvasNode.id), ["4", "5"]);
 });
 
 

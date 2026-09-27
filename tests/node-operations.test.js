@@ -209,7 +209,7 @@ test("removes a new sibling when Canvas cannot create its parent edge", () => {
   assert.equal(canvas.edges.size, 1);
 });
 
-test("balances automatic root children across both sides", () => {
+test("adds root children on right then at bottom left before layout", () => {
   const root = topic("root");
   const canvas = canvasWithTopics([root], []);
   const operations = operationsForCanvas(true);
@@ -222,7 +222,7 @@ test("balances automatic root children across both sides", () => {
     .filter((edge) => edge.from.node.id === "root")
     .map((edge) => edge.from.side)
     .sort();
-  assert.deepEqual(sides, ["left", "right", "right"]);
+  assert.deepEqual(sides, ["left", "left", "right"]);
 });
 
 test("add-parent rolls back when the second replacement edge fails", () => {

@@ -39,6 +39,12 @@ test("rejects non-canonical vault folders before composing a path", () => {
   }
 });
 
+test("accepts vault root folder representations", () => {
+  for (const folder of ["", "/", "."]) {
+    assert.equal(allocateFilePath(folder, "My Map", "canvas"), "My Map.canvas");
+  }
+});
+
 test("creates portable stems at grapheme and code-point boundaries", () => {
   const cases = [
     ["CON", "_CON"],

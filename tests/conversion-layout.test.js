@@ -629,4 +629,76 @@ test("renameCanvasFromRootTopic renames canvas file from root topic text", async
   assert.equal(renamedTo, "My New Map.canvas");
 });
 
+test("renameCanvasFromRootTopic renames canvas when file is at vault root with parent.path = '/'", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const file = new TFile("Untitled.canvas");
+  file.parent = { path: "/" };
+  let renamedTo = null;
+  const app = {
+    vault: {
+      getAbstractFileByPath() { return null; }
+    },
+    fileManager: {
+      async renameFile(f, target) { renamedTo = target; }
+    }
+  };
+  const rootNode = { id: "root", text: "Root Map", x: 0, y: 0, width: 200, height: 60 };
+  const canvas = {
+    view: { file },
+    nodes: new Map([["root", rootNode]]),
+    edges: new Map(),
+    getData: () => ({
+      nodes: [{ id: "root", type: "text" }],
+      edges: []
+    })
+  };
+  const plugin = {
+    app,
+    canvasApi: new CanvasAPI(app),
+    settings: { renameCanvasFromRootTopic: true },
+    isMindmapCanvas: () => true,
+    syncParentLinkedCardTitle: async () => {}
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const renamed = await CanvasMindMapPlugin.prototype.renameCanvasFromRootTopic.call(plugin, canvas, rootNode);
+  assert.equal(renamed, true);
+  assert.equal(renamedTo, "Root Map.canvas");
+});
+
+test("renameCanvasFromRootTopic returns false without throwing on fileManager error", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const file = new TFile("Untitled.canvas");
+  const app = {
+    vault: {
+      getAbstractFileByPath() { return null; }
+    },
+    fileManager: {
+      async renameFile() { throw new Error("Disk full or permission denied"); }
+    }
+  };
+  const rootNode = { id: "root", text: "New Name", x: 0, y: 0, width: 200, height: 60 };
+  const canvas = {
+    view: { file },
+    nodes: new Map([["root", rootNode]]),
+    edges: new Map(),
+    getData: () => ({
+      nodes: [{ id: "root", type: "text" }],
+      edges: []
+    })
+  };
+  const plugin = {
+    app,
+    canvasApi: new CanvasAPI(app),
+    settings: { renameCanvasFromRootTopic: true },
+    isMindmapCanvas: () => true,
+    syncParentLinkedCardTitle: async () => {}
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const renamed = await CanvasMindMapPlugin.prototype.renameCanvasFromRootTopic.call(plugin, canvas, rootNode);
+  assert.equal(renamed, false);
+});
+
+
 

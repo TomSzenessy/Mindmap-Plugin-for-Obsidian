@@ -45711,7 +45711,8 @@ var {
     extension = "md",
     pathExists = () => false
   ) {
-    const folderSource = String(folderPath || "").replace(/\\/g, "/");
+    let folderSource = String(folderPath || "").replace(/\\/g, "/");
+    if (folderSource === "/" || folderSource === ".") folderSource = "";
     if (
       /[\u0000-\u001f\u007f]/.test(folderSource) ||
       folderSource.startsWith("/") ||
@@ -56860,7 +56861,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (!this.isMindmapCanvas(canvas2)) return;
-					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
 					if (!this.isAutoAdjustCanvas(canvas2)) return;
 					this.resizeNodesWhenRendered(
 						canvas2,
@@ -57107,6 +57107,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.layoutEngine.updateEdgeSides?.(canvas, { persist: false });
 					this.updateNodeTypeAttributes(canvas);
 					refreshPreviewGeometry();
+					this.ensureRootTopic(canvas);
 				}, delay);
 			}
 		} else {
@@ -61277,11 +61278,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 	}
 	canvasViewportCenter(canvas) {
-		const rect = canvas.wrapperEl.getBoundingClientRect();
-		return canvas.posFromEvt({
-			clientX: rect.left + rect.width / 2,
-			clientY: rect.top + rect.height / 2
-		});
+		try {
+			const rect = canvas?.wrapperEl?.getBoundingClientRect?.();
+			if (rect && rect.width > 0 && rect.height > 0 && typeof canvas.posFromEvt === 'function') {
+				const pos = canvas.posFromEvt({
+					clientX: rect.left + rect.width / 2,
+					clientY: rect.top + rect.height / 2
+				});
+				if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+					return pos;
+				}
+			}
+		} catch (_) {}
+		return { x: 0, y: 0 };
 	}
 	/**
 	 * Seed an empty mindmap canvas with a selected, editable central topic.
@@ -61291,7 +61300,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	ensureRootTopic(canvas) {
 		if (this.unloaded) return false;
 		if (!this.settings.autoCreateRootTopic) return false;
-		if (!canvas || this.canvasApi.getActiveCanvas() !== canvas) return false;
+		if (!canvas) return false;
 		if (!this.isMindmapCanvas(canvas)) return false;
 		if (!isBlankMindmapCanvas(canvas)) return false;
 		const width = this.settings.defaultNodeWidth;
@@ -61315,9 +61324,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		canvas.requestSave();
 		this.trackedTimeout(() => {
 			if (this.unloaded) return;
-			if (this.canvasApi.getActiveCanvas() !== canvas) return;
 			if (!canvas.nodes.has(node.id)) return;
-			node.startEditing();
+			if (this.canvasApi.getActiveCanvas() === canvas) {
+				node.startEditing();
+			} else {
+				this.trackedTimeout(() => {
+					if (this.unloaded) return;
+					if (this.canvasApi.getActiveCanvas() === canvas && canvas.nodes.has(node.id)) {
+						node.startEditing();
+					}
+				}, 150);
+			}
 		}, 60);
 		return true;
 	}
@@ -61397,33 +61414,35 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	async renameCanvasFromRootTopic(canvas, node) {
 		if (this.unloaded) return false;
 		if (!canvas || !this.isMindmapCanvas(canvas)) return false;
-		const file = canvas.view?.file;
-		if (!file || file.extension !== 'canvas') return false;
-		if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
-		const rawText = node.text || this.keyboardHandler?.getEditorView?.(node)?.state?.doc?.toString() || '';
-		const title = deriveCanvasTitle(rawText);
-		if (!title) return false;
-		await this.syncParentLinkedCardTitle(canvas, title, file);
-		if (!this.settings.renameCanvasFromRootTopic) return false;
-		// A canvas may hold floating cards beside its map. Rename only when this
-		// root is the single branching map, so several real maps never fight
-		// over the filename.
-		const forest = buildForest(canvas);
-		const competingMaps = forest.filter(
-			(tree) =>
-				tree.canvasNode?.id !== node.id &&
-				(tree.children?.length || 0) > 0
-		);
-		if (competingMaps.length > 0) return false;
-		if (title === file.basename) return false;
-		const target = allocateFilePath(
-			file.parent?.path || '',
-			title,
-			'canvas',
-			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
-		);
-		if (target === file.path) return false;
 		try {
+			const file = canvas.view?.file;
+			if (!file || file.extension !== 'canvas') return false;
+			if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
+			const rawText = node.text || this.keyboardHandler?.getEditorView?.(node)?.state?.doc?.toString() || '';
+			const title = deriveCanvasTitle(rawText);
+			if (!title) return false;
+			await this.syncParentLinkedCardTitle(canvas, title, file);
+			if (!this.settings.renameCanvasFromRootTopic) return false;
+			// A canvas may hold floating cards beside its map. Rename only when this
+			// root is the single branching map, so several real maps never fight
+			// over the filename.
+			const forest = buildForest(canvas);
+			const competingMaps = forest.filter(
+				(tree) =>
+					tree.canvasNode?.id !== node.id &&
+					(tree.children?.length || 0) > 0
+			);
+			if (competingMaps.length > 0) return false;
+			if (title === file.basename) return false;
+			let folderPath = file.parent?.path || '';
+			if (folderPath === '/' || folderPath === '.') folderPath = '';
+			const target = allocateFilePath(
+				folderPath,
+				title,
+				'canvas',
+				(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+			);
+			if (target === file.path) return false;
 			await this.app.fileManager.renameFile(file, target);
 			await this.syncParentLinkedCardTitle(
 				canvas,

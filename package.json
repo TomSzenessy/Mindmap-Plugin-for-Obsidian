@@ -1,6 +1,6 @@
 {
   "name": "tomindmap",
-  "version": "0.13.24",
+  "version": "0.13.25",
   "private": true,
   "description": "Keyboard and touch mind mapping for Obsidian Canvas",
   "scripts": {

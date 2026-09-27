@@ -3235,6 +3235,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.runAsync(() => this.flushCanvasToMarkdown(canvas2), 'flush canvas to markdown');
 					return true;
 				}
+				if (this.isMindmapCanvas(canvas2)) {
+					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
+				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (!this.isMindmapCanvas(canvas2)) return;
@@ -5128,6 +5131,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 			}
 			if (sourceData?.nodes?.length) {
+				const anchorWidth = Number(node?.width) || 0;
+				const anchorHeight = Number(node?.height) || 0;
+				for (const item of sourceData.nodes) {
+					if (item.type !== 'file' && !item.file && item.text) {
+						const est = this.liveSizing?.estimate?.(item.text, item);
+						if (est?.width && est?.height) {
+							if (!item.width || item.width === this.settings.defaultNodeWidth || item.width > est.width) {
+								item.width = est.width;
+							}
+							if (!item.height || item.height === this.settings.defaultNodeHeight || item.height > est.height) {
+								item.height = est.height;
+							}
+						}
+						if (anchorWidth > 0 && item.width > anchorWidth) {
+							item.width = Math.max(80, Math.min(item.width, anchorWidth));
+						}
+						if (anchorHeight > 0 && item.height > anchorHeight) {
+							item.height = Math.max(30, Math.min(item.height, anchorHeight));
+						}
+					}
+				}
 				const remappedResult = MindmapActions.remapLinkedCanvasData(
 					sourceData,
 					node,
@@ -5140,6 +5164,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					(item) => item.id === remapped.rootId
 				);
 				if (sourceRoot) {
+					sourceRoot.width = anchorWidth || sourceRoot.width;
+					sourceRoot.height = anchorHeight || sourceRoot.height;
 					if (
 						sourceRoot.type === 'file' ||
 						sourceRoot.file ||
@@ -5235,8 +5261,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 
+			const isBranchOrCleanNote =
+				oldData[TOMINMAP_CARD_KIND] === 'branch-note' ||
+				oldData[TOMINMAP_CARD_KIND] === 'topic-note' ||
+				String(filePath).toLowerCase().endsWith('.md');
 			if (
-				(isNestedMap || String(filePath).toLowerCase().endsWith('.canvas')) &&
+				(isNestedMap || isBranchOrCleanNote || String(filePath).toLowerCase().endsWith('.canvas')) &&
 				targetFile instanceof import_obsidian5.TFile
 			) {
 				try {
@@ -5246,10 +5276,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						await this.app.vault.delete(targetFile);
 					}
 				} catch (fileErr) {
-					console.warn('ToMindMap: could not trash expanded nested mind map file', fileErr);
+					console.warn('ToMindMap: could not trash expanded file', fileErr);
 				}
 				try {
-					this.markdownOwnership.removeCanvas(filePath);
+					if (String(filePath).toLowerCase().endsWith('.canvas')) {
+						this.markdownOwnership.removeCanvas(filePath);
+					}
+					this.markdownSyncCoordinator?.detach?.(filePath);
 					const parentCanvasPath = canvasPathFor(canvas);
 					if (typeof this.app.vault.getFiles === 'function') {
 						const folder = canvasFolderPath(canvas);
@@ -7748,7 +7781,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const file = canvas.view?.file;
 		if (!file || file.extension !== 'canvas') return false;
 		if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
-		const title = deriveCanvasTitle(node.text);
+		const rawText = node.text || this.keyboardHandler?.getEditorView?.(node)?.state?.doc?.toString() || '';
+		const title = deriveCanvasTitle(rawText);
 		if (!title) return false;
 		await this.syncParentLinkedCardTitle(canvas, title, file);
 		if (!this.settings.renameCanvasFromRootTopic) return false;

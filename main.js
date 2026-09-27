@@ -46288,23 +46288,61 @@ var {
       if (!parent) {
         return this.addChild(canvas, currentNode);
       }
-      const direction = this.detectDirection(canvas, currentNode);
-      let x = currentNode.x;
+      const currentDirection = this.detectDirection(canvas, currentNode);
+      const isParentRoot = !this.canvasApi.getParentNode(canvas, parent);
+      let direction = currentDirection;
+      if (isParentRoot) {
+        const forest = buildForest(canvas);
+        const parentTree = findTreeForNode(forest, parent.id);
+        if (parentTree) {
+          const counts = countChildrenPerSide(parentTree);
+          direction = counts.left < counts.right ? "left" : "right";
+        }
+      }
       const parentCenter = parent.x + parent.width / 2;
       const sameSideSiblings = this.canvasApi.getChildNodes(canvas, parent).filter((sibling) => {
         const siblingCenter = sibling.x + sibling.width / 2;
         return direction === "left" ? siblingCenter < parentCenter : siblingCenter >= parentCenter;
       }).sort((a, b) => a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id)));
-      const currentIndex = sameSideSiblings.findIndex((sibling) => sibling.id === currentNode.id);
-      const adjacent = before ? sameSideSiblings[currentIndex - 1] : sameSideSiblings[currentIndex + 1];
+
+      let x;
       let y;
-      if (adjacent && typeof this.config.isAutoAdjust === "function" && this.config.isAutoAdjust(canvas)) {
-        // The layout engine derives sibling chronology from Y. A midpoint is an
-        // order hint that places the new topic next to the current one before the
-        // synchronous re-layout removes the temporary overlap.
-        y = (currentNode.y + adjacent.y) / 2;
+      if (direction === currentDirection) {
+        x = currentNode.x;
+        const currentIndex = sameSideSiblings.findIndex((sibling) => sibling.id === currentNode.id);
+        const adjacent = before ? sameSideSiblings[currentIndex - 1] : sameSideSiblings[currentIndex + 1];
+        if (adjacent && typeof this.config.isAutoAdjust === "function" && this.config.isAutoAdjust(canvas)) {
+          // The layout engine derives sibling chronology from Y. A midpoint is an
+          // order hint that places the new topic next to the current one before the
+          // synchronous re-layout removes the temporary overlap.
+          y = (currentNode.y + adjacent.y) / 2;
+        } else {
+          y = before ? currentNode.y - this.config.nodeHeight - this.config.verticalGap : currentNode.y + currentNode.height + this.config.verticalGap;
+          const position = this.findAvailablePosition(
+            canvas,
+            x,
+            y,
+            this.config.nodeWidth,
+            this.config.nodeHeight,
+            before ? "up" : "down"
+          );
+          if (!position)
+            throw new Error("No free position is available for the new topic");
+          x = position.x;
+          y = position.y;
+        }
       } else {
-        y = before ? currentNode.y - this.config.nodeHeight - this.config.verticalGap : currentNode.y + currentNode.height + this.config.verticalGap;
+        x = direction === "right"
+          ? parent.x + parent.width + this.config.horizontalGap
+          : parent.x - this.config.nodeWidth - this.config.horizontalGap;
+        if (sameSideSiblings.length > 0) {
+          const target = before ? sameSideSiblings[0] : sameSideSiblings[sameSideSiblings.length - 1];
+          y = before
+            ? target.y - this.config.nodeHeight - this.config.verticalGap
+            : target.y + target.height + this.config.verticalGap;
+        } else {
+          y = parent.y + (parent.height - this.config.nodeHeight) / 2;
+        }
         const position = this.findAvailablePosition(
           canvas,
           x,
@@ -46327,13 +46365,13 @@ var {
         this.config.nodeHeight
       );
       if (!newNode) return null;
-      if (currentNode.color)
-        newNode.setColor(currentNode.color);
+      if (currentNode.color || parent.color)
+        newNode.setColor(currentNode.color || parent.color);
       let edge = null;
       try {
         edge = direction === "right"
-          ? this.canvasApi.createEdge(canvas, parent, newNode, "right", "left", currentNode.color || void 0)
-          : this.canvasApi.createEdge(canvas, parent, newNode, "left", "right", currentNode.color || void 0);
+          ? this.canvasApi.createEdge(canvas, parent, newNode, "right", "left", parent.color || currentNode.color || void 0)
+          : this.canvasApi.createEdge(canvas, parent, newNode, "left", "right", parent.color || currentNode.color || void 0);
       } catch (_) {
         edge = null;
       }
@@ -48655,11 +48693,21 @@ var {
   	}
   	finishEditing(canvas, node) {
   		var _a;
+  		const view = this.getEditorView(node);
+  		if (view) {
+  			const text = view.state.doc.toString();
+  			if (typeof node.setText === 'function' && text !== node.text) {
+  				node.setText(text);
+  			}
+  			view.contentDOM?.blur?.();
+  		}
   		(_a = this.onBeforeLeaveNode) == null ? void 0 : _a.call(this);
-  		node.blur();
-      const removed = this.onAfterFinishEditing?.(canvas, node) === true;
-      if (!removed)
-        this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
+  		if (typeof node.blur === 'function') {
+  			node.blur();
+  		}
+  		const removed = this.onAfterFinishEditing?.(canvas, node) === true;
+  		if (!removed && typeof this.canvasApi?.selectForNavigation === 'function')
+  			this.canvasApi.selectForNavigation(canvas, node, this.zoomPadding);
   	}
   	addChild(canvas, node) {
   		var _a;
@@ -56848,6 +56896,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.runAsync(() => this.flushCanvasToMarkdown(canvas2), 'flush canvas to markdown');
 					return true;
 				}
+				if (this.isMindmapCanvas(canvas2)) {
+					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
+				}
 				this.waitForPreview(editedNode, () => {
 					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
 					if (!this.isMindmapCanvas(canvas2)) return;
@@ -58741,6 +58792,27 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 			}
 			if (sourceData?.nodes?.length) {
+				const anchorWidth = Number(node?.width) || 0;
+				const anchorHeight = Number(node?.height) || 0;
+				for (const item of sourceData.nodes) {
+					if (item.type !== 'file' && !item.file && item.text) {
+						const est = this.liveSizing?.estimate?.(item.text, item);
+						if (est?.width && est?.height) {
+							if (!item.width || item.width === this.settings.defaultNodeWidth || item.width > est.width) {
+								item.width = est.width;
+							}
+							if (!item.height || item.height === this.settings.defaultNodeHeight || item.height > est.height) {
+								item.height = est.height;
+							}
+						}
+						if (anchorWidth > 0 && item.width > anchorWidth) {
+							item.width = Math.max(80, Math.min(item.width, anchorWidth));
+						}
+						if (anchorHeight > 0 && item.height > anchorHeight) {
+							item.height = Math.max(30, Math.min(item.height, anchorHeight));
+						}
+					}
+				}
 				const remappedResult = MindmapActions.remapLinkedCanvasData(
 					sourceData,
 					node,
@@ -58753,6 +58825,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					(item) => item.id === remapped.rootId
 				);
 				if (sourceRoot) {
+					sourceRoot.width = anchorWidth || sourceRoot.width;
+					sourceRoot.height = anchorHeight || sourceRoot.height;
 					if (
 						sourceRoot.type === 'file' ||
 						sourceRoot.file ||
@@ -58848,8 +58922,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			canvas.requestSave();
 			this.refreshOutline(canvas);
 
+			const isBranchOrCleanNote =
+				oldData[TOMINMAP_CARD_KIND] === 'branch-note' ||
+				oldData[TOMINMAP_CARD_KIND] === 'topic-note' ||
+				String(filePath).toLowerCase().endsWith('.md');
 			if (
-				(isNestedMap || String(filePath).toLowerCase().endsWith('.canvas')) &&
+				(isNestedMap || isBranchOrCleanNote || String(filePath).toLowerCase().endsWith('.canvas')) &&
 				targetFile instanceof import_obsidian5.TFile
 			) {
 				try {
@@ -58859,10 +58937,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						await this.app.vault.delete(targetFile);
 					}
 				} catch (fileErr) {
-					console.warn('ToMindMap: could not trash expanded nested mind map file', fileErr);
+					console.warn('ToMindMap: could not trash expanded file', fileErr);
 				}
 				try {
-					this.markdownOwnership.removeCanvas(filePath);
+					if (String(filePath).toLowerCase().endsWith('.canvas')) {
+						this.markdownOwnership.removeCanvas(filePath);
+					}
+					this.markdownSyncCoordinator?.detach?.(filePath);
 					const parentCanvasPath = canvasPathFor(canvas);
 					if (typeof this.app.vault.getFiles === 'function') {
 						const folder = canvasFolderPath(canvas);
@@ -61361,7 +61442,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const file = canvas.view?.file;
 		if (!file || file.extension !== 'canvas') return false;
 		if (!isRootTopicNode(canvas, node, this.canvasApi)) return false;
-		const title = deriveCanvasTitle(node.text);
+		const rawText = node.text || this.keyboardHandler?.getEditorView?.(node)?.state?.doc?.toString() || '';
+		const title = deriveCanvasTitle(rawText);
 		if (!title) return false;
 		await this.syncParentLinkedCardTitle(canvas, title, file);
 		if (!this.settings.renameCanvasFromRootTopic) return false;

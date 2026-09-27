@@ -312,3 +312,22 @@ test("inserts a topic by replacing the canonical parent edge while preserving it
   assert.equal(canvas.edges.get("edge-1")?.to.node.id, "child");
   assert.equal(canvas.edges.get("edge-0")?.__mindMapPreview, true);
 });
+
+test("addSibling balances root children across left and right sides", () => {
+  const root = topic("root", 0);
+  const child1 = topic("child-1", 200); // on right
+  const canvas = canvasWithTopics([root, child1], [["root", "child-1"]]);
+  const operations = operationsForCanvas();
+
+  // Child 1's parent is root. Root has 1 child on right, 0 on left.
+  // Next sibling should balance to the left side!
+  const sibling1 = operations.addSibling(canvas, child1);
+  assert.ok(sibling1);
+  assert.ok(sibling1.x < root.x, `Expected sibling1.x (${sibling1.x}) < root.x (${root.x})`);
+
+  // Now root has 1 child on right and 1 on left.
+  // Next sibling from sibling1 should balance to the right side!
+  const sibling2 = operations.addSibling(canvas, sibling1);
+  assert.ok(sibling2);
+  assert.ok(sibling2.x > root.x, `Expected sibling2.x (${sibling2.x}) > root.x (${root.x})`);
+});

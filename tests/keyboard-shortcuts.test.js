@@ -210,3 +210,26 @@ test("does not reselect a blank new card removed after editing", () => {
 
   assert.deepEqual(calls, ["blur", "finalize"]);
 });
+
+test("finishEditing succeeds when node.blur is undefined and calls onAfterFinishEditing", () => {
+  const { canvas, handler, node } = editingHarness();
+  let finalized = false;
+  handler.onAfterFinishEditing = () => {
+    finalized = true;
+    return false;
+  };
+  handler.finishEditing(canvas, node);
+  assert.equal(finalized, true);
+});
+
+test("finishEditing synchronizes text from editor view to node", () => {
+  const { canvas, handler, node } = editingHarness();
+  node.text = "";
+  node.setText = (val) => { node.text = val; };
+  handler.getEditorView = () => ({
+    state: { doc: { toString: () => "New Topic Title" } },
+    contentDOM: { blur: () => {} }
+  });
+  handler.finishEditing(canvas, node);
+  assert.equal(node.text, "New Topic Title");
+});

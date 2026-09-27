@@ -517,4 +517,116 @@ test("converting a collapsed topic to a nested mind map clears collapsed design 
   assert.equal(reRoot.nodeEl.hasClass("tomindmap-collapsed-node"), false);
 });
 
+test("expanding a branch note into topics deletes the markdown file and cleanly sizes expanded topics", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const { LayoutEngine } = require("../lib/layout.js");
+  const { LiveSizingController } = require("../lib/live-sizing.js");
+  const { createMarkdownSyncOwnership } = require("../lib/markdown-sync.js");
+  const { canvas } = makeCanvas();
+  let trashedFile = null;
+  const files = new Map();
+  const mdContent = `# Selected\n- Sub 1\n- Sub 2\n`;
+  const mdFile = new TFile("Selected.md");
+  files.set("Selected.md", { file: mdFile, content: mdContent });
+
+  const app = {
+    vault: {
+      getAbstractFileByPath(p) { return files.get(p)?.file ?? null; },
+      async cachedRead(f) { return files.get(f.path)?.content ?? ""; },
+      async trash(f) { trashedFile = f; files.delete(f.path); },
+      async delete(f) { trashedFile = f; files.delete(f.path); },
+      getFiles() { return Array.from(files.values()).map((entry) => entry.file); }
+    }
+  };
+  const ownership = createMarkdownSyncOwnership();
+
+  const plugin = {
+    app,
+    markdownOwnership: ownership,
+    verifiedParentLinks: new Map(),
+    verifiedMarkdownLinks: new Map(),
+    persistPluginData: async () => {},
+    canvasApi: new CanvasAPI(app),
+    settings: {
+      defaultNodeWidth: 300,
+      defaultNodeHeight: 60,
+      minNodeWidth: 100,
+      maxNodeWidth: 500,
+      maxNodeHeight: 300,
+      autoColor: false
+    },
+    layoutEngine: new LayoutEngine({ animate: false }),
+    branchColors: { applyColors() {} },
+    isMindmapCanvas: () => true,
+    markMarkdownOrderDirty() {},
+    updateNodeTypeAttributes() {},
+    updateGroupBounds() {},
+    refreshOutline() {},
+    resizeNodesWhenRendered() {}
+  };
+  plugin.liveSizing = new LiveSizingController(plugin, () => new Set());
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const card = canvas.createFileNode({ pos: { x: 500, y: 100 }, size: { width: 140, height: 40 }, file: mdFile });
+  card.unknownData = {
+    tomindmapTitleOnly: true,
+    tomindmapCardKind: "branch-note",
+    tomindmapCardTitle: "Selected"
+  };
+
+  const success = await CanvasMindMapPlugin.prototype.convertLinkedNodeToNormalTopic.call(
+    plugin,
+    canvas,
+    card
+  );
+  assert.equal(success, true);
+  // b) it deletes the previous file
+  assert.equal(trashedFile, mdFile);
+  assert.equal(files.has("Selected.md"), false);
+
+  // a) expanded topics are cleanly sized, not inflated to 300x60
+  const topicNodes = Array.from(canvas.nodes.values()).filter((n) => n.type === "text");
+  const sub1 = topicNodes.find((n) => n.text === "Sub 1");
+  assert.ok(sub1);
+  assert.ok(sub1.width < 300, `sub1.width (${sub1.width}) should be less than 300`);
+  assert.ok(sub1.height < 60, `sub1.height (${sub1.height}) should be less than 60`);
+});
+
+test("renameCanvasFromRootTopic renames canvas file from root topic text", async () => {
+  const { CanvasMindMapPlugin, CanvasAPI, TFile } = loadRuntime();
+  const file = new TFile("Untitled.canvas");
+  let renamedTo = null;
+  const app = {
+    vault: {
+      getAbstractFileByPath() { return null; }
+    },
+    fileManager: {
+      async renameFile(f, target) { renamedTo = target; }
+    }
+  };
+  const rootNode = { id: "root", text: "My New Map", x: 0, y: 0, width: 200, height: 60 };
+  const childNode = { id: "child", text: "Topic", x: 200, y: 0, width: 100, height: 40 };
+  const canvas = {
+    view: { file },
+    nodes: new Map([["root", rootNode], ["child", childNode]]),
+    edges: new Map([["e1", { id: "e1", from: { node: rootNode }, to: { node: childNode } }]]),
+    getData: () => ({
+      nodes: [{ id: "root", type: "text" }, { id: "child", type: "text" }],
+      edges: [{ id: "e1", fromNode: "root", toNode: "child" }]
+    })
+  };
+  const plugin = {
+    app,
+    canvasApi: new CanvasAPI(app),
+    settings: { renameCanvasFromRootTopic: true },
+    isMindmapCanvas: () => true,
+    syncParentLinkedCardTitle: async () => {}
+  };
+  Object.setPrototypeOf(plugin, CanvasMindMapPlugin.prototype);
+
+  const renamed = await CanvasMindMapPlugin.prototype.renameCanvasFromRootTopic.call(plugin, canvas, rootNode);
+  assert.equal(renamed, true);
+  assert.equal(renamedTo, "My New Map.canvas");
+});
+
 

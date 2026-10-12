@@ -55569,9 +55569,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						});
 					}
 					menu.addItem((item) => {
-						item.setTitle('Import mind map (.mm) to canvas')
-							.setIcon('file-input')
-							.onClick(() => this.importFreeMindFile(file.path));
+					item.setTitle('Import mindmap to canvas')
+						.setIcon('file-input')
+						.onClick(() => this.importAnyMindMapFile(file.path));
 					});
 					return;
 				}
@@ -59801,10 +59801,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return { ok: false, reason: 'file-byte-budget' };
 		return { ok: true, value: text };
 	}
-	importMarkdownFile(canvas) {
+	async importMarkdownFile(canvas, content = null, fileName = 'mindmap') {
+		if (!canvas) return;
+		if (content !== null) {
+			const isFreeMind = this.detectFreeMindFormat(content);
+			if (isFreeMind) {
+				const decoded = decodeFreeMind(content, {
+					budgets: DEFAULT_FREEMIND_BUDGETS,
+					nodeWidth: this.settings.defaultNodeWidth,
+					nodeHeight: this.settings.defaultNodeHeight,
+					maxNodeHeight: this.settings.maxNodeHeight,
+					horizontalGap: this.settings.horizontalGap,
+				.verticalGap: this.settings.verticalGap
+				});
+				if (!decoded.ok) {
+					new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
+					return;
+				}
+				await this.importFreeMindIntoCanvas(canvas, content, fileName);
+			} else {
+				await this.importMarkdownIntoCanvas(canvas, content, fileName);
+			}
+			return;
+		}
 		const input = document.createElement('input');
 		input.type = 'file';
-		input.accept = '.md,.markdown,.mm,.txt,text/markdown,text/plain,text/xml,application/xml';
+		input.accept = '.md,.markdown,.mm,.txt,.xml,.csv,text/markdown,text/plain,text/xml,application/xml,text/csv';
 		const handler = () => {
 			var _a;
 			input.removeEventListener('change', handler);
@@ -59818,65 +59840,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 				const isFreeMind = this.detectFreeMindFormat(read.value);
 				if (isFreeMind) {
-					const decoded = decodeFreeMind(read.value, {
-						budgets: DEFAULT_FREEMIND_BUDGETS,
-						nodeWidth: this.settings.defaultNodeWidth,
-						nodeHeight: this.settings.defaultNodeHeight,
-						maxNodeHeight: this.settings.maxNodeHeight,
-						horizontalGap: this.settings.horizontalGap,
-						verticalGap: this.settings.verticalGap
-					});
-					if (!decoded.ok) {
-						new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
-						return;
-					}
-					const { roots, nodeCount, maxDepth, ...canvasData } = decoded.value;
-					const idMap = new Map();
-					const reservedIds = new Set(canvas.nodes.keys());
-					for (const node of canvasData.nodes) {
-						let id = node.id;
-						while (reservedIds.has(id)) id = genId();
-						idMap.set(node.id, id);
-						reservedIds.add(id);
-						node.id = id;
-					}
-					for (const edge of canvasData.edges) {
-						edge.fromNode = idMap.get(edge.fromNode) || edge.fromNode;
-						edge.toNode = idMap.get(edge.toNode) || edge.toNode;
-						while (canvas.edges.has(edge.id)) edge.id = genId();
-					}
-					const groupIds = getGroupIds(canvas);
-					const existing = Array.from(canvas.nodes.values()).filter(
-						(node) => !groupIds.has(node.id)
-					);
-					let localMinX = Infinity;
-					let localMinY = Infinity;
-					for (const node of canvasData.nodes) {
-						localMinX = Math.min(localMinX, Number(node.x) || 0);
-						localMinY = Math.min(localMinY, Number(node.y) || 0);
-					}
-					if (!Number.isFinite(localMinX) || !Number.isFinite(localMinY)) {
-						new import_obsidian5.Notice('Could not import mindmap: invalid-geometry');
-						return;
-					}
-					const offsetX = existing.length > 0
-						? Math.max(...existing.map((n) => Number(n.x) || 0)) + 400 - localMinX
-						: -localMinX;
-					const offsetY = existing.length > 0
-						? Math.max(...existing.map((n) => Number(n.y) || 0)) + 400 - localMinY
-						: -localMinY;
-					for (const node of canvasData.nodes) {
-						node.x += offsetX;
-						node.y += offsetY;
-					}
-					for (const node of canvasData.nodes) {
-						canvas.addNode(node);
-					}
-					for (const edge of canvasData.edges) {
-						canvas.addEdge(edge);
-					}
-					canvas.requestSave();
-					new import_obsidian5.Notice(`Imported "${file.name}" into current canvas`);
+					await this.importFreeMindIntoCanvas(canvas, read.value, file.name);
 				} else {
 					await this.importMarkdownIntoCanvas(canvas, read.value, file.name);
 				}
@@ -62760,6 +62724,70 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		} catch (_) {
 			return false;
 		}
+	}
+	importAnyMindMapFile(folderPath) {
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.accept = '.md,.markdown,.mm,.txt,.xml,.csv,text/markdown,text/plain,text/xml,application/xml,text/csv';
+		const handler = () => {
+			var _a;
+			input.removeEventListener('change', handler);
+			const file = (_a = input.files) == null ? void 0 : _a[0];
+			if (!file) return;
+			void (async () => {
+				const read = await this.readBoundedMarkdownFile(file);
+				if (!read.ok) {
+					new import_obsidian5.Notice(`Could not import mindmap: ${read.reason}`);
+					return;
+				}
+				const isFreeMind = this.detectFreeMindFormat(read.value);
+				if (isFreeMind) {
+					await this.importFreeMindFile(folderPath, file);
+				} else {
+					const canvas = this.canvasApi.getActiveCanvas?.() || null;
+					if (canvas) {
+						await this.importMarkdownFile(canvas, read.value, file.name);
+					} else {
+						await this.createCanvasFromMarkdown(folderPath, file, read.value);
+					}
+				}
+			})();
+		};
+		input.addEventListener('change', handler);
+		input.click();
+	}
+	async createCanvasFromMarkdown(folderPath, file, markdown) {
+		const decoded = this.layoutMarkdownDocument(markdown, {
+			nodeWidth: this.settings.defaultNodeWidth,
+			nodeHeight: this.settings.defaultNodeHeight,
+			maxNodeHeight: this.settings.maxNodeHeight,
+			horizontalGap: this.settings.horizontalGap,
+			verticalGap: this.settings.verticalGap
+		});
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
+			return;
+		}
+		const { nodes, edges } = decoded.value;
+		const baseName = file.name.replace(/\.(md|markdown|txt)$/i, '') || 'Mind map';
+		const canvasPath = allocateFilePath(
+			folderPath || '',
+			baseName,
+			'canvas',
+			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+		);
+		const canvasData = {
+			nodes,
+			edges,
+			mindmap: true,
+			mindmapPendingResize: nodes.map((node) => node.id)
+		};
+		const created = await this.app.vault.create(
+			canvasPath,
+			JSON.stringify(canvasData, null, '\t')
+		);
+		await this.app.workspace.getLeaf(false).openFile(created);
+		new import_obsidian5.Notice(`Imported "${file.name}" as "${created.path}"`);
 	}
 	isAutoAdjustCanvas(canvas) {
 		return this.isMindmapCanvas(canvas);

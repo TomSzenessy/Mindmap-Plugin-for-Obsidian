@@ -9124,12 +9124,50 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (isFreeMind) {
 					await this.importFreeMindFile(folderPath, file);
 				} else {
-					await this.importMarkdownFile(this.canvasApi.getActiveCanvas?.() || null, read.value, file.name);
+					const canvas = this.canvasApi.getActiveCanvas?.() || null;
+					if (canvas) {
+						await this.importMarkdownFile(canvas, read.value, file.name);
+					} else {
+						await this.createCanvasFromMarkdown(folderPath, file, read.value);
+					}
 				}
 			})();
 		};
 		input.addEventListener('change', handler);
 		input.click();
+	}
+	async createCanvasFromMarkdown(folderPath, file, markdown) {
+		const decoded = this.layoutMarkdownDocument(markdown, {
+			nodeWidth: this.settings.defaultNodeWidth,
+			nodeHeight: this.settings.defaultNodeHeight,
+			maxNodeHeight: this.settings.maxNodeHeight,
+			horizontalGap: this.settings.horizontalGap,
+			verticalGap: this.settings.verticalGap
+		});
+		if (!decoded.ok) {
+			new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
+			return;
+		}
+		const { nodes, edges } = decoded.value;
+		const baseName = file.name.replace(/\.(md|markdown|txt)$/i, '') || 'Mind map';
+		const canvasPath = allocateFilePath(
+			folderPath || '',
+			baseName,
+			'canvas',
+			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+		);
+		const canvasData = {
+			nodes,
+			edges,
+			mindmap: true,
+			mindmapPendingResize: nodes.map((node) => node.id)
+		};
+		const created = await this.app.vault.create(
+			canvasPath,
+			JSON.stringify(canvasData, null, '\t')
+		);
+		await this.app.workspace.getLeaf(false).openFile(created);
+		new import_obsidian5.Notice(`Imported "${file.name}" as "${created.path}"`);
 	}
 	isAutoAdjustCanvas(canvas) {
 		return this.isMindmapCanvas(canvas);

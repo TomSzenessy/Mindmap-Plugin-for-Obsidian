@@ -1455,35 +1455,21 @@ test("plain lines introducing lists become section topics and synthesize central
 /* ------------------------------------------------------------------ */
 
 test("the codec embeds cleanly through the runtime module compiler", () => {
-  const { createArtifactCompiler } = require("../scripts/runtime-modules.js");
-  const compiler = createArtifactCompiler([
-    {
-      name: "link-preview",
-      source: "lib/link-preview.js",
-      bindings: { named: ["linkDomain"] },
-      dependencies: []
-    },
-    { name: "media-drop", source: "lib/media-drop.js", bindings: { default: "MediaDrop" }, dependencies: ["link-preview"] },
-    { name: "markdown-order", source: "lib/markdown-order.js", bindings: { default: "MarkdownOrder" }, dependencies: [] },
-    {
-      name: "tree-model",
-      source: "lib/tree-model.js",
-      bindings: { named: ["buildForest", "getGroupIds"] },
-      dependencies: []
-    },
-    {
-      name: "markdown-codec",
-      source: "lib/markdown-codec.js",
-      bindings: { default: "MarkdownMindMapCodec" },
-      dependencies: ["media-drop", "markdown-order", "tree-model"]
-    }
-  ]);
+  // Use the real registry, so the test cannot drift from the shipped bundle.
+  const { createArtifactCompiler, modules } = require("../scripts/runtime-modules.js");
+  const byName = new Map(modules.map((definition) => [definition.name, definition]));
+  const needed = new Set();
+  const visit = (name) => {
+    if (needed.has(name)) return;
+    needed.add(name);
+    for (const dependency of byName.get(name).dependencies || []) visit(dependency);
+  };
+  visit("markdown-codec");
+  const compiler = createArtifactCompiler(modules.filter((definition) => needed.has(definition.name)));
   const entry = "var MarkdownMindMapCodec = require('./lib/markdown-codec.js');\n";
   const compiled = compiler.compile(entry);
-  assert.ok(!compiled.includes('require("./media-drop.js")'));
-  assert.ok(!compiled.includes('require("./link-preview.js")'));
-  assert.ok(!compiled.includes('require("./markdown-order.js")'));
-  assert.ok(!compiled.includes('require("./tree-model.js")'));
+  for (const name of needed)
+    assert.ok(!compiled.includes(`require("./${byName.get(name).source.slice(4)}")`), name);
   const sandbox = {
     URL,
     TextEncoder,
@@ -1497,6 +1483,11 @@ test("the codec embeds cleanly through the runtime module compiler", () => {
   sandbox.exports = sandbox.module.exports;
   vm.runInNewContext(compiled, sandbox, { filename: "markdown-codec-bundle.js" });
   const embedded = sandbox.MarkdownMindMapCodec;
-  assert.equal(typeof embedded.decodeMarkdownMindMap, "function");
   assert.equal(embedded.decodeMarkdownMindMap("# Central\n").value.roots[0].text, "Central");
+  // Link and media scanning reaches into media-drop; this crashed when the
+  // codec's import name did not exist in the bundle.
+  assert.deepEqual(
+    Array.from(embedded.extractLocalMediaTargets("[site](<https://example.com/a>) ![[photo.png]]")),
+    ["photo.png"]
+  );
 });

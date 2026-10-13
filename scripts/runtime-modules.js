@@ -60,9 +60,11 @@ const modules = [
       named: [
         "LINK_PREVIEW_KEY",
         "LINK_PLAIN_KEY",
+        "asLinkTopicData",
         "linkCardSize",
         "linkDomain",
         "linkPreviewData",
+        "linkRecord",
         "linkTopicText",
         "normalizeTypedUrl",
         "parseLinkPreview",
@@ -313,6 +315,33 @@ function runtimeImportPattern(definition, modulePath = `./${definition.source}`)
   );
 }
 
+/**
+ * An embedded import line is removed, so the names it declared must be the
+ * ones the registry declares for that module; otherwise the bundle would
+ * reference an identifier that never exists.
+ */
+function assertImportMatchesBindings(source, pattern, dependency, importer) {
+  const match = source.match(pattern);
+  if (!match) return;
+  const declared = match[0].replace(/^(?:var|const|let)\s+/, "").split("=")[0].trim();
+  const bindings = normalizedBindings(dependency.bindings);
+  const fail = (detail) => {
+    throw new Error(`${importer} imports ${dependency.name} ${detail}`);
+  };
+  if (declared.startsWith("{")) {
+    if (bindings.default)
+      fail(`by name, but the registry exports it as ${bindings.default}`);
+    for (const entry of declared.slice(1, -1).split(",").map((name) => name.trim()).filter(Boolean)) {
+      if (!/^[A-Za-z_$][\w$]*$/.test(entry))
+        fail(`with renamed binding "${entry}", which the bundle cannot keep`);
+      if (!bindings.named.includes(entry))
+        fail(`"${entry}", which the registry does not export`);
+    }
+  } else if (declared !== bindings.default) {
+    fail(`as ${declared}, but the registry ${bindings.default ? `names it ${bindings.default}` : "exports named bindings"}`);
+  }
+}
+
 function dependencyPath(definition, dependency) {
   const relative = path.posix.relative(
     path.posix.dirname(definition.source),
@@ -379,10 +408,9 @@ function createArtifactCompiler(definitions = modules, options = {}) {
     for (const dependencyName of definition.dependencies || []) {
       const dependency = byName.get(dependencyName);
       const importPath = dependencyPath(definition, dependency);
-      source = source.replace(
-        runtimeImportPattern(dependency, importPath),
-        ""
-      );
+      const importPattern = runtimeImportPattern(dependency, importPath);
+      assertImportMatchesBindings(source, importPattern, dependency, definition.name);
+      source = source.replace(importPattern, "");
       source = source.replace(
         new RegExp(
           `require\\(\\s*(['"])${escapeRegExp(importPath)}\\1\\s*\\)`,
@@ -408,8 +436,10 @@ function createArtifactCompiler(definitions = modules, options = {}) {
     const entryImports = new Map();
     for (const definition of definitions) {
       const importPattern = runtimeImportPattern(definition);
-      if (importPattern.test(source))
+      if (importPattern.test(source)) {
+        assertImportMatchesBindings(source, importPattern, definition, "the entry");
         entryImports.set(definition, importPattern);
+      }
     }
 
     let generated = source;

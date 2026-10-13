@@ -45,9 +45,11 @@ var {
 var {
 	LINK_PREVIEW_KEY,
 	LINK_PLAIN_KEY,
+	asLinkTopicData,
 	linkCardSize,
 	linkDomain,
 	linkPreviewData,
+	linkRecord,
 	linkTopicText,
 	normalizeTypedUrl,
 	parseLinkPreview,
@@ -6302,6 +6304,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				imported.nodes,
 				canvasPath
 			);
+		imported.nodes = imported.nodes.map(asLinkTopicData);
 		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			const currentData = canvas.getData();
@@ -6351,7 +6354,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!edge) throw new Error('Canvas did not create an imported-root edge');
 			}
 		}
-		for (const node of importedNodes) this.upgradeLinkTopic(canvas, node);
+		this.fetchLinkPreviews(canvas, importedNodes);
 		this.markMarkdownOrderDirty(canvas);
 		if (this.isAutoAdjustCanvas(canvas)) {
 			this.resizeNodesWhenRendered(
@@ -6401,7 +6404,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.requestSave?.();
 				await flushCanvasView(canvas, this.app.vault);
 			} catch (_) {}
-			new import_obsidian5.Notice(`Could not import the ${decoded.format} hierarchy`);
+			console.error(`ToMindMap: ${decoded.format} import failed`, error);
+			new import_obsidian5.Notice(
+				`Could not import the ${decoded.format} hierarchy: ${error?.message || error}`
+			);
 			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
@@ -8032,15 +8038,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const startY = topic ? topic.y : Number(position?.y) || 0;
 		const webUrl = vaultFile ? '' : safeHttpUrl(url);
 		const nodeSpec = webUrl
-			? {
-					id,
-					type: 'text',
-					text: webUrl,
-					x: startX,
-					y: startY,
-					width: this.settings.defaultNodeWidth,
-					height: this.settings.defaultNodeHeight
-				}
+			? asLinkTopicData({ id, type: 'text', text: webUrl, x: startX, y: startY })
 			: vaultFile
 			? createFileNodeSpec(
 					vaultFile.path,
@@ -8067,7 +8065,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			} else {
 				this.canvasApi.selectForNavigation(canvas, node, this.settings.navigationZoomPadding);
 			}
-			if (webUrl) this.upgradeLinkTopic(canvas, node);
+			this.fetchLinkPreviews(canvas, [node]);
 			canvas.requestSave();
 			await flushCanvasView(canvas, this.app.vault);
 			new import_obsidian5.Notice('Added link to the mind map');
@@ -8163,31 +8161,23 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			}
 			return false;
 		}
-		const sameUrl = current?.url === link.url;
-		const label = String(link.label || '').trim();
-		// A label equal to the page title we fetched earlier is still automatic.
-		const customTitle = !!label && !(current && !current.customTitle && label === current.title);
-		const keepsPreview = sameUrl && (customTitle || !current.customTitle);
-		const record = {
-			url: link.url,
-			title:
-				label ||
-				(keepsPreview ? current.title : '') ||
-				linkDomain(link.url),
-			description: keepsPreview ? current.description : '',
-			image: keepsPreview ? current.image : '',
-			site: keepsPreview ? current.site : linkDomain(link.url),
-			customTitle,
-			fetched: keepsPreview ? current.fetched : false
-		};
+		const record = linkRecord(link, current);
 		const text = linkTopicText(record.title, record.url);
 		if (node.text !== text && typeof node.setText === 'function') node.setText(text);
 		removeCanvasNodeDataKeys(node, [LINK_PLAIN_KEY]);
 		setCanvasNodeUnknownData(node, { [LINK_PREVIEW_KEY]: record });
 		this.settleLinkTopic(canvas, node);
-		if (this.settings.linkPreviews && !record.fetched)
-			this.runAsync(() => this.refreshLinkPreview(canvas, node.id), 'fetch link preview');
+		this.fetchLinkPreviews(canvas, [node]);
 		return true;
+	}
+	/** Load page previews for link topics that have not been fetched yet. */
+	fetchLinkPreviews(canvas, nodes) {
+		if (!this.settings.linkPreviews) return;
+		for (const node of nodes) {
+			const preview = linkPreviewData(node);
+			if (preview && !preview.fetched)
+				this.runAsync(() => this.refreshLinkPreview(canvas, node.id), 'fetch link preview');
+		}
 	}
 	async fetchLinkPreview(url, options = {}) {
 		const safeUrl = safeHttpUrl(url);
@@ -8243,7 +8233,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const record = {
 			...current,
-			title: current.customTitle ? current.title : preview.title || current.title,
+			title: current.customTitle ? current.title : preview.title || linkDomain(current.url),
 			description: preview.description,
 			image: preview.image,
 			site: preview.site || current.site,
@@ -8352,10 +8342,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	decorateLinkTopic(shell, preview) {
 		// Most topics are not links; skip DOM queries for cards never decorated.
 		if (!preview && !shell?.classList?.contains?.('tomindmap-link-topic')) return;
-		const host =
-			shell?.querySelector?.('.canvas-node-container') || shell || null;
+		// The card lives only in the node container. A node that has not
+		// mounted its container yet is decorated on the next pass instead.
+		const host = shell?.querySelector?.('.canvas-node-container') || null;
 		shell?.toggleClass?.('tomindmap-link-topic', !!preview);
-		const existing = host?.querySelector?.(':scope > .tomindmap-link-preview') || null;
+		const cards = Array.from(shell?.querySelectorAll?.('.tomindmap-link-preview') || []);
+		const existing = cards.find((card) => card.parentElement === host) || null;
+		for (const card of cards) if (card !== existing) card.remove();
 		if (!preview || !host) {
 			existing?.remove?.();
 			return;

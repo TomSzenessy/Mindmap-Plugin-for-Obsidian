@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   LINK_PREVIEW_KEY,
+  asLinkTopicData,
   linkCardSize,
   linkPreviewData,
   linkTopicText,
@@ -103,4 +104,34 @@ test("reads only validated preview records and sizes the card", () => {
     linkPreviewData({ unknownData: { [LINK_PREVIEW_KEY]: { url: "file:///x" } } }),
     null
   );
+});
+
+test("new topic data whose text is one link is created as a finished link card", () => {
+  const card = asLinkTopicData({
+    id: "n",
+    type: "text",
+    text: "https://www.moodle.tum.de/course/view.php?id=124123",
+    x: 4,
+    y: 8,
+    width: 300,
+    height: 60
+  });
+  assert.equal(card.text, "[moodle.tum.de](<https://www.moodle.tum.de/course/view.php?id=124123>)");
+  assert.equal(card[LINK_PREVIEW_KEY].url, "https://www.moodle.tum.de/course/view.php?id=124123");
+  assert.equal(card[LINK_PREVIEW_KEY].fetched, false);
+  assert.deepEqual([card.x, card.y, card.width, card.height], [4, 8, 340, 64]);
+
+  const plain = { type: "text", text: "Just words" };
+  assert.equal(asLinkTopicData(plain), plain);
+  const file = { type: "file", file: "a.md", text: "https://example.com" };
+  assert.equal(asLinkTopicData(file), file);
+  const kept = { type: "text", text: "https://example.com", tomindmapLinkPlain: true };
+  assert.equal(asLinkTopicData(kept), kept);
+});
+
+test("placeholder titles from script-driven pages are ignored", () => {
+  for (const title of ["Loading...", "Loading\u2026", "Just a moment...", "Redirecting"]) {
+    assert.equal(parseLinkPreview(`<title>${title}</title>`, "https://campus.tum.de").title, "", title);
+  }
+  assert.equal(parseLinkPreview("<title>Loading data in R</title>", "https://example.com").title, "Loading data in R");
 });

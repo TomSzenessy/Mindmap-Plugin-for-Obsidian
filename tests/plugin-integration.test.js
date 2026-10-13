@@ -1870,3 +1870,113 @@ test("the link card open button opens on the first click without selecting", () 
   cleanup();
   assert.equal(listeners.size, 0);
 });
+
+
+
+test("pasting a link under a topic uses the normal paste and arrives as a link card", async () => {
+  const { default: CanvasMindMapPlugin, FakeTFile } = loadSource();
+  const parentNode = { id: "parent", type: "text", text: "Parent", x: 0, y: 0, width: 100, height: 30 };
+  const nodes = new Map([[parentNode.id, parentNode]]);
+  const edges = new Map();
+  const data = { mindmap: true, nodes: [], edges: [] };
+  const canvas = {
+    view: { file: new FakeTFile("Map.canvas") },
+    nodes,
+    edges,
+    selection: new Set(),
+    getData: () => data,
+    setData(next) { Object.assign(data, next); },
+    // Plain objects: any attempt to patch a not-yet-rendered card would throw.
+    importData(imported) {
+      for (const node of imported.nodes) nodes.set(node.id, Object.freeze({ ...node }));
+      for (const edge of imported.edges) edges.set(edge.id, edge);
+    },
+    requestSave() {}
+  };
+  const plugin = new CanvasMindMapPlugin({ vault: {} }, { id: "tomindmap" });
+  plugin.settings = { ...plugin.settings, linkPreviews: true };
+  plugin.isAutoAdjustCanvas = () => false;
+  plugin.updateGroupBounds = () => {};
+  plugin.refreshOutline = () => {};
+  plugin.validateMediaLinks = async () => 0;
+  plugin.layoutEngine = { layoutChildren() {} };
+  plugin.branchColors = { applyColors() {} };
+  plugin.canvasApi = {
+    invalidateEdgeIndex() {},
+    createEdge: (target, from, to) => {
+      const edge = { id: "edge", from: { node: from }, to: { node: to } };
+      edges.set(edge.id, edge);
+      return edge;
+    },
+    selectAndZoom() {}
+  };
+  const fetched = [];
+  plugin.runAsync = (callback, label) => fetched.push(label);
+
+  const result = await plugin.importMindMapIntoCanvas(
+    canvas,
+    "https://www.moodle.tum.de/course/view.php?id=124123",
+    "clipboard",
+    parentNode
+  );
+
+  assert.equal(result.ok, true);
+  const card = Array.from(nodes.values()).find((node) => node.id !== "parent");
+  assert.equal(card.tomindmapLink.url, "https://www.moodle.tum.de/course/view.php?id=124123");
+  assert.deepEqual([card.width, card.height], [340, 64]);
+  assert.equal(edges.get("edge").to.node, card, "the link becomes a child of the selected topic");
+  assert.deepEqual(fetched, ["fetch link preview"]);
+});
+
+test("a link card keeps a single preview when it renders before its container", () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  class El {
+    constructor(className = "", doc = null) {
+      this.className = className;
+      this.children = [];
+      this.parentElement = null;
+      this.ownerDocument = doc;
+      this.attributes = {};
+      this.classList = {
+        add: (name) => { this.className += ` ${name}`; },
+        contains: (name) => this.className.split(" ").includes(name)
+      };
+    }
+    toggleClass(name, on) {
+      const names = new Set(this.className.split(" ").filter(Boolean));
+      if (on) names.add(name); else names.delete(name);
+      this.className = [...names].join(" ");
+    }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return this.attributes[name] ?? null; }
+    addEventListener() {}
+    append(...nodes) { for (const node of nodes) this.appendChild(node); }
+    appendChild(node) { node.parentElement = this; this.children.push(node); return node; }
+    remove() {
+      if (!this.parentElement) return;
+      this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+    }
+    descendants() { return this.children.flatMap((child) => [child, ...child.descendants()]); }
+    querySelectorAll(selector) {
+      const name = selector.slice(1);
+      return this.descendants().filter((node) => node.classList.contains(name));
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  }
+  const doc = { createElement: () => new El("", doc) };
+  const shell = new El("canvas-node", doc);
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  plugin.settings = { ...plugin.settings, linkPreviews: true };
+  const preview = (title) => ({ url: "https://campus.tum.de/", title, site: "campus.tum.de", image: "" });
+
+  plugin.decorateLinkTopic(shell, preview("campus.tum.de"));
+  const container = shell.appendChild(new El("canvas-node-container", doc));
+  plugin.decorateLinkTopic(shell, preview("campus.tum.de"));
+  plugin.decorateLinkTopic(shell, preview("Loaded title"));
+
+  const cards = shell.querySelectorAll(".tomindmap-link-preview");
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].parentElement, container);
+  assert.match(cards[0].getAttribute("data-key"), /Loaded title/);
+});

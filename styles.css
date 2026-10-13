@@ -779,10 +779,12 @@
 	visibility: visible;
 }
 
+/* Above Canvas's content blocker so the open button is clickable on an
+ * unselected card; the rest of the card stays click-through for selection. */
 .tomindmap-link-preview {
 	position: absolute;
 	inset: 0;
-	z-index: 1;
+	z-index: calc(var(--layer-cover) + 1);
 	display: flex;
 	align-items: center;
 	gap: 10px;
@@ -839,8 +841,17 @@
 
 .tomindmap-link-preview-open {
 	flex: 0 0 auto;
-	align-self: center;
+	align-self: stretch;
+	width: 44px;
+	height: auto;
+	margin-block: -2px;
+	border-radius: var(--radius-m);
 	pointer-events: auto;
+}
+
+.tomindmap-link-preview-open svg {
+	width: 20px;
+	height: 20px;
 }
 
 .tomindmap-link-editor label {

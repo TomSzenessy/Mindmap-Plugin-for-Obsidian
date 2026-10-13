@@ -24,7 +24,7 @@ Drag a note or mind map from the file explorer onto a map and it becomes the sam
 
 ## Web links
 
-A topic that is just a web link (typed, pasted, or dragged in from a browser) turns into a compact preview card with the page title, site, and a thumbnail when the page offers one. Links written inside a longer topic show as small link buttons. Press F2, start typing, or double-click a link card to edit its address and title; right-click for **Edit link**, **Open link**, **Refresh link preview**, and **Show as text link**. Right-click any other topic and choose **Add link** to attach a web address while keeping its wording as the title.
+A topic that is just a web link (typed, pasted, or dragged in from a browser) turns into a compact preview card with the page title, site, and a thumbnail when the page offers one. Links written inside a longer topic show as small link buttons. Double-click (or double-tap) a link card, or click its open button, to open the page. Press F2 or start typing to edit its address and title; right-click for **Edit link**, **Open link**, **Refresh link preview**, and **Show as text link**. Right-click any other topic and choose **Add link** to attach a web address while keeping its wording as the title.
 
 To show the title and image, ToMindMap downloads the linked page once through Obsidian, only reading its title and preview metadata. Turn off **Fetch link previews** in settings to make no network requests; link cards then show the site name instead.
 

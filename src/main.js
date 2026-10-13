@@ -1544,6 +1544,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		this.cleanupInsertNodeHandler = null;
 		this.cleanupRichContentHandler = null;
 		this.cleanupMediaDropHandler = null;
+		this.cleanupLinkButtonHandler = null;
 		this.cleanupNodeDragReparentHandler = null;
 		this.cleanupKeyboardHandler = null;
 		this.cleanupPreviewGeometryHandler = null;
@@ -2622,6 +2623,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
 		}
+		if (this.cleanupLinkButtonHandler) {
+			this.cleanupLinkButtonHandler();
+			this.cleanupLinkButtonHandler = null;
+		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
 			this.cleanupKeyboardHandler = null;
@@ -2678,6 +2683,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.onLeafChange(activeLeaf || view?.leaf || null);
 		}, 50);
 	}
+	isSidebarLeaf(leaf) {
+		const root = leaf?.getRoot?.();
+		const { leftSplit, rightSplit } = this.app.workspace;
+		return !!root && (root === leftSplit || root === rightSplit);
+	}
 	onLeafChange(leaf) {
 		var _a, _b, _c;
 		if (
@@ -2686,6 +2696,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				: _a.getViewType()) === OUTLINE_VIEW_TYPE
 		)
 			return;
+		// Sidebar panes (file explorer, search, bookmarks…) become active when a
+		// drag starts there; the map being worked on stays wired so the drop
+		// lands on it as a linked topic instead of a native preview card.
+		if (this.interceptedCanvas && this.isSidebarLeaf(leaf)) return;
 		if (leaf?.view?.getViewType?.() === 'canvas' && !leaf.view.canvas) {
 			for (const delay of [50, 150, 300, 600, 1200]) {
 				setTimeout(() => {
@@ -2753,6 +2767,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (this.cleanupMediaDropHandler) {
 			this.cleanupMediaDropHandler();
 			this.cleanupMediaDropHandler = null;
+		}
+		if (this.cleanupLinkButtonHandler) {
+			this.cleanupLinkButtonHandler();
+			this.cleanupLinkButtonHandler = null;
 		}
 		if (this.cleanupKeyboardHandler) {
 			this.cleanupKeyboardHandler();
@@ -3183,6 +3201,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			);
 		};
 		this.cleanupMediaDropHandler = this.registerMediaDropHandler(canvas);
+		this.cleanupLinkButtonHandler = this.registerLinkButtonHandler(canvas);
 		this.cleanupNodeDragReparentHandler =
 			this.registerNodeDragReparentHandler(canvas);
 		this.canvasGestureOwners.add(this.cleanupNodeDragReparentHandler);
@@ -5040,14 +5059,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		return target instanceof import_obsidian5.TFile ? target : null;
 	}
 	/**
-	 * Double-click and double-tap on a card: link topics open the link editor,
-	 * linked topics open their file. Returns true when the gesture was used.
+	 * Double-click and double-tap on a card open what it points to: the web
+	 * page of a link topic or the file of a linked topic. Returns true when the
+	 * gesture was used. Link cards are edited with F2, typing, or right-click.
 	 */
 	activateTopicCard(canvas, node) {
 		if (!canvas || !node || node.isEditing || !this.isMindmapCanvas(canvas)) return false;
 		if (linkPreviewData(node)) {
 			canvas.selectOnly(node);
-			return this.openLinkEditor(canvas, node);
+			return this.openTopicLink(node);
 		}
 		const file = this.linkedTopicTarget(canvas, node);
 		if (!file) return false;
@@ -6434,7 +6454,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 				ancestor = ancestor.parentElement;
 			}
-			if (type === 'text') this.decorateLinkTopic(shell, readLinkPreview(nodeData), node);
+			if (type === 'text') this.decorateLinkTopic(shell, readLinkPreview(nodeData));
 			const isRootTopic =
 				type === 'text' &&
 				(graph?.incomingEdgesOf(node)?.length || 0) === 0;
@@ -8329,7 +8349,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	 * Render the preview card over a link topic. The card is rebuilt only when
 	 * its content changes; all page-provided strings go through textContent.
 	 */
-	decorateLinkTopic(shell, preview, node) {
+	decorateLinkTopic(shell, preview) {
 		// Most topics are not links; skip DOM queries for cards never decorated.
 		if (!preview && !shell?.classList?.contains?.('tomindmap-link-topic')) return;
 		const host =
@@ -8382,13 +8402,32 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (typeof import_obsidian5.setIcon === 'function')
 			import_obsidian5.setIcon(open, 'external-link');
 		else open.textContent = '↗';
-		open.addEventListener('click', (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			this.openTopicLink(node);
-		});
 		card.append(body, open);
 		host.appendChild(card);
+	}
+	/**
+	 * A link card's open button works on the first click, even on an
+	 * unselected card: the press is claimed at the window before Canvas or the
+	 * plugin's own capture handlers can turn it into a select or drag.
+	 */
+	registerLinkButtonHandler(canvas) {
+		const wrapper = canvas.wrapperEl;
+		const win = wrapper?.ownerDocument?.defaultView;
+		if (!wrapper || typeof win?.addEventListener !== 'function') return () => {};
+		const claim = (event) => {
+			const button = event.target?.closest?.('.tomindmap-link-preview-open');
+			if (!button || !wrapper.contains(button)) return;
+			const node = findNodeFromEvent(canvas, event);
+			if (!node) return;
+			event.stopPropagation();
+			event.preventDefault();
+			if (event.type === 'click') this.openTopicLink(node);
+		};
+		const types = ['pointerdown', 'mousedown', 'click', 'dblclick'];
+		for (const type of types) win.addEventListener(type, claim, true);
+		return () => {
+			for (const type of types) win.removeEventListener(type, claim, true);
+		};
 	}
 	draggedVaultFiles() {
 		const draggable = this.app.dragManager?.draggable;

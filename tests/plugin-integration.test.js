@@ -1789,3 +1789,84 @@ test("a dropped mind map that already has a parent keeps it", async () => {
   assert.equal(adopted, false);
   assert.equal(writes, 0);
 });
+
+test("double-clicking a link card opens the page instead of the editor", () => {
+  const { plugin, canvas, node } = linkTopicHarness("https://example.com/talk");
+  plugin.upgradeLinkTopic(canvas, node);
+  canvas.selectOnly = () => {};
+  const opened = [];
+  plugin.openTopicLink = (target) => {
+    opened.push(target.id);
+    return true;
+  };
+  plugin.openLinkEditor = () => {
+    throw new Error("double-click must not open the editor");
+  };
+
+  assert.equal(plugin.activateTopicCard(canvas, node), true);
+  assert.deepEqual(opened, ["topic"]);
+});
+
+test("activating a sidebar pane keeps the current map wired for drops", () => {
+  const { default: CanvasMindMapPlugin, FakeDocument } = loadSource();
+  const leftSplit = {};
+  const rootSplit = {};
+  const plugin = new CanvasMindMapPlugin(
+    { workspace: { leftSplit, rightSplit: {}, rootSplit } },
+    { id: "tomindmap" }
+  );
+  const canvas = mindmapCanvas(new FakeDocument());
+  plugin.interceptedCanvas = canvas;
+  let tornDown = false;
+  plugin.unwrapCanvasMethods = () => { tornDown = true; };
+
+  plugin.onLeafChange({
+    getRoot: () => leftSplit,
+    view: { getViewType: () => "file-explorer" }
+  });
+
+  assert.equal(tornDown, false);
+  assert.equal(plugin.interceptedCanvas, canvas);
+  assert.equal(plugin.isSidebarLeaf({ getRoot: () => rootSplit }), false);
+});
+
+test("the link card open button opens on the first click without selecting", () => {
+  const { default: CanvasMindMapPlugin } = loadSource();
+  const listeners = new Map();
+  const win = {
+    addEventListener(type, handler, capture) {
+      assert.equal(capture, true);
+      listeners.set(type, handler);
+    },
+    removeEventListener(type) { listeners.delete(type); }
+  };
+  const button = {};
+  const node = { id: "topic", nodeEl: { contains: (target) => target === button } };
+  const wrapper = { ownerDocument: { defaultView: win }, contains: (target) => target === button };
+  button.closest = (selector) => (selector === ".tomindmap-link-preview-open" ? button : null);
+  const canvas = { wrapperEl: wrapper, nodes: new Map([[node.id, node]]) };
+  const plugin = new CanvasMindMapPlugin({}, { id: "tomindmap" });
+  const opened = [];
+  plugin.openTopicLink = (target) => opened.push(target.id);
+  const cleanup = plugin.registerLinkButtonHandler(canvas);
+  const event = (type) => ({
+    type,
+    target: button,
+    stopped: false,
+    prevented: false,
+    stopPropagation() { this.stopped = true; },
+    preventDefault() { this.prevented = true; }
+  });
+
+  const press = event("pointerdown");
+  listeners.get("pointerdown")(press);
+  listeners.get("click")(event("click"));
+  const elsewhere = { ...event("pointerdown"), target: { closest: () => null } };
+  listeners.get("pointerdown")(elsewhere);
+
+  assert.equal(press.stopped, true, "Canvas never sees the press, so it cannot select");
+  assert.deepEqual(opened, ["topic"]);
+  assert.equal(elsewhere.stopped, false, "presses elsewhere still select as usual");
+  cleanup();
+  assert.equal(listeners.size, 0);
+});

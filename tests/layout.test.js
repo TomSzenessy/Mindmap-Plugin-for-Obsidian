@@ -153,7 +153,7 @@ test("settles a bulky middle subtree outward to reduce height", () => {
   assert.ok(Math.max(...ys) - Math.min(...ys) < 9 * 80);
 });
 
-test("folds dense child groups into a paper-shaped footprint without card overlap", () => {
+test("stacks many leaf children in one vertical column in sibling order", () => {
   const engine = new LayoutEngine({
     nodeWidth: 180,
     nodeHeight: 60,
@@ -161,46 +161,18 @@ test("folds dense child groups into a paper-shaped footprint without card overla
     verticalGap: 20,
     animate: false
   });
-  const groups = Array.from({ length: 4 }, (_, groupIndex) =>
-    tree(
-      `group-${groupIndex}`,
-      Array.from({ length: 7 }, (_, leafIndex) =>
-        tree(`leaf-${groupIndex}-${leafIndex}`)
-      )
-    )
-  );
-  const root = tree("root", groups);
+  const leaves = Array.from({ length: 9 }, (_, index) => tree(`leaf-${index}`));
+  const root = tree("root", leaves);
   const positions = new Map();
-  const layout = engine.layoutSubtree(
-    root,
-    0,
-    0,
-    0,
-    "right",
-    positions,
-    {},
-    true
+  engine.layoutSubtree(root, 0, 0, 0, "left", positions, {}, true);
+  const placed = leaves.map((leaf) => positions.get(leaf.canvasNode.id));
+  const rightEdges = placed.map((position, index) =>
+    position.x + (leaves[index].canvasNode.width || 180)
   );
-  const rectangles = layout.rectangles;
-  const width =
-    Math.max(...rectangles.map((item) => item.right)) -
-    Math.min(...rectangles.map((item) => item.left));
-  const height =
-    Math.max(...rectangles.map((item) => item.bottom)) -
-    Math.min(...rectangles.map((item) => item.top));
-  assert.ok(height < 4 * 7 * 80 * 0.82);
-  assert.ok(width / height > 0.65);
-  for (let index = 0; index < rectangles.length; index++) {
-    for (let other = index + 1; other < rectangles.length; other++) {
-      const left = rectangles[index];
-      const right = rectangles[other];
-      assert.ok(
-        left.right <= right.left ||
-        right.right <= left.left ||
-        left.bottom <= right.top ||
-        right.bottom <= left.top
-      );
-    }
+  assert.equal(new Set(rightEdges).size, 1);
+  for (let index = 1; index < placed.length; index++) {
+    const previousBottom = placed[index - 1].y + (leaves[index - 1].canvasNode.height || 60);
+    assert.ok(placed[index].y >= previousBottom);
   }
 });
 

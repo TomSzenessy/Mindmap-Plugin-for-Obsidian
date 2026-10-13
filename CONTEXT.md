@@ -19,6 +19,12 @@ _Avoid_: Automatically recovered topic when the user has not chosen that action.
 **Linked content expansion**: Replacing a generated file card with a normal topic and importing the hierarchy stored in its linked Canvas or Markdown branch while keeping the card's place in the current map. The replacement inherits that place and attachment; it does not detach imported descendants or absorb neighboring roots.
 _Avoid_: Flattened link when the imported descendants must remain attached.
 
+**Linked topic**: A title-only file card that stands in a mind map for a note or Canvas: a clean note, branch export note, or nested mind map created by conversion, or an existing vault file dragged in from the sidebar. It shows the file's title rather than its preview and opens the file on double-click.
+_Avoid_: File preview when the card shows only the title.
+
+**Link topic**: A topic whose whole text is one web link, shown as a preview card with the page title, site, and optional image. Its Markdown stays a normal `[Title](<url>)` link so export and sync remain readable.
+_Avoid_: Linked topic, which points at a vault file.
+
 **Collapsed subtree**: A topic whose descendants and their connecting edges are hidden from the interactive Canvas without being removed from the saved hierarchy.
 _Avoid_: Deleted branch when the underlying structure should remain recoverable.
 

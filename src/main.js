@@ -43,6 +43,19 @@ var {
 	flushCanvasView
 } = require('./lib/canvas-session.js');
 var {
+	LINK_PREVIEW_KEY,
+	LINK_PLAIN_KEY,
+	linkCardSize,
+	linkDomain,
+	linkPreviewData,
+	linkTopicText,
+	normalizeTypedUrl,
+	parseLinkPreview,
+	readLinkPreview,
+	safeHttpUrl,
+	standaloneLink
+} = require('./lib/link-preview.js');
+var {
 	CARD_LAYOUT_VERSION,
 	LiveSizingController,
 	SIZING_STATUS,
@@ -256,6 +269,20 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 					.onChange(async (value) => {
 						const settings = await save({ mouseNavigation: value });
 						toggle.setValue(settings.mouseNavigation);
+					})
+			);
+
+		new import_obsidian3.Setting(containerEl)
+			.setName('Fetch link previews')
+			.setDesc(
+				'When a topic is a single web link, download that page once to show its title and preview image. Turn off to keep link topics offline; they still show as link cards.'
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.linkPreviews)
+					.onChange(async (value) => {
+						const settings = await save({ linkPreviews: value });
+						toggle.setValue(settings.linkPreviews);
 					})
 			);
 
@@ -570,6 +597,8 @@ function canvasNodeMarkdownText(node) {
 }
 
 
+const MIND_MAP_FILE_ACCEPT =
+	'.md,.markdown,.mm,.txt,.xml,text/markdown,text/plain,text/xml,application/xml';
 const TOMINMAP_TITLE_ONLY = 'tomindmapTitleOnly';
 const TOMINMAP_CARD_KIND = 'tomindmapCardKind';
 const TOMINMAP_CARD_TITLE = 'tomindmapCardTitle';
@@ -588,6 +617,14 @@ function setCanvasNodeUnknownData(node, patch) {
 	const data = canvasNodeUnknownData(node);
 	if (typeof node.setData === 'function') node.setData({ ...data, ...patch });
 	else node.unknownData = { ...data, ...patch };
+}
+
+function removeCanvasNodeDataKeys(node, keys) {
+	if (!node) return;
+	const data = { ...canvasNodeUnknownData(node) };
+	for (const key of keys) delete data[key];
+	if (typeof node.setData === 'function') node.setData(data);
+	else node.unknownData = data;
 }
 
 function canvasFolderPath(canvas) {
@@ -612,13 +649,19 @@ function titleOnlyCardTitle(node) {
 	return MindmapActions.topicTitleFromNode(node);
 }
 
+/**
+ * Mark a file card as a title-only linked topic. A `null` title stores no
+ * fixed title, so the card keeps showing the file's current name after a
+ * rename (used for files linked by drag and drop).
+ */
 function applyTitleOnlyCardMarker(node, kind, title) {
 	if (!node) return;
-	setCanvasNodeUnknownData(node, {
+	const patch = {
 		[TOMINMAP_TITLE_ONLY]: true,
-		[TOMINMAP_CARD_KIND]: kind,
-		[TOMINMAP_CARD_TITLE]: title || titleOnlyCardTitle(node)
-	});
+		[TOMINMAP_CARD_KIND]: kind
+	};
+	if (title !== null) patch[TOMINMAP_CARD_TITLE] = title || titleOnlyCardTitle(node);
+	setCanvasNodeUnknownData(node, patch);
 	const marker = title || titleOnlyCardTitle(node);
 	const shell =
 		node.nodeEl?.closest?.('.canvas-node') || node.nodeEl;
@@ -654,21 +697,6 @@ function setCanvasNodeCollapsedClass(node, collapsed) {
 
 function nodeIsConvertibleTopic(canvas, node) {
 	return MindmapActions.isTextTopicNode(node, getGroupIds(canvas));
-}
-
-function findNativeCanvasMenuItem(menu, titlePattern) {
-	if (!menu || !Array.isArray(menu.items)) return null;
-	return (
-		menu.items.find((item) => {
-			const text = String(
-				item?.titleEl?.textContent ||
-					item?.title ||
-					item?.title__ ||
-					''
-			).trim();
-			return titlePattern.test(text);
-		}) || null
-	);
 }
 
 function removeNativeCanvasMenuItem(menu, titlePattern) {
@@ -832,6 +860,78 @@ var MarkdownMindMapModal = class extends import_obsidian5.Modal {
 			}
 		});
 		setTimeout(() => textarea.focus(), 0);
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+};
+/**
+ * Edit a topic's web link and title. Enter in either field saves; an empty
+ * title means "use the page's own title". Validation happens before closing
+ * so a typo never discards what was typed.
+ */
+var LinkEditModal = class extends import_obsidian5.Modal {
+	constructor(app, initial, onSave, onRemove = null) {
+		super(app);
+		this.initial = initial || {};
+		this.onSave = onSave;
+		this.onRemove = onRemove;
+	}
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('tomindmap-link-editor');
+		contentEl.createEl('h2', { text: this.initial.url ? 'Edit link' : 'Add link' });
+		const urlLabel = contentEl.createEl('label', { text: 'Web address' });
+		const urlInput = urlLabel.createEl('input', {
+			type: 'url',
+			attr: { placeholder: 'https://example.com', spellcheck: 'false' }
+		});
+		urlInput.value = this.initial.url || '';
+		const titleLabel = contentEl.createEl('label', { text: 'Title' });
+		const titleInput = titleLabel.createEl('input', {
+			type: 'text',
+			attr: { placeholder: 'Leave empty to use the page title' }
+		});
+		titleInput.value = this.initial.title || '';
+		const error = contentEl.createDiv({ cls: 'tomindmap-link-editor-error' });
+		const actions = contentEl.createDiv({ cls: 'modal-button-container' });
+		if (this.onRemove) {
+			const remove = actions.createEl('button', {
+				text: 'Remove link',
+				cls: 'mod-warning'
+			});
+			remove.addEventListener('click', () => {
+				this.close();
+				this.onRemove();
+			});
+		}
+		const cancel = actions.createEl('button', { text: 'Cancel' });
+		const save = actions.createEl('button', { text: 'Save', cls: 'mod-cta' });
+		cancel.addEventListener('click', () => this.close());
+		const submit = () => {
+			const url = normalizeTypedUrl(urlInput.value);
+			if (!url) {
+				error.setText('Enter a web address that starts with http:// or https://');
+				urlInput.focus();
+				return;
+			}
+			this.close();
+			this.onSave({ url, title: titleInput.value.trim() });
+		};
+		save.addEventListener('click', submit);
+		for (const input of [urlInput, titleInput]) {
+			input.addEventListener('keydown', (event) => {
+				if (event.key === 'Enter' && !event.isComposing) {
+					event.preventDefault();
+					submit();
+				}
+			});
+		}
+		setTimeout(() => {
+			urlInput.focus();
+			urlInput.select?.();
+		}, 0);
 	}
 	onClose() {
 		this.contentEl.empty();
@@ -1408,123 +1508,6 @@ function pdfSvgFromDocument(html, fallbackOnly = false) {
 			: 900;
 	return { svg, width, height };
 }
-async function renderSvgAsJpeg(svgInfo, ownerDocument) {
-	const ownerWindow = ownerDocument.defaultView || window;
-	const maxDimension = 4096;
-	const scale = Math.min(
-		2,
-		maxDimension / Math.max(svgInfo.width, svgInfo.height)
-	);
-	const pixelWidth = Math.max(1, Math.round(svgInfo.width * scale));
-	const pixelHeight = Math.max(1, Math.round(svgInfo.height * scale));
-	const blob = new Blob([svgInfo.svg], {
-		type: 'image/svg+xml;charset=utf-8'
-	});
-	const url = ownerWindow.URL.createObjectURL(blob);
-	try {
-		const image = new ownerWindow.Image();
-		image.decoding = 'async';
-		await new Promise((resolve, reject) => {
-			image.onload = resolve;
-			image.onerror = () =>
-				reject(new Error('Could not render the mind map SVG'));
-			image.src = url;
-		});
-		const bitmap = ownerDocument.createElement('canvas');
-		bitmap.width = pixelWidth;
-		bitmap.height = pixelHeight;
-		const context = bitmap.getContext('2d');
-		if (!context) throw new Error('Canvas rendering is unavailable');
-		context.fillStyle = '#ffffff';
-		context.fillRect(0, 0, pixelWidth, pixelHeight);
-		context.drawImage(image, 0, 0, pixelWidth, pixelHeight);
-		const jpeg = await new Promise((resolve, reject) =>
-			bitmap.toBlob(
-				(value) =>
-					value
-						? resolve(value)
-						: reject(new Error('Could not encode the PDF image')),
-				'image/jpeg',
-				0.94
-			)
-		);
-		return {
-			bytes: new Uint8Array(await jpeg.arrayBuffer()),
-			width: pixelWidth,
-			height: pixelHeight
-		};
-	} finally {
-		ownerWindow.URL.revokeObjectURL(url);
-	}
-}
-function mindMapPdfBytes(jpeg) {
-	const encoder = new TextEncoder();
-	const aspect = jpeg.width / jpeg.height;
-	const pageWidth = aspect >= 1 ? 1000 : 1000 * aspect;
-	const pageHeight = aspect >= 1 ? 1000 / aspect : 1000;
-	const content = `q\n${pageWidth.toFixed(3)} 0 0 ${pageHeight.toFixed(3)} 0 0 cm\n/Im0 Do\nQ\n`;
-	const objects = [
-		encoder.encode('<< /Type /Catalog /Pages 2 0 R >>'),
-		encoder.encode('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
-		encoder.encode(
-			`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth.toFixed(3)} ${pageHeight.toFixed(3)}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`
-		),
-		null,
-		encoder.encode(
-			`<< /Length ${encoder.encode(content).length} >>\nstream\n${content}endstream`
-		)
-	];
-	const header = encoder.encode('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
-	const chunks = [header];
-	const offsets = [0];
-	let byteLength = header.length;
-	for (let index = 0; index < objects.length; index++) {
-		offsets.push(byteLength);
-		const prefix = encoder.encode(`${index + 1} 0 obj\n`);
-		let body = objects[index];
-		if (index === 3) {
-			const imageHeader = encoder.encode(
-				`<< /Type /XObject /Subtype /Image /Width ${jpeg.width} /Height ${jpeg.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.bytes.length} >>\nstream\n`
-			);
-			const imageFooter = encoder.encode('\nendstream');
-			body = new Uint8Array(
-				imageHeader.length + jpeg.bytes.length + imageFooter.length
-			);
-			body.set(imageHeader, 0);
-			body.set(jpeg.bytes, imageHeader.length);
-			body.set(imageFooter, imageHeader.length + jpeg.bytes.length);
-		}
-		const suffix = encoder.encode('\nendobj\n');
-		chunks.push(prefix, body, suffix);
-		byteLength += prefix.length + body.length + suffix.length;
-	}
-	const xrefOffset = byteLength;
-	const xrefLines = [
-		`xref`,
-		`0 ${objects.length + 1}`,
-		'0000000000 65535 f '
-	];
-	for (let index = 1; index <= objects.length; index++)
-		xrefLines.push(`${String(offsets[index]).padStart(10, '0')} 00000 n `);
-	xrefLines.push(
-		`trailer`,
-		`<< /Size ${objects.length + 1} /Root 1 0 R >>`,
-		`startxref`,
-		String(xrefOffset),
-		`%%EOF`,
-		''
-	);
-	chunks.push(encoder.encode(xrefLines.join('\n')));
-	const result = new Uint8Array(
-		chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-	);
-	let offset = 0;
-	for (const chunk of chunks) {
-		result.set(chunk, offset);
-		offset += chunk.length;
-	}
-	return result;
-}
 
 var {
 	DEFAULT_FREEMIND_BUDGETS,
@@ -1610,22 +1593,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.canvasApi = new CanvasAPI(this.app);
-		this.nodeOps = new NodeOperations(this.canvasApi, {
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap,
-			isAutoAdjust: (canvas) => this.isAutoAdjustCanvas(canvas)
-		});
-		this.layoutEngine = new LayoutEngine({
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap,
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			// Canvas edges update synchronously; animating only the cards makes
-			// the visible graph temporarily disagree with its edge geometry.
-			animate: false
-		});
+		this.rebuildLayoutServices();
 		this.branchColors = new BranchColors(this.canvasApi);
 		this.navigation = new Navigation(this.canvasApi);
 		this.keyboardHandler = new KeyboardHandler(
@@ -1951,7 +1919,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					menu.addItem((item) => {
 					item.setTitle('Import mindmap to canvas')
 						.setIcon('file-input')
-						.onClick(() => this.importAnyMindMapFile(file.path));
+						.onClick(() => this.createCanvasFromMindMapFile(file.path));
 					});
 					return;
 				}
@@ -1975,7 +1943,15 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						.setIcon('network')
 						.onClick(
 							() =>
-								void this.importFreeMindFile(file.parent?.path || '', file)
+								this.runAsync(
+									async () =>
+										this.createCanvasFromMindMapText(
+											file.parent?.path || '',
+											file.name,
+											await this.app.vault.cachedRead(file)
+										),
+									'convert FreeMind file'
+								)
 						);
 				});
 				return;
@@ -2019,7 +1995,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						.onClick(() => {
 							if (canvas)
 								new MarkdownMindMapModal(this.app, (markdown) =>
-									this.importMarkdownIntoCanvas(
+									this.importMindMapIntoCanvas(
 										canvas,
 										markdown
 									)
@@ -2032,7 +2008,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 						.setIcon('file-input')
 						.setDisabled(!canvas)
 						.onClick(() => {
-							if (canvas) this.importMarkdownFile(canvas);
+							if (canvas) this.importMindMapFileIntoCanvas(canvas);
 						})
 				);
 				menu.addItem((item) =>
@@ -2110,6 +2086,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 							}, 'copy node link');
 						});
 				});
+				if (canvas && this.isMindmapCanvas(canvas) && nodeIsConvertibleTopic(canvas, node))
+					this.addLinkTopicMenuItems(menu, canvas, node);
 				if (canvas && this.isMindmapCanvas(canvas)) {
 					const scrubNative = () => {
 						removeNativeCanvasMenuItem(
@@ -2429,8 +2407,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		});
 		this.addCommand({
 			id: 'mindmap-import-freemind',
-			name: 'Import mind map (.mm) file to canvas',
-			callback: () => this.importFreeMindFile()
+			name: 'Import mind map file as new canvas',
+			callback: () => this.createCanvasFromMindMapFile()
 		});
 		this.addCommand({
 			id: 'mindmap-copy-markdown',
@@ -2462,7 +2440,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!canvas) return false;
 				if (checking) return true;
 				new MarkdownMindMapModal(this.app, (markdown) =>
-					this.importMarkdownIntoCanvas(canvas, markdown)
+					this.importMindMapIntoCanvas(canvas, markdown)
 				).open();
 			}
 		});
@@ -2473,7 +2451,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const canvas = this.canvasApi.getActiveCanvas();
 				if (!canvas) return false;
 				if (checking) return true;
-				this.importMarkdownFile(canvas);
+				this.importMindMapFileIntoCanvas(canvas);
 			}
 		});
 		this.addCommand({
@@ -2887,23 +2865,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		};
 		const onCardDoubleClick = (event) => {
 			if (!this.isMindmapCanvas(canvas)) return;
-			const node = findNodeFromEvent(canvas, event);
-			if (!node || !canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return;
-			const filePath = canvasNodeFilePath(node);
-			let file = this.app.vault.getAbstractFileByPath(filePath);
-			if (
-				canvasNodeUnknownData(node)[TOMINMAP_CARD_KIND] === 'nested-map' &&
-				typeof this.findMostRecentNestedMapForNode === 'function'
-			) {
-				const mostRecent = this.findMostRecentNestedMapForNode(canvas, node);
-				if (mostRecent) file = mostRecent;
-			}
-			if (!(file instanceof import_obsidian5.TFile)) return;
+			if (!this.activateTopicCard(canvas, findNodeFromEvent(canvas, event))) return;
 			event.preventDefault();
 			event.stopPropagation();
 			event.stopImmediatePropagation?.();
-			canvas.selectOnly(node);
-			void this.app.workspace.getLeaf(false).openFile(file);
 		};
 		canvas.wrapperEl.addEventListener(
 			'dblclick',
@@ -3250,17 +3215,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (this.isMindmapCanvas(canvas2)) {
 					this.runAsync(() => this.renameCanvasFromRootTopic(canvas2, editedNode), 'rename canvas from root topic');
 				}
-				this.waitForPreview(editedNode, () => {
-					if (this.canvasApi.getActiveCanvas() !== canvas2) return;
-					if (!this.isMindmapCanvas(canvas2)) return;
-					if (!this.isAutoAdjustCanvas(canvas2)) return;
-					this.resizeNodesWhenRendered(
-						canvas2,
-						[editedNode],
-						null,
-						{ preserveRootSides: true }
-					);
-				});
+				this.settleEditedTopic(canvas2, editedNode);
 				return false;
 		};
 		this.autoResizeHandle = registerAutoResize(
@@ -3275,6 +3230,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			(_a2 = this.autoResizeHandle) == null ? void 0 : _a2.finalizeNode();
 		};
 		this.keyboardHandler.onAfterFinishEditing = handleEditExit;
+		// Link cards hide their Markdown, so "start editing" opens the link editor.
+		this.keyboardHandler.onStartEditing = (canvas2, node) =>
+			linkPreviewData(node) ? this.openLinkEditor(canvas2, node) : false;
+		this.keyboardHandler.onLeaveEditedNode = (canvas2, editedNode) =>
+			this.settleEditedTopic(canvas2, editedNode);
 		if (this.settings.autoColor && this.isMindmapCanvas(canvas)) {
 			this.branchColors.applyColors(canvas);
 		}
@@ -3287,6 +3247,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		const origDeselectAll = canvas.deselectAll.bind(canvas);
 		const origImportData = canvas.importData.bind(canvas);
 		const origRemoveEdge = canvas.removeEdge.bind(canvas);
+		const origRemoveNode = canvas.removeNode.bind(canvas);
 		const origRequestFrame = typeof canvas.requestFrame === 'function' ? canvas.requestFrame.bind(canvas) : null;
 		const origSetData = typeof canvas.setData === 'function' ? canvas.setData.bind(canvas) : null;
 		let structuralReflowQueued = false;
@@ -3626,6 +3587,19 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	getPreviewSizer(node) {
 		return this.liveSizing.getPreviewSizer(node);
 	}
+	/**
+	 * Once an edited topic has closed and rendered, it either becomes a link
+	 * card (its text is one web link) or is resized to fit its content.
+	 */
+	settleEditedTopic(canvas, node) {
+		this.waitForPreview(node, () => {
+			if (this.canvasApi.getActiveCanvas() !== canvas) return;
+			if (!this.isMindmapCanvas(canvas) || !canvas.nodes.has(node.id)) return;
+			if (this.upgradeLinkTopic(canvas, node)) return;
+			if (!this.isAutoAdjustCanvas(canvas)) return;
+			this.resizeNodesWhenRendered(canvas, [node], null, { preserveRootSides: true });
+		});
+	}
 	waitForPreview(node, callback) {
 		this.liveSizing.waitForPreview(node, callback);
 	}
@@ -3962,6 +3936,20 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		return MarkdownMindMapCodec.encodeMindMapMarkdown(canvas, {
 			...this.settings,
 			...options
+		});
+	}
+	/** Layout services read their geometry from the current settings. */
+	rebuildLayoutServices() {
+		const geometry = this.markdownLayoutOptions();
+		this.nodeOps = new NodeOperations(this.canvasApi, {
+			...geometry,
+			isAutoAdjust: (canvas) => this.isAutoAdjustCanvas(canvas)
+		});
+		this.layoutEngine = new LayoutEngine({
+			...geometry,
+			// Canvas edges update synchronously; animating only the cards makes
+			// the visible graph temporarily disagree with its edge geometry.
+			animate: false
 		});
 	}
 	markdownLayoutOptions() {
@@ -4894,23 +4882,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		);
 		const migratedLinks = new Map();
 		for (const record of parentRecords) {
-			const issued = this.markdownOwnership.issueRecord({
-				canvasPath: record.canvasPath,
-				kind: 'parent',
-				targetPath: newPath,
-				syncId: record.syncId,
-				nodeId: record.nodeId
-			});
+			const issued = this.issueParentLink(record.canvasPath, newPath, record.nodeId, record.syncId);
 			if (!issued.ok) continue;
 			const upserted = this.markdownOwnership.upsert(issued.record, { replaceExisting: true });
 			if (!upserted.ok) continue;
-			migratedLinks.set(record.canvasPath, {
-				canvas: newPath,
-				nodeId: record.nodeId,
-				syncId: issued.record.syncId,
-				proof: issued.record.proof,
-				ownership: { source: 'plugin-data' }
-			});
+			migratedLinks.set(record.canvasPath, issued.link);
 		}
 		const canvasFiles = (this.app.vault.getFiles?.() || []).filter(
 			(file) => file instanceof import_obsidian5.TFile && file.extension === 'canvas'
@@ -5052,6 +5028,33 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			console.warn('ToMindMap: Markdown rename transaction rolled back', error);
 		}
 	}
+	/** The file a linked topic opens; a nested map follows its latest location. */
+	linkedTopicTarget(canvas, node) {
+		const data = canvasNodeUnknownData(node);
+		if (!data[TOMINMAP_TITLE_ONLY]) return null;
+		const target =
+			(data[TOMINMAP_CARD_KIND] === 'nested-map'
+				? this.findMostRecentNestedMapForNode(canvas, node)
+				: null) ||
+			this.app.vault.getAbstractFileByPath(canvasNodeFilePath(node));
+		return target instanceof import_obsidian5.TFile ? target : null;
+	}
+	/**
+	 * Double-click and double-tap on a card: link topics open the link editor,
+	 * linked topics open their file. Returns true when the gesture was used.
+	 */
+	activateTopicCard(canvas, node) {
+		if (!canvas || !node || node.isEditing || !this.isMindmapCanvas(canvas)) return false;
+		if (linkPreviewData(node)) {
+			canvas.selectOnly(node);
+			return this.openLinkEditor(canvas, node);
+		}
+		const file = this.linkedTopicTarget(canvas, node);
+		if (!file) return false;
+		canvas.selectOnly(node);
+		void this.app.workspace.getLeaf(false).openFile(file);
+		return true;
+	}
 	findMostRecentNestedMapForNode(canvas, node) {
 		const filePath = canvasNodeFilePath(node);
 		const currentFile = filePath ? this.app.vault.getAbstractFileByPath(filePath) : null;
@@ -5113,15 +5116,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		)
 			return false;
 		const isNestedMap = canvasNodeUnknownData(node)[TOMINMAP_CARD_KIND] === 'nested-map';
-		let filePath = canvasNodeFilePath(node);
-		let targetFile = this.app.vault.getAbstractFileByPath(filePath);
-		if (isNestedMap && typeof this.findMostRecentNestedMapForNode === 'function') {
-			const mostRecent = this.findMostRecentNestedMapForNode(canvas, node);
-			if (mostRecent) {
-				targetFile = mostRecent;
-				filePath = mostRecent.path;
-			}
-		}
+		const targetFile = this.linkedTopicTarget(canvas, node);
+		const filePath = targetFile?.path || canvasNodeFilePath(node);
 		const oldData = { ...canvasNodeUnknownData(node) };
 		const title = titleOnlyCardTitle(node);
 		const importedIds = [];
@@ -5757,22 +5753,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				MindmapActions.topicTitleFromNode(rootNode)
 			);
 			oldCardData = { ...canvasNodeUnknownData(card) };
-			const syncId = createSyncId();
-			const issued = this.markdownOwnership.issueRecord({
-				canvasPath: nestedPath,
-				kind: 'parent',
-				targetPath: parentPath,
-				syncId,
-				nodeId: card.id
-			});
-			if (!syncId || !issued.ok) throw new Error(issued.reason || 'Could not mint parent ownership');
-			const parentLink = {
-				canvas: parentPath,
-				nodeId: card.id,
-				syncId: issued.record.syncId,
-				proof: issued.record.proof,
-				ownership: { source: 'plugin-data' }
-			};
+			const issued = this.issueParentLink(nestedPath, parentPath, card.id);
+			if (!issued.ok) throw new Error(issued.reason || 'Could not mint parent ownership');
+			const parentLink = issued.link;
 			setCanvasNodeUnknownData(card, { [CARD_SYNC_KEY]: issued.record.syncId });
 			nested.mindmapParent = parentLink;
 			await this.app.vault.process(created, (raw) => JSON.stringify(nested, null, '\t'));
@@ -6119,29 +6102,17 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			event.clipboardData?.getData('text/plain') ||
 			'';
 		if (!canvas || !clipboardText.trim()) return;
-		const isFreeMind = this.detectFreeMindFormat(clipboardText);
-		if (isFreeMind) {
-			event.preventDefault();
-			event.stopImmediatePropagation();
-			const parent = this.canvasApi.getSelectedNode(canvas);
-			this.runAsync(
-				() => this.importFreeMindIntoCanvas(canvas, clipboardText, 'clipboard', parent),
-				'paste FreeMind'
-			);
-			return;
-		}
-		const markdown = normalizeClipboardMarkdown(clipboardText);
-		const decoded = this.layoutMarkdownDocument(
-			markdown,
-			this.markdownLayoutOptions()
-		);
+		const text = this.detectFreeMindFormat(clipboardText)
+			? clipboardText
+			: normalizeClipboardMarkdown(clipboardText);
+		const decoded = this.decodeMindMapText(text);
 		if (!decoded.ok) return;
 		event.preventDefault();
 		event.stopImmediatePropagation();
 		const parent = this.canvasApi.getSelectedNode(canvas);
 		this.runAsync(
-			() => this.importMarkdownIntoCanvas(canvas, markdown, 'clipboard', parent),
-			'paste Markdown'
+			() => this.importDecodedMindMap(canvas, decoded, 'clipboard', parent),
+			'paste mind map'
 		);
 	}
 	async readBoundedMarkdownFile(file) {
@@ -6181,81 +6152,80 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return { ok: false, reason: 'file-byte-budget' };
 		return { ok: true, value: text };
 	}
-	async importMarkdownFile(canvas, content = null, fileName = 'mindmap') {
-		if (!canvas) return;
-		if (content !== null) {
-			const isFreeMind = this.detectFreeMindFormat(content);
-			if (isFreeMind) {
-				const decoded = decodeFreeMind(content, {
-					budgets: DEFAULT_FREEMIND_BUDGETS,
-					nodeWidth: this.settings.defaultNodeWidth,
-					nodeHeight: this.settings.defaultNodeHeight,
-					maxNodeHeight: this.settings.maxNodeHeight,
-					horizontalGap: this.settings.horizontalGap,
-					verticalGap: this.settings.verticalGap
-				});
-				if (!decoded.ok) {
-					new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
-					return;
-				}
-				await this.importFreeMindIntoCanvas(canvas, content, fileName);
-			} else {
-				await this.importMarkdownIntoCanvas(canvas, content, fileName);
-			}
-			return;
-		}
+	/** Ask for local files; `onFiles` receives the chosen browser Files. */
+	pickLocalFiles({ accept = '', multiple = false } = {}, onFiles) {
 		const input = document.createElement('input');
 		input.type = 'file';
-		input.accept = '.md,.markdown,.mm,.txt,.xml,.csv,text/markdown,text/plain,text/xml,application/xml,text/csv';
+		if (accept) input.accept = accept;
+		input.multiple = multiple;
 		const handler = () => {
-			var _a;
 			input.removeEventListener('change', handler);
-			const file = (_a = input.files) == null ? void 0 : _a[0];
-			if (!file) return;
-			this.runAsync(async () => {
-				const read = await this.readBoundedMarkdownFile(file);
-				if (!read.ok) {
-					new import_obsidian5.Notice(`Could not import mindmap: ${read.reason}`);
-					return;
-				}
-				const isFreeMind = this.detectFreeMindFormat(read.value);
-				if (isFreeMind) {
-					await this.importFreeMindIntoCanvas(canvas, read.value, file.name);
-				} else {
-					await this.importMarkdownIntoCanvas(canvas, read.value, file.name);
-				}
-			}, 'import mindmap file');
+			const files = Array.from(input.files || []);
+			if (files.length > 0) onFiles(files);
 		};
 		input.addEventListener('change', handler);
 		input.click();
+	}
+	/** Pick a Markdown or FreeMind file and read it within the import budget. */
+	pickMindMapFile(onText) {
+		this.pickLocalFiles({ accept: MIND_MAP_FILE_ACCEPT }, ([file]) => {
+			this.runAsync(async () => {
+				const read = await this.readBoundedMarkdownFile(file);
+				if (!read.ok) {
+					new import_obsidian5.Notice(`Could not import mind map: ${read.reason}`);
+					return;
+				}
+				await onText(read.value, file.name);
+			}, 'import mind map file');
+		});
+	}
+	importMindMapFileIntoCanvas(canvas) {
+		if (!canvas) return;
+		this.pickMindMapFile((text, name) => this.importMindMapIntoCanvas(canvas, text, name));
 	}
 	detectFreeMindFormat(text) {
 		const trimmed = String(text || '').trim();
 		return trimmed.startsWith('<map') || /<map\s+version=/i.test(trimmed);
 	}
-	async importMarkdownIntoCanvas(
-		canvas,
-		markdown,
-		sourceName = 'pasted Markdown',
-		parentNode = null
-	) {
-		if (new TextEncoder().encode(String(markdown || '')).byteLength >
-			MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes) {
-			new import_obsidian5.Notice('Could not import Markdown: file-byte-budget');
-			return { ok: false, reason: 'file-byte-budget' };
+	/**
+	 * The single seam that turns imported text into positioned Canvas data.
+	 * The format is detected here and nowhere else; both formats share the
+	 * same layout settings and byte budget, and report their root topics.
+	 */
+	decodeMindMapText(text) {
+		const source = String(text || '');
+		if (this.detectFreeMindFormat(source)) {
+			const decoded = decodeFreeMind(source, {
+				budgets: DEFAULT_FREEMIND_BUDGETS,
+				...this.markdownLayoutOptions()
+			});
+			if (!decoded.ok) return { ...decoded, format: 'FreeMind' };
+			const { nodes, edges, rootIds } = decoded.value;
+			return { ok: true, format: 'FreeMind', value: { nodes, edges, rootIds } };
 		}
-		const decoded = this.layoutMarkdownDocument(markdown, {
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			maxNodeHeight: this.settings.maxNodeHeight,
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap
-		});
+		if (new TextEncoder().encode(source).byteLength >
+			MarkdownMindMapCodec.DEFAULT_MARKDOWN_BUDGETS.maxFileBytes)
+			return { ok: false, reason: 'file-byte-budget', format: 'Markdown' };
+		return { ...this.layoutMarkdownDocument(source), format: 'Markdown' };
+	}
+	reportMindMapDecodeFailure(decoded) {
+		const detail = decoded.reason === FREEMIND_REASON.EXTERNAL_ENTITY
+			? 'external entities are not allowed'
+			: decoded.reason;
+		new import_obsidian5.Notice(`Could not import ${decoded.format || 'mind map'}: ${detail}`);
+	}
+	async importMindMapIntoCanvas(canvas, text, sourceName = 'pasted text', parentNode = null) {
+		const decoded = this.decodeMindMapText(text);
 		if (!decoded.ok) {
-			new import_obsidian5.Notice(`Could not import Markdown: ${decoded.reason}`);
-			return;
+			this.reportMindMapDecodeFailure(decoded);
+			return { ok: false, reason: decoded.reason };
 		}
+		return this.importDecodedMindMap(canvas, decoded, sourceName, parentNode);
+	}
+	/** Place decoded topics into a live Canvas, rolling back on any failure. */
+	async importDecodedMindMap(canvas, decoded, sourceName, parentNode = null) {
 		const imported = decoded.value;
+		const isMarkdown = decoded.format === 'Markdown';
 		const idMap = new Map();
 		const reservedIds = new Set(canvas.nodes.keys());
 		for (const node of imported.nodes) {
@@ -6307,17 +6277,18 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 		const canvasPath =
 			canvas.view && canvas.view.file ? canvas.view.file.path : '';
-		imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
-			imported.nodes,
-			canvasPath
-		);
+		if (isMarkdown)
+			imported.nodes = MarkdownMindMapCodec.convertMarkdownAnchorsToCardLinks(
+				imported.nodes,
+				canvasPath
+			);
 		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
 		try {
 			const currentData = canvas.getData();
 		if (currentData.mindmap !== true) {
 			currentData.mindmap = true;
 		}
-		if (imported.frontmatter && !parentNode)
+		if (isMarkdown && imported.frontmatter && !parentNode)
 			currentData.mindmapMarkdownFrontmatter = imported.frontmatter;
 		canvas.setData(currentData);
 		canvas.importData({ nodes: imported.nodes, edges: imported.edges });
@@ -6360,6 +6331,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				if (!edge) throw new Error('Canvas did not create an imported-root edge');
 			}
 		}
+		for (const node of importedNodes) this.upgradeLinkTopic(canvas, node);
 		this.markMarkdownOrderDirty(canvas);
 		if (this.isAutoAdjustCanvas(canvas)) {
 			this.resizeNodesWhenRendered(
@@ -6409,127 +6381,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				canvas.requestSave?.();
 				await flushCanvasView(canvas, this.app.vault);
 			} catch (_) {}
-			new import_obsidian5.Notice('Could not import the Markdown hierarchy');
+			new import_obsidian5.Notice(`Could not import the ${decoded.format} hierarchy`);
 			return { ok: false, reason: LINK_REASON.FAILED, error };
-		}
-	}
-	async importFreeMindIntoCanvas(
-		canvas,
-		xml,
-		sourceName = 'pasted FreeMind',
-		parentNode = null
-	) {
-		if (new TextEncoder().encode(String(xml || '')).byteLength >
-			DEFAULT_FREEMIND_BUDGETS.maxFileBytes) {
-			new import_obsidian5.Notice('Could not import FreeMind: file-byte-budget');
-			return { ok: false, reason: 'file-byte-budget' };
-		}
-		const decoded = decodeFreeMind(xml, {
-			budgets: DEFAULT_FREEMIND_BUDGETS,
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			maxNodeHeight: this.settings.maxNodeHeight,
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap
-		});
-		if (!decoded.ok) {
-			new import_obsidian5.Notice(`Could not import FreeMind: ${decoded.reason}`);
-			return;
-		}
-		const { roots, nodeCount, maxDepth, ...canvasData } = decoded.value;
-		const idMap = new Map();
-		const reservedIds = new Set(canvas.nodes.keys());
-		for (const node of canvasData.nodes) {
-			let id = node.id;
-			while (reservedIds.has(id)) id = genId();
-			idMap.set(node.id, id);
-			reservedIds.add(id);
-			node.id = id;
-		}
-		for (const edge of canvasData.edges) {
-			edge.fromNode = idMap.get(edge.fromNode) || edge.fromNode;
-			edge.toNode = idMap.get(edge.toNode) || edge.toNode;
-			while (canvas.edges.has(edge.id)) edge.id = genId();
-		}
-		const groupIds = getGroupIds(canvas);
-		const existing = Array.from(canvas.nodes.values()).filter(
-			(node) => !groupIds.has(node.id)
-		);
-		let localMinX = Infinity;
-		let localMinY = Infinity;
-		for (const node of canvasData.nodes) {
-			localMinX = Math.min(localMinX, Number(node.x) || 0);
-			localMinY = Math.min(localMinY, Number(node.y) || 0);
-		}
-		if (!Number.isFinite(localMinX) || !Number.isFinite(localMinY)) {
-			new import_obsidian5.Notice('Could not import FreeMind: invalid-geometry');
-			return;
-		}
-		const offsetX = existing.length > 0
-			? Math.max(...existing.map((n) => Number(n.x) || 0)) + 400 - localMinX
-			: -localMinX;
-		const offsetY = existing.length > 0
-			? Math.max(...existing.map((n) => Number(n.y) || 0)) + 400 - localMinY
-			: -localMinY;
-		for (const node of canvasData.nodes) {
-			node.x += offsetX;
-			node.y += offsetY;
-		}
-		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
-		try {
-			const currentData = canvas.getData();
-			if (currentData.mindmap !== true) {
-				currentData.mindmap = true;
-			}
-			canvas.setData(currentData);
-			canvas.importData({ nodes: canvasData.nodes, edges: canvasData.edges });
-			this.canvasApi.invalidateEdgeIndex();
-			const importedNodes = canvasData.nodes
-				.map((data) => canvas.nodes.get(data.id))
-				.filter(Boolean);
-			if (importedNodes.length !== canvasData.nodes.length)
-				throw new Error('Canvas did not materialize every imported node');
-			const importedEdges = canvasData.edges
-				.map((data) => canvas.edges.get(data.id))
-				.filter(Boolean);
-			if (importedEdges.length !== canvasData.edges.length)
-				throw new Error('Canvas did not materialize every imported edge');
-			if (parentNode) {
-				for (const node of importedNodes) {
-					const edge = this.canvasApi.createEdge(
-						canvas,
-						parentNode,
-						node,
-						'right',
-						'left',
-						parentNode.color || void 0
-					);
-					if (!edge) throw new Error('Canvas did not create an imported-root edge');
-				}
-			}
-			if (this.isAutoAdjustCanvas(canvas)) {
-				this.layoutEngine.layout(canvas);
-			} else {
-				for (const node of importedNodes) {
-					this.layoutEngine.layoutChildren(canvas, node.id);
-				}
-			}
-			if (this.settings.autoColor) this.branchColors.applyColors(canvas);
-			this.updateGroupBounds(canvas);
-			canvas.requestSave();
-			this.refreshOutline(canvas);
-			new import_obsidian5.Notice(
-				`Imported ${canvasData.nodes.length} topic${canvasData.nodes.length === 1 ? '' : 's'} from ${sourceName}`
-			);
-			return { ok: true, imported: canvasData.nodes.length };
-		} catch (error) {
-			try {
-				canvas.setData(beforeData);
-				this.canvasApi.invalidateEdgeIndex();
-				canvas.requestSave?.();
-			} catch (_) {}
-			new import_obsidian5.Notice('Could not import the FreeMind hierarchy');
-			return { ok: false, reason: 'import-failed', error };
 		}
 	}
 	updateNodeTypeAttributes(canvas) {
@@ -6581,6 +6434,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				}
 				ancestor = ancestor.parentElement;
 			}
+			if (type === 'text') this.decorateLinkTopic(shell, readLinkPreview(nodeData), node);
 			const isRootTopic =
 				type === 'text' &&
 				(graph?.incomingEdgesOf(node)?.length || 0) === 0;
@@ -6719,7 +6573,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		if (!wrapper) return () => {};
 		let hoveredNode = null;
 		const supports = (event) =>
-			hasSupportedDrop(event.dataTransfer);
+			hasSupportedDrop(event.dataTransfer) ||
+			this.draggedVaultFiles().length > 0;
 
 		const clearHover = () => {
 			if (hoveredNode && hoveredNode.nodeEl) {
@@ -6776,6 +6631,11 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const groupIds = getGroupIds(canvas);
 				const topic = target && !groupIds.has(target.id) ? target : null;
 				const position = canvas.posFromEvt(event);
+				const vaultFiles = this.draggedVaultFiles();
+				if (vaultFiles.length > 0) {
+					await this.addDroppedVaultFiles(canvas, vaultFiles, position, topic);
+					return;
+				}
 				const files = Array.from(event.dataTransfer?.files || []);
 				if (files.length > 0) {
 					await this.addDroppedFiles(canvas, files, position, topic);
@@ -6839,22 +6699,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				isTopicNode: (node) =>
 					nodeIsConvertibleTopic(canvas, node) ||
 					!!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY],
-				onDoubleTap: (node) => {
-					if (!canvasNodeUnknownData(node)[TOMINMAP_TITLE_ONLY]) return false;
-					let file = this.app.vault.getAbstractFileByPath(
-						canvasNodeFilePath(node)
-					);
-					if (
-						canvasNodeUnknownData(node)[TOMINMAP_CARD_KIND] === 'nested-map' &&
-						typeof this.findMostRecentNestedMapForNode === 'function'
-					) {
-						const mostRecent = this.findMostRecentNestedMapForNode(canvas, node);
-						if (mostRecent) file = mostRecent;
-					}
-					if (!(file instanceof import_obsidian5.TFile)) return false;
-					void this.app.workspace.getLeaf(false).openFile(file);
-					return true;
-				},
+				onDoubleTap: (node) => this.activateTopicCard(canvas, node),
 				getNodeAtEvent: (event) => findNodeFromEvent(canvas, event),
 				buildMenuItems: (menu, node) => {
 					this.app.workspace.trigger('canvas:node-menu', menu, node);
@@ -8011,13 +7856,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		}
 	}
 	openMediaFilePicker(canvas) {
-		const input = document.createElement('input');
-		input.type = 'file';
-		input.multiple = true;
-		const handler = () => {
-			input.removeEventListener('change', handler);
-			const files = Array.from(input.files || []);
-			if (files.length === 0) return;
+		this.pickLocalFiles({ multiple: true }, (files) => {
 			const selected = this.canvasApi.getSelectedNode(canvas);
 			const topic =
 				selected &&
@@ -8032,9 +7871,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					}
 				: this.canvasViewportCenter(canvas);
 			this.runAsync(() => this.addDroppedFiles(canvas, files, position, topic), 'add dropped files');
-		};
-		input.addEventListener('change', handler);
-		input.click();
+		});
 	}
 	async addDroppedFiles(canvas, files, position, topic = null) {
 		if (!this.isMindmapCanvas(canvas)) return { ok: false, reason: LINK_REASON.UNOWNED_LINK };
@@ -8167,11 +8004,24 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			new import_obsidian5.Notice(`Could not resolve the dropped vault file: ${url}`);
 			return { ok: false, reason: LINK_REASON.MISSING_TARGET };
 		}
+		if (vaultFile && this.isLinkedTopicFile(vaultFile))
+			return this.addDroppedVaultFiles(canvas, [vaultFile], position, topic);
 		let id = genId();
 		while (canvas.nodes.has(id)) id = genId();
 		const startX = topic ? topic.x + topic.width + this.settings.horizontalGap : Number(position?.x) || 0;
 		const startY = topic ? topic.y : Number(position?.y) || 0;
-		const nodeSpec = vaultFile
+		const webUrl = vaultFile ? '' : safeHttpUrl(url);
+		const nodeSpec = webUrl
+			? {
+					id,
+					type: 'text',
+					text: webUrl,
+					x: startX,
+					y: startY,
+					width: this.settings.defaultNodeWidth,
+					height: this.settings.defaultNodeHeight
+				}
+			: vaultFile
 			? createFileNodeSpec(
 					vaultFile.path,
 					vaultFile.extension ? `application/${vaultFile.extension}` : '',
@@ -8197,6 +8047,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			} else {
 				this.canvasApi.selectForNavigation(canvas, node, this.settings.navigationZoomPadding);
 			}
+			if (webUrl) this.upgradeLinkTopic(canvas, node);
 			canvas.requestSave();
 			await flushCanvasView(canvas, this.app.vault);
 			new import_obsidian5.Notice('Added link to the mind map');
@@ -8207,11 +8058,12 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			return { ok: false, reason: LINK_REASON.FAILED, error };
 		}
 	}
-	connectTopics(canvas, parent, child) {
-		if (!parent || !child || parent === child) return;
+	/** Create the parent→child edge when it keeps the map a tree. */
+	attachChildEdge(canvas, parent, child) {
+		if (!parent || !child || parent === child) return null;
 		if (this.canvasApi.getParentNode(canvas, child)) {
 			new import_obsidian5.Notice('That topic already has a parent');
-			return;
+			return null;
 		}
 		if (
 			this.collectSubtreeNodes(canvas, child).some(
@@ -8219,13 +8071,13 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			)
 		) {
 			new import_obsidian5.Notice('That connection would create a loop');
-			return;
+			return null;
 		}
 		const direction =
 			child.x + child.width / 2 < parent.x + parent.width / 2
 				? 'left'
 				: 'right';
-		this.canvasApi.createEdge(
+		return this.canvasApi.createEdge(
 			canvas,
 			parent,
 			child,
@@ -8233,6 +8085,9 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			direction === 'right' ? 'left' : 'right',
 			parent.color || void 0
 		);
+	}
+	connectTopics(canvas, parent, child) {
+		if (!this.attachChildEdge(canvas, parent, child)) return;
 		if (this.isMindmapCanvas(canvas))
 			this.layoutEngine.layoutChildren(canvas, parent.id);
 		if (this.settings.autoColor && this.isMindmapCanvas(canvas))
@@ -8244,6 +8099,458 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			child,
 			this.settings.navigationZoomPadding
 		);
+	}
+	applyLinkTopicSize(node, preview) {
+		const size = linkCardSize(preview);
+		if (
+			Math.abs((Number(node.width) || 0) - size.width) < 1 &&
+			Math.abs((Number(node.height) || 0) - size.height) < 1
+		)
+			return false;
+		if (typeof node.moveAndResize === 'function')
+			node.moveAndResize({ x: node.x, y: node.y, width: size.width, height: size.height });
+		else {
+			node.width = size.width;
+			node.height = size.height;
+		}
+		return true;
+	}
+	settleLinkTopic(canvas, node) {
+		const preview = linkPreviewData(node);
+		if (preview) this.applyLinkTopicSize(node, preview);
+		this.updateNodeTypeAttributes(canvas);
+		if (this.isAutoAdjustCanvas(canvas))
+			this.relayoutAffectedBranches(canvas, [node], { preserveRootSides: true });
+		canvas.requestSave();
+	}
+	/**
+	 * A topic whose whole text is one web link becomes a link card: the topic
+	 * keeps `[Title](<url>)` as its Markdown (so export, outline, and sync stay
+	 * readable) and stores the preview record beside it. Returns true when the
+	 * topic is a link card afterwards. `options.link` comes from the editor and
+	 * also revives a topic the user previously switched to plain text.
+	 */
+	upgradeLinkTopic(canvas, node, options = {}) {
+		if (!canvas || !node || !this.isMindmapCanvas(canvas)) return false;
+		if (!canvas.nodes?.has?.(node.id) || !nodeIsConvertibleTopic(canvas, node)) return false;
+		if (canvasNodeUnknownData(node)[LINK_PLAIN_KEY] && !options.link) return false;
+		const current = linkPreviewData(node);
+		const link = options.link || standaloneLink(node.text);
+		if (!link) {
+			if (current) {
+				removeCanvasNodeDataKeys(node, [LINK_PREVIEW_KEY]);
+				this.updateNodeTypeAttributes(canvas);
+			}
+			return false;
+		}
+		const sameUrl = current?.url === link.url;
+		const label = String(link.label || '').trim();
+		// A label equal to the page title we fetched earlier is still automatic.
+		const customTitle = !!label && !(current && !current.customTitle && label === current.title);
+		const keepsPreview = sameUrl && (customTitle || !current.customTitle);
+		const record = {
+			url: link.url,
+			title:
+				label ||
+				(keepsPreview ? current.title : '') ||
+				linkDomain(link.url),
+			description: keepsPreview ? current.description : '',
+			image: keepsPreview ? current.image : '',
+			site: keepsPreview ? current.site : linkDomain(link.url),
+			customTitle,
+			fetched: keepsPreview ? current.fetched : false
+		};
+		const text = linkTopicText(record.title, record.url);
+		if (node.text !== text && typeof node.setText === 'function') node.setText(text);
+		removeCanvasNodeDataKeys(node, [LINK_PLAIN_KEY]);
+		setCanvasNodeUnknownData(node, { [LINK_PREVIEW_KEY]: record });
+		this.settleLinkTopic(canvas, node);
+		if (this.settings.linkPreviews && !record.fetched)
+			this.runAsync(() => this.refreshLinkPreview(canvas, node.id), 'fetch link preview');
+		return true;
+	}
+	async fetchLinkPreview(url, options = {}) {
+		const safeUrl = safeHttpUrl(url);
+		if (!safeUrl || typeof import_obsidian5.requestUrl !== 'function') return null;
+		if (!this.linkPreviewCache) this.linkPreviewCache = new Map();
+		if (options.force) this.linkPreviewCache.delete(safeUrl);
+		if (this.linkPreviewCache.has(safeUrl)) return this.linkPreviewCache.get(safeUrl);
+		const request = (async () => {
+			let timer = null;
+			try {
+				const response = await Promise.race([
+					import_obsidian5.requestUrl({
+						url: safeUrl,
+						method: 'GET',
+						headers: { Accept: 'text/html,application/xhtml+xml' },
+						throw: false
+					}),
+					new Promise((resolve) => {
+						timer = setTimeout(() => resolve(null), 8000);
+					})
+				]);
+				if (!response || response.status < 200 || response.status >= 300) return null;
+				const headers = response.headers || {};
+				const typeKey = Object.keys(headers).find((key) => key.toLowerCase() === 'content-type');
+				if (typeKey && !/html/i.test(String(headers[typeKey]))) return null;
+				return parseLinkPreview(response.text, safeUrl);
+			} catch (_) {
+				return null;
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		})();
+		this.linkPreviewCache.set(safeUrl, request);
+		if (this.linkPreviewCache.size > 200)
+			this.linkPreviewCache.delete(this.linkPreviewCache.keys().next().value);
+		const preview = await request;
+		if (!preview) this.linkPreviewCache.delete(safeUrl);
+		return preview;
+	}
+	async refreshLinkPreview(canvas, nodeId, options = {}) {
+		const before = linkPreviewData(canvas?.nodes?.get(nodeId));
+		if (!before) return false;
+		const preview = await this.fetchLinkPreview(before.url, options);
+		if (this.unloaded) return false;
+		const node = canvas.nodes.get(nodeId);
+		const current = linkPreviewData(node);
+		// The user may have edited or removed the link while the page loaded.
+		if (!current || current.url !== before.url || node.isEditing) return false;
+		if (!preview) {
+			if (options.notify)
+				new import_obsidian5.Notice('Could not load a preview for this link');
+			return false;
+		}
+		const record = {
+			...current,
+			title: current.customTitle ? current.title : preview.title || current.title,
+			description: preview.description,
+			image: preview.image,
+			site: preview.site || current.site,
+			fetched: true
+		};
+		const text = linkTopicText(record.title, record.url);
+		if (node.text !== text && typeof node.setText === 'function') node.setText(text);
+		setCanvasNodeUnknownData(node, { [LINK_PREVIEW_KEY]: record });
+		this.settleLinkTopic(canvas, node);
+		return true;
+	}
+	openLinkEditor(canvas, node) {
+		if (!canvas || !node || !nodeIsConvertibleTopic(canvas, node)) return false;
+		const current = linkPreviewData(node);
+		const typed = current ? null : standaloneLink(node.text);
+		const initial = current
+			? { url: current.url, title: current.title }
+			: typed
+				? { url: typed.url, title: typed.label }
+				: { url: '', title: MindmapActions.topicTitleFromNode(node) };
+		new LinkEditModal(
+			this.app,
+			initial,
+			({ url, title }) => {
+				if (!canvas.nodes.has(node.id)) return;
+				this.upgradeLinkTopic(canvas, node, { link: { url, label: title } });
+				this.canvasApi.selectForNavigation(canvas, node, this.settings.navigationZoomPadding);
+			},
+			current ? () => this.removeTopicLink(canvas, node) : null
+		).open();
+		return true;
+	}
+	openTopicLink(node) {
+		const preview = linkPreviewData(node);
+		if (!preview || typeof window === 'undefined') return false;
+		window.open(preview.url, '_blank', 'noopener');
+		return true;
+	}
+	/** Leave link-card mode: `keepLink` keeps a text link, otherwise only the title remains. */
+	unlinkTopicCard(canvas, node, keepLink) {
+		const current = linkPreviewData(node);
+		if (!current || !canvas.nodes.has(node.id)) return;
+		removeCanvasNodeDataKeys(node, [LINK_PREVIEW_KEY, LINK_PLAIN_KEY]);
+		if (keepLink) setCanvasNodeUnknownData(node, { [LINK_PLAIN_KEY]: true });
+		else if (typeof node.setText === 'function') node.setText(current.title);
+		this.updateNodeTypeAttributes(canvas);
+		this.resizeNodesWhenRendered(canvas, [node], null, { preserveRootSides: true });
+		canvas.requestSave();
+	}
+	removeTopicLink(canvas, node) {
+		this.unlinkTopicCard(canvas, node, false);
+	}
+	showLinkAsText(canvas, node) {
+		this.unlinkTopicCard(canvas, node, true);
+	}
+	addLinkTopicMenuItems(menu, canvas, node) {
+		const preview = linkPreviewData(node);
+		menu.addItem((item) =>
+			item
+				.setTitle(preview ? 'Edit link…' : 'Add link…')
+				.setIcon(preview ? 'pencil' : 'link-2')
+				.onClick(() => this.openLinkEditor(canvas, node))
+		);
+		if (preview) {
+			menu.addItem((item) =>
+				item
+					.setTitle('Open link')
+					.setIcon('external-link')
+					.onClick(() => this.openTopicLink(node))
+			);
+			if (this.settings.linkPreviews)
+				menu.addItem((item) =>
+					item
+						.setTitle('Refresh link preview')
+						.setIcon('refresh-cw')
+						.onClick(() =>
+							this.runAsync(
+								() => this.refreshLinkPreview(canvas, node.id, { force: true, notify: true }),
+								'refresh link preview'
+							)
+						)
+				);
+			menu.addItem((item) =>
+				item
+					.setTitle('Show as text link')
+					.setIcon('type')
+					.onClick(() => this.showLinkAsText(canvas, node))
+			);
+			return;
+		}
+		const plainLink = canvasNodeUnknownData(node)[LINK_PLAIN_KEY]
+			? standaloneLink(node.text)
+			: null;
+		if (plainLink)
+			menu.addItem((item) =>
+				item
+					.setTitle('Show link preview')
+					.setIcon('image')
+					.onClick(() => this.upgradeLinkTopic(canvas, node, { link: plainLink }))
+			);
+	}
+	/**
+	 * Render the preview card over a link topic. The card is rebuilt only when
+	 * its content changes; all page-provided strings go through textContent.
+	 */
+	decorateLinkTopic(shell, preview, node) {
+		// Most topics are not links; skip DOM queries for cards never decorated.
+		if (!preview && !shell?.classList?.contains?.('tomindmap-link-topic')) return;
+		const host =
+			shell?.querySelector?.('.canvas-node-container') || shell || null;
+		shell?.toggleClass?.('tomindmap-link-topic', !!preview);
+		const existing = host?.querySelector?.(':scope > .tomindmap-link-preview') || null;
+		if (!preview || !host) {
+			existing?.remove?.();
+			return;
+		}
+		const image = this.settings.linkPreviews ? preview.image : '';
+		const key = JSON.stringify([preview.url, preview.title, preview.site, image]);
+		if (existing?.getAttribute?.('data-key') === key) return;
+		existing?.remove?.();
+		const doc = host.ownerDocument;
+		if (!doc || typeof doc.createElement !== 'function') return;
+		const card = doc.createElement('div');
+		card.className = 'tomindmap-link-preview';
+		card.setAttribute('data-key', key);
+		if (image) {
+			const thumbnail = doc.createElement('img');
+			thumbnail.className = 'tomindmap-link-preview-image';
+			thumbnail.alt = '';
+			thumbnail.loading = 'lazy';
+			thumbnail.decoding = 'async';
+			thumbnail.referrerPolicy = 'no-referrer';
+			thumbnail.draggable = false;
+			thumbnail.addEventListener('error', () => {
+				thumbnail.remove();
+				card.classList.add('is-imageless');
+			});
+			thumbnail.src = image;
+			card.appendChild(thumbnail);
+		} else {
+			card.classList.add('is-imageless');
+		}
+		const body = doc.createElement('div');
+		body.className = 'tomindmap-link-preview-body';
+		const title = doc.createElement('div');
+		title.className = 'tomindmap-link-preview-title';
+		title.textContent = preview.title;
+		const site = doc.createElement('div');
+		site.className = 'tomindmap-link-preview-site';
+		site.textContent = preview.site;
+		body.append(title, site);
+		const open = doc.createElement('button');
+		open.type = 'button';
+		open.className = 'tomindmap-link-preview-open clickable-icon';
+		open.setAttribute('aria-label', `Open ${preview.site}`);
+		if (typeof import_obsidian5.setIcon === 'function')
+			import_obsidian5.setIcon(open, 'external-link');
+		else open.textContent = '↗';
+		open.addEventListener('click', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.openTopicLink(node);
+		});
+		card.append(body, open);
+		host.appendChild(card);
+	}
+	draggedVaultFiles() {
+		const draggable = this.app.dragManager?.draggable;
+		const files =
+			draggable?.type === 'file'
+				? [draggable.file]
+				: draggable?.type === 'files'
+					? Array.from(draggable.files || [])
+					: [];
+		return files.filter((file) => file instanceof import_obsidian5.TFile);
+	}
+	/** Notes and canvases dropped from the vault become linked topic cards. */
+	isLinkedTopicFile(file) {
+		return file instanceof import_obsidian5.TFile && (file.extension === 'md' || file.extension === 'canvas');
+	}
+	async readCanvasFileData(file) {
+		try {
+			const open = this.getOpenCanvasByPath(file.path);
+			if (open) return open.getData();
+			return JSON.parse(await this.app.vault.cachedRead(file));
+		} catch (_) {
+			return null;
+		}
+	}
+	/**
+	 * Give a dropped mind map the same parent link a converted branch gets, so
+	 * "Go to parent mind map" and title syncing work. A map that already has a
+	 * parent keeps it; it is still linked from here.
+	 */
+	/**
+	 * Mint the ownership record and the matching parent link a nested mind map
+	 * stores. The record is not saved here; callers upsert it once the child
+	 * file holds the link.
+	 */
+	issueParentLink(childPath, parentPath, nodeId, syncId = createSyncId()) {
+		if (!syncId) return { ok: false, reason: 'sync-id-unavailable' };
+		const issued = this.markdownOwnership.issueRecord({
+			canvasPath: childPath,
+			kind: 'parent',
+			targetPath: parentPath,
+			syncId,
+			nodeId
+		});
+		if (!issued.ok) return issued;
+		return {
+			ok: true,
+			record: issued.record,
+			link: {
+				canvas: parentPath,
+				nodeId,
+				syncId: issued.record.syncId,
+				proof: issued.record.proof,
+				ownership: { source: 'plugin-data' }
+			}
+		};
+	}
+	async adoptDroppedNestedMap(canvas, card, file, data) {
+		if (data?.[TOMINMAP_PARENT]) return false;
+		const issued = this.issueParentLink(file.path, canvasPathFor(canvas), card.id);
+		if (!issued.ok) return false;
+		const parentLink = issued.link;
+		const openChild = this.getOpenCanvasByPath(file.path);
+		if (openChild) {
+			const childData = openChild.getData();
+			if (childData[TOMINMAP_PARENT]) return false;
+			openChild.setData({ ...childData, [TOMINMAP_PARENT]: parentLink });
+			openChild.requestSave?.();
+			await flushCanvasView(openChild, this.app.vault);
+		} else {
+			let adopted = false;
+			await this.app.vault.process(file, (raw) => {
+				const childData = JSON.parse(raw);
+				if (childData[TOMINMAP_PARENT]) return raw;
+				childData[TOMINMAP_PARENT] = parentLink;
+				adopted = true;
+				return JSON.stringify(childData, null, '\t');
+			});
+			if (!adopted) return false;
+		}
+		const upserted = this.markdownOwnership.upsert(issued.record);
+		if (!upserted.ok) return false;
+		setCanvasNodeUnknownData(card, { [CARD_SYNC_KEY]: issued.record.syncId });
+		await this.persistPluginData();
+		this.verifiedParentLinks.set(file.path, parentLink);
+		return true;
+	}
+	/**
+	 * Vault notes and mind maps dropped onto a mind map become the same
+	 * title-only linked topics that "convert to file" and "convert to nested
+	 * mind map" create. Media keeps its visual preview card.
+	 */
+	async addDroppedVaultFiles(canvas, files, position, topic = null) {
+		if (!this.isMindmapCanvas(canvas)) return { ok: false };
+		const ownPath = canvasPathFor(canvas);
+		const media = [];
+		const cards = [];
+		const beforeData = JSON.parse(JSON.stringify(canvas.getData()));
+		const gap = this.settings.verticalGap;
+		try {
+			for (const file of files) {
+				if (!this.isLinkedTopicFile(file)) {
+					media.push(file);
+					continue;
+				}
+				if (file.path === ownPath) {
+					new import_obsidian5.Notice('A mind map cannot link to itself');
+					continue;
+				}
+				const data = file.extension === 'canvas' ? await this.readCanvasFileData(file) : null;
+				const kind = data?.mindmap === true ? 'nested-map' : 'note';
+				const title = file.basename || titleOnlyCardTitle({ file: file.path });
+				const estimate = this.liveSizing?.estimate?.(title) || {};
+				const width = Math.round(Number(estimate.width) || this.settings.defaultNodeWidth);
+				const height = this.settings.defaultNodeHeight;
+				const offset = cards.length * (height + gap);
+				const card = this.createTitleOnlyFileCard(
+					canvas,
+					file,
+					{
+						x: (Number(position?.x) || 0) - width / 2,
+						y: (Number(position?.y) || 0) - height / 2 + offset,
+						width,
+						height
+					},
+					kind,
+					null
+				);
+				cards.push(card);
+				if (kind === 'nested-map')
+					await this.adoptDroppedNestedMap(canvas, card, file, data);
+			}
+			this.canvasApi.invalidateEdgeIndex();
+			if (topic) {
+				for (const card of cards) this.attachChildEdge(canvas, topic, card);
+			} else if (cards.length > 0) {
+				this.attachNearbyOrphanMedia(canvas, cards.map((card) => card.id));
+			}
+			this.applyStructuralMutation(canvas, cards, {
+				layout: this.isAutoAdjustCanvas(canvas)
+			});
+			await flushCanvasView(canvas, this.app.vault);
+			this.refreshOutline(canvas);
+			const last = cards[cards.length - 1];
+			if (last)
+				this.canvasApi.selectForNavigation(canvas, last, this.settings.navigationZoomPadding);
+		} catch (error) {
+			try {
+				canvas.setData(beforeData);
+				canvas.requestSave?.();
+			} catch (_) {}
+			console.error('ToMindMap: linking dropped files failed', error);
+			new import_obsidian5.Notice('Could not link the dropped files');
+			return { ok: false, error };
+		}
+		for (const file of media) await this.addDroppedUrl(canvas, file.path, position, topic);
+		if (cards.length > 0)
+			new import_obsidian5.Notice(
+				cards.length === 1
+					? `Linked “${titleOnlyCardTitle(cards[0])}”`
+					: `Linked ${cards.length} files`
+			);
+		return { ok: true, cards };
 	}
 	mediaTargetExists(target, sourcePath) {
 		const resource = decodeMediaResource(target, sourcePath);
@@ -9000,7 +9307,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				const fs = require('fs');
 				const path = require('path');
 				const os = require('os');
-				fsystem = {
+				filesystem = {
 					fs,
 					path,
 					directory: path.join(os.homedir(), 'Downloads')
@@ -9028,65 +9335,41 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	deliverExport(request) {
 		return createExportDelivery(this.exportDeliveryCapabilities()).deliver(request);
 	}
-	/**
-	 * Import a FreeMind .mm file and create a .canvas file.
-	 * @param folderPath Optional target folder; defaults to vault root.
-	 */
-	async importFreeMindFile(folderPath, file = null) {
-		if (!file) {
-			const input = document.createElement('input');
-			input.type = 'file';
-			input.accept = '.mm';
-			const handler = () => {
-				var _a;
-				input.removeEventListener('change', handler);
-				const selectedFile = (_a = input.files) == null ? void 0 : _a[0];
-				if (!selectedFile) return;
-				void this.importFreeMindFile(folderPath, selectedFile);
-			};
-			input.addEventListener('change', handler);
-			input.click();
-			return;
+	/** Pick a Markdown or FreeMind file and open it as a new mind map. */
+	createCanvasFromMindMapFile(folderPath = '') {
+		this.pickMindMapFile((text, name) => this.createCanvasFromMindMapText(folderPath, name, text));
+	}
+	async createCanvasFromMindMapText(folderPath, sourceName, text) {
+		const decoded = this.decodeMindMapText(text);
+		if (!decoded.ok) {
+			this.reportMindMapDecodeFailure(decoded);
+			return null;
 		}
-		try {
-			const xml = await file.text();
-			const decoded = decodeFreeMind(xml, {
-				budgets: DEFAULT_FREEMIND_BUDGETS,
-				nodeWidth: this.settings.defaultNodeWidth,
-				nodeHeight: this.settings.defaultNodeHeight,
-				maxNodeHeight: this.settings.maxNodeHeight,
-				horizontalGap: this.settings.horizontalGap,
-			_verticalGap: this.settings.verticalGap
-			});
-			if (!decoded.ok) {
-				const detail = decoded.reason === FREEMIND_REASON.EXTERNAL_ENTITY
-					? 'external entities are not allowed'
-					: decoded.reason;
-				new import_obsidian5.Notice(`Could not import the FreeMind file: ${detail}`);
-				return;
-			}
-			const { roots, nodeCount, maxDepth, ...canvasData } = decoded.value;
-			canvasData.mindmap = true;
-			canvasData.mindmapPendingResize = canvasData.nodes.map((node) => node.id);
-			const baseName = file.name.replace(/\.mm$/i, '') || 'Mind map';
-			const canvasPath = allocateFilePath(
-				folderPath || '',
-				baseName,
-				'canvas',
-				(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
-			);
-			const created = await this.app.vault.create(
-				canvasPath,
-				JSON.stringify(canvasData, null, '\t')
-			);
-			await this.app.workspace.getLeaf(false).openFile(created);
-			new import_obsidian5.Notice(
-				`Imported "${file.name}" as "${created.path}"`
-			);
-		} catch (error) {
-			console.error('ToMindMap: FreeMind import failed', error);
-			new import_obsidian5.Notice('Could not import the FreeMind file');
-		}
+		const { nodes, edges } = decoded.value;
+		const baseName =
+			String(sourceName || '').replace(/\.(mm|md|markdown|txt|xml)$/i, '') || 'Mind map';
+		const canvasPath = allocateFilePath(
+			folderPath || '',
+			baseName,
+			'canvas',
+			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
+		);
+		const created = await this.app.vault.create(
+			canvasPath,
+			JSON.stringify(
+				{
+					nodes,
+					edges,
+					mindmap: true,
+					mindmapPendingResize: nodes.map((node) => node.id)
+				},
+				null,
+				'\t'
+			)
+		);
+		await this.app.workspace.getLeaf(false).openFile(created);
+		new import_obsidian5.Notice(`Imported "${sourceName}" as "${created.path}"`);
+		return created;
 	}
 	isMindmapCanvas(canvas) {
 		try {
@@ -9104,70 +9387,6 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 		} catch (_) {
 			return false;
 		}
-	}
-	importAnyMindMapFile(folderPath) {
-		const input = document.createElement('input');
-		input.type = 'file';
-		input.accept = '.md,.markdown,.mm,.txt,.xml,.csv,text/markdown,text/plain,text/xml,application/xml,text/csv';
-		const handler = () => {
-			var _a;
-			input.removeEventListener('change', handler);
-			const file = (_a = input.files) == null ? void 0 : _a[0];
-			if (!file) return;
-			void (async () => {
-				const read = await this.readBoundedMarkdownFile(file);
-				if (!read.ok) {
-					new import_obsidian5.Notice(`Could not import mindmap: ${read.reason}`);
-					return;
-				}
-				const isFreeMind = this.detectFreeMindFormat(read.value);
-				if (isFreeMind) {
-					await this.importFreeMindFile(folderPath, file);
-				} else {
-					const canvas = this.canvasApi.getActiveCanvas?.() || null;
-					if (canvas) {
-						await this.importMarkdownFile(canvas, read.value, file.name);
-					} else {
-						await this.createCanvasFromMarkdown(folderPath, file, read.value);
-					}
-				}
-			})();
-		};
-		input.addEventListener('change', handler);
-		input.click();
-	}
-	async createCanvasFromMarkdown(folderPath, file, markdown) {
-		const decoded = this.layoutMarkdownDocument(markdown, {
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			maxNodeHeight: this.settings.maxNodeHeight,
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap
-		});
-		if (!decoded.ok) {
-			new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);
-			return;
-		}
-		const { nodes, edges } = decoded.value;
-		const baseName = file.name.replace(/\.(md|markdown|txt)$/i, '') || 'Mind map';
-		const canvasPath = allocateFilePath(
-			folderPath || '',
-			baseName,
-			'canvas',
-			(candidate) => Boolean(this.app.vault.getAbstractFileByPath(candidate))
-		);
-		const canvasData = {
-			nodes,
-			edges,
-			mindmap: true,
-			mindmapPendingResize: nodes.map((node) => node.id)
-		};
-		const created = await this.app.vault.create(
-			canvasPath,
-			JSON.stringify(canvasData, null, '\t')
-		);
-		await this.app.workspace.getLeaf(false).openFile(created);
-		new import_obsidian5.Notice(`Imported "${file.name}" as "${created.path}"`);
 	}
 	isAutoAdjustCanvas(canvas) {
 		return this.isMindmapCanvas(canvas);
@@ -9543,22 +9762,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 	async saveSettings() {
 		this.settings = normalizeSettings(this.settings);
 		await this.persistPluginData();
-		this.layoutEngine = new LayoutEngine({
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap,
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			// Canvas edges update synchronously; animating only the cards makes
-			// the visible graph temporarily disagree with its edge geometry.
-			animate: false
-		});
-		this.nodeOps = new NodeOperations(this.canvasApi, {
-			nodeWidth: this.settings.defaultNodeWidth,
-			nodeHeight: this.settings.defaultNodeHeight,
-			horizontalGap: this.settings.horizontalGap,
-			verticalGap: this.settings.verticalGap,
-			isAutoAdjust: (canvas) => this.isAutoAdjustCanvas(canvas)
-		});
+		this.rebuildLayoutServices();
 		if (this.keyboardHandler) {
 			this.keyboardHandler.nodeOps = this.nodeOps;
 			this.keyboardHandler.layoutEngine = this.layoutEngine;

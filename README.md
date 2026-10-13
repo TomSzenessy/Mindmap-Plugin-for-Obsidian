@@ -20,6 +20,14 @@ On the computer nothing changes: Tab and Enter grow the map, arrows navigate, an
 
 Right-click a text topic to create a title-named file, either **with subtree** or **without subtree**, or move the branch into a separate nested mind map. Generated cards show only their title, open the target on double-click, and remain ordinary Canvas file links so Obsidian can index them. A nested map remembers its immediate parent; editing its main title updates the parent linked card automatically. Right-click its main topic and choose **Go to parent node** to return there. For a generated card, choose **Expand linked content into mind map** to bring its nested Canvas or Markdown hierarchy back into the current map; if its target is missing, choose **Convert to normal topic** to restore only its title.
 
+Drag a note or mind map from the file explorer onto a map and it becomes the same kind of linked topic: a title card, not a preview. Drop it on a topic to add it as a child. A dropped mind map that has no parent yet gets this map as its parent, so **Go to parent node** and title syncing work exactly as for a converted branch; a map that already has a parent keeps it. Images, PDFs, and other media keep their visual preview.
+
+## Web links
+
+A topic that is just a web link (typed, pasted, or dragged in from a browser) turns into a compact preview card with the page title, site, and a thumbnail when the page offers one. Links written inside a longer topic show as small link buttons. Press F2, start typing, or double-click a link card to edit its address and title; right-click for **Edit link**, **Open link**, **Refresh link preview**, and **Show as text link**. Right-click any other topic and choose **Add link** to attach a web address while keeping its wording as the title.
+
+To show the title and image, ToMindMap downloads the linked page once through Obsidian, only reading its title and preview metadata. Turn off **Fetch link previews** in settings to make no network requests; link cards then show the site name instead.
+
 The export dialog includes **Include nested maps**. When enabled, linked nested maps are expanded into the exported map and placed in available space so cards do not overlap. **Collapse subtree** hides the full descendant branch and its connecting edges; **Expand subtree** restores it. Collapsed topics have a dashed outline and `＋` marker, nested-map links use a double border and `◈` marker, and file/branch links use a distinct document/link marker. All major actions are available in Obsidian’s **Settings → Hotkeys**; the plugin provides defaults for collapse/expand, file conversion, linked-card expansion, nested-map conversion, parent navigation, relayout, outline, colors, and mode switching.
 
 ## Compatibility

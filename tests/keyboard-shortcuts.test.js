@@ -233,3 +233,66 @@ test("finishEditing synchronizes text from editor view to node", () => {
   handler.finishEditing(canvas, node);
   assert.equal(node.text, "New Topic Title");
 });
+
+test("Tab while editing commits text and reports the edited topic for resizing", () => {
+  const { canvas, handler, node } = editingHarness();
+  const calls = [];
+  const child = { id: "child", setText: () => {} };
+  node.text = "";
+  node.setText = (value) => {
+    node.text = value;
+    calls.push("commit");
+  };
+  handler.getEditorView = () => ({
+    state: {
+      doc: { toString: () => "A much longer topic title" },
+      selection: { main: { from: 0, to: 0 } }
+    }
+  });
+  handler.nodeOps = { addChild: () => child };
+  handler.finishMutation = () => calls.push("layout");
+  handler.canvasApi.selectAndEdit = (_canvas, target) => calls.push(`edit:${target.id}`);
+  handler.onBeforeLeaveNode = () => calls.push("leave");
+  handler.onLeaveEditedNode = (target, edited) => {
+    assert.equal(target, canvas);
+    calls.push(`resize:${edited.id}`);
+  };
+
+  handler.addChild(canvas, node);
+
+  assert.equal(node.text, "A much longer topic title");
+  assert.deepEqual(calls, ["commit", "leave", "layout", "edit:child", "resize:topic"]);
+});
+
+test("Tab on a selected topic that is not being edited does not request a resize", () => {
+  const { canvas, handler, node } = editingHarness();
+  node.isEditing = false;
+  let resized = false;
+  handler.nodeOps = { addChild: () => ({ id: "child" }) };
+  handler.finishMutation = () => {};
+  handler.canvasApi.selectAndEdit = () => {};
+  handler.onLeaveEditedNode = () => {
+    resized = true;
+  };
+
+  handler.addChild(canvas, node);
+
+  assert.equal(resized, false);
+});
+
+test("start editing can be taken over, e.g. by the link editor for link cards", () => {
+  const { canvas, handler, node } = editingHarness();
+  let started = false;
+  node.startEditing = () => { started = true; };
+  canvas.nodes.set(node.id, node);
+  const opened = [];
+  handler.onStartEditing = (target, topic) => {
+    opened.push(topic.id);
+    return true;
+  };
+
+  handler.startEditing(canvas, node, "x");
+
+  assert.deepEqual(opened, ["topic"]);
+  assert.equal(started, false);
+});

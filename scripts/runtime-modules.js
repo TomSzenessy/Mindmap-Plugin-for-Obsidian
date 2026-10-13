@@ -51,6 +51,26 @@ const modules = [
         "mediaNodeSize"
       ]
     },
+    dependencies: ["link-preview"]
+  },
+  {
+    name: "link-preview",
+    source: "lib/link-preview.js",
+    bindings: {
+      named: [
+        "LINK_PREVIEW_KEY",
+        "LINK_PLAIN_KEY",
+        "linkCardSize",
+        "linkDomain",
+        "linkPreviewData",
+        "linkTopicText",
+        "normalizeTypedUrl",
+        "parseLinkPreview",
+        "readLinkPreview",
+        "safeHttpUrl",
+        "standaloneLink"
+      ]
+    },
     dependencies: []
   },
   {
@@ -66,7 +86,7 @@ const modules = [
         "isTextTopicCard"
       ]
     },
-    dependencies: []
+    dependencies: ["link-preview"]
   },
   {
     name: "markdown-order",

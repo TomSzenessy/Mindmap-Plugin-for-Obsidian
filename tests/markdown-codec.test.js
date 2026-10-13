@@ -1457,7 +1457,13 @@ test("plain lines introducing lists become section topics and synthesize central
 test("the codec embeds cleanly through the runtime module compiler", () => {
   const { createArtifactCompiler } = require("../scripts/runtime-modules.js");
   const compiler = createArtifactCompiler([
-    { name: "media-drop", source: "lib/media-drop.js", bindings: { default: "MediaDrop" }, dependencies: [] },
+    {
+      name: "link-preview",
+      source: "lib/link-preview.js",
+      bindings: { named: ["linkDomain"] },
+      dependencies: []
+    },
+    { name: "media-drop", source: "lib/media-drop.js", bindings: { default: "MediaDrop" }, dependencies: ["link-preview"] },
     { name: "markdown-order", source: "lib/markdown-order.js", bindings: { default: "MarkdownOrder" }, dependencies: [] },
     {
       name: "tree-model",
@@ -1475,6 +1481,7 @@ test("the codec embeds cleanly through the runtime module compiler", () => {
   const entry = "var MarkdownMindMapCodec = require('./lib/markdown-codec.js');\n";
   const compiled = compiler.compile(entry);
   assert.ok(!compiled.includes('require("./media-drop.js")'));
+  assert.ok(!compiled.includes('require("./link-preview.js")'));
   assert.ok(!compiled.includes('require("./markdown-order.js")'));
   assert.ok(!compiled.includes('require("./tree-model.js")'));
   const sandbox = {

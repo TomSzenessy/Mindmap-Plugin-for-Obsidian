@@ -284,3 +284,17 @@ test("exportToFreeMind serializes tree forest with positions and escaping", () =
   assert.ok(xml.endsWith('</map>'));
 });
 
+
+test("reports each top-level FreeMind topic as a root id", () => {
+  const xml = [
+    '<map version="1.0.1">',
+    '<node TEXT="First"><node TEXT="Child"><node TEXT="Grandchild"/></node></node>',
+    '<node TEXT="Second"/>',
+    "</map>"
+  ].join("");
+  const result = decodeFreeMind(xml, { DOMParser: FakeDOMParser });
+
+  assert.equal(result.ok, true);
+  const byId = new Map(result.value.nodes.map((node) => [node.id, node.text]));
+  assert.deepEqual(result.value.rootIds.map((id) => byId.get(id)), ["First", "Second"]);
+});

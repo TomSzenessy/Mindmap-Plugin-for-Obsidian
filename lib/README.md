@@ -22,6 +22,7 @@ a runtime record cannot leave a stale hand-maintained inventory:
 - `path-safety` — `lib/path-safety.js`
 - `settings` — `lib/settings.js`
 - `media-drop` — `lib/media-drop.js`
+- `link-preview` — `lib/link-preview.js`
 - `live-sizing` — `lib/live-sizing.js`
 - `markdown-order` — `lib/markdown-order.js`
 - `clipboard-markdown` — `lib/clipboard-markdown.js`

@@ -825,7 +825,7 @@ test("Markdown import rolls back pasted nodes and edges when a root connection f
     value: { nodes: [{ id: "imported", text: "Imported", x: 0, y: 0, width: 100, height: 30 }], edges: [], rootIds: ["imported"] }
   });
 
-  const result = await plugin.importMarkdownIntoCanvas(canvas, "# Imported", "clipboard", parentNode);
+  const result = await plugin.importMindMapIntoCanvas(canvas, "# Imported", "clipboard", parentNode);
 
   assert.equal(result.ok, false);
   assert.equal(nodes.has("imported"), false);
@@ -1520,3 +1520,272 @@ test("patchCanvasPrototype hooks setData and syncs collapse state without requir
 });
 
 
+
+test("switching to a mind map Canvas wraps its methods and restores them on unwrap", () => {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeTFile } = loadSource();
+  const document = new FakeDocument();
+  const canvas = mindmapCanvas(document);
+  const removedNodes = [];
+  const originals = {
+    removeNode(node) { removedNodes.push(node); },
+    removeEdge() {},
+    importData() {},
+    selectOnly() {},
+    deselectAll() {},
+    createGroupNode() { return null; },
+    undo() {},
+    redo() {}
+  };
+  Object.assign(canvas, originals);
+  const root = { id: "root", x: 0, y: 0, width: 300, height: 60, text: "Root" };
+  canvas.nodes.set(root.id, root);
+  canvas.getData().nodes.push({ id: root.id, type: "text", text: "Root" });
+  const app = {
+    vault: {
+      getAbstractFileByPath(filePath) {
+        return filePath.endsWith(".canvas") ? new FakeTFile(filePath) : null;
+      }
+    },
+    workspace: {
+      getLeavesOfType() { return []; },
+      getActiveViewOfType() { return null; }
+    }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.settings = {
+    ...plugin.settings,
+    autoColor: false,
+    touchControls: "off",
+    defaultNodeWidth: 300,
+    defaultNodeHeight: 60,
+    horizontalGap: 80,
+    verticalGap: 20
+  };
+  plugin.canvasApi = {
+    getActiveCanvas: () => canvas,
+    getAnyCanvas: () => canvas,
+    invalidateEdgeIndex() {}
+  };
+  plugin.layoutEngine = { layout() {}, updateEdgeSides() {} };
+  plugin.keyboardHandler = { attachToCanvas: () => () => {} };
+  plugin.patchCanvasPrototype = () => {};
+  plugin.scheduleCollapsedSync = () => {};
+  // Gesture and DOM registrars are covered by their own tests; this one
+  // exercises the method-wrapping that every Canvas session depends on.
+  const noop = () => () => {};
+  plugin.navigation = { registerClickHandler: noop };
+  plugin.registerMediaDropHandler = noop;
+  plugin.registerNodeDragReparentHandler = noop;
+  plugin.injectToggleButton = () => {};
+  plugin.syncCanvasBindings = () => {};
+  plugin.captureCanvasDecorations = () => {};
+  plugin.trackedRaf = () => {};
+
+  plugin.onLeafChange({
+    view: { getViewType: () => "canvas", canvas }
+  });
+
+  assert.equal(plugin.interceptedCanvas, canvas);
+  assert.notEqual(canvas.removeNode, originals.removeNode);
+  const node = { id: "topic" };
+  canvas.removeNode(node);
+  assert.deepEqual(removedNodes, [node]);
+
+  plugin.unwrapCanvasMethods();
+  assert.equal(typeof canvas.removeNode, "function");
+});
+
+function linkTopicHarness(text) {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeTFile } = loadSource();
+  const document = new FakeDocument();
+  const canvas = mindmapCanvas(document);
+  const node = {
+    id: "topic",
+    x: 0,
+    y: 0,
+    width: 300,
+    height: 60,
+    text,
+    data: {},
+    getData() { return { ...this.data, id: this.id, type: "text", text: this.text }; },
+    setData(next) {
+      const { id, type, text: nextText, ...rest } = next;
+      this.data = rest;
+      if (typeof nextText === "string") this.text = nextText;
+    },
+    setText(next) { this.text = next; },
+    moveAndResize({ width, height }) { this.width = width; this.height = height; }
+  };
+  canvas.nodes.set(node.id, node);
+  canvas.getData().nodes.push({ id: node.id, type: "text", text });
+  const plugin = new CanvasMindMapPlugin({ vault: {}, workspace: {} }, { id: "tomindmap" });
+  plugin.settings = { ...plugin.settings, linkPreviews: false };
+  plugin.canvasApi = { invalidateEdgeIndex() {}, selectForNavigation() {} };
+  plugin.layoutEngine = { layout() {}, layoutChildren() {} };
+  plugin.updateNodeTypeAttributes = () => {};
+  plugin.relayoutAffectedBranches = () => {};
+  const fetches = [];
+  plugin.runAsync = (callback, label) => fetches.push(label);
+  return { plugin, canvas, node, fetches, FakeTFile };
+}
+
+test("a topic that is only a web link becomes a fixed-size link card", () => {
+  const { plugin, canvas, node, fetches } = linkTopicHarness("https://www.example.com/post");
+
+  assert.equal(plugin.upgradeLinkTopic(canvas, node), true);
+
+  assert.equal(node.text, "[example.com](<https://www.example.com/post>)");
+  assert.equal(node.data.tomindmapLink.url, "https://www.example.com/post");
+  assert.equal(node.data.tomindmapLink.customTitle, false);
+  assert.deepEqual([node.width, node.height], [340, 64]);
+  assert.deepEqual(fetches, [], "previews are not fetched when the setting is off");
+});
+
+test("link cards keep a typed title and fetch a preview when allowed", async () => {
+  const { plugin, canvas, node, fetches } = linkTopicHarness("[My reading](https://example.com/a)");
+  plugin.settings.linkPreviews = true;
+
+  plugin.upgradeLinkTopic(canvas, node);
+  assert.deepEqual(fetches, ["fetch link preview"]);
+  assert.equal(node.data.tomindmapLink.customTitle, true);
+
+  plugin.fetchLinkPreview = async () => ({
+    title: "Page title",
+    description: "About",
+    image: "https://example.com/cover.png",
+    site: "Example"
+  });
+  assert.equal(await plugin.refreshLinkPreview(canvas, node.id), true);
+  assert.equal(node.text, "[My reading](<https://example.com/a>)");
+  assert.equal(node.data.tomindmapLink.image, "https://example.com/cover.png");
+  assert.equal(node.data.tomindmapLink.fetched, true);
+  assert.deepEqual([node.width, node.height], [340, 96]);
+});
+
+test("a late preview never overwrites a link the user already changed", async () => {
+  const { plugin, canvas, node } = linkTopicHarness("https://example.com/old");
+  plugin.upgradeLinkTopic(canvas, node);
+  let finish;
+  plugin.fetchLinkPreview = () => new Promise((resolve) => { finish = resolve; });
+  const pending = plugin.refreshLinkPreview(canvas, node.id);
+  plugin.upgradeLinkTopic(canvas, node, { link: { url: "https://example.com/new", label: "" } });
+  finish({ title: "Old page", description: "", image: "", site: "example.com" });
+
+  assert.equal(await pending, false);
+  assert.equal(node.data.tomindmapLink.url, "https://example.com/new");
+  assert.equal(node.text, "[example.com](<https://example.com/new>)");
+});
+
+test("text links stay plain until the user asks for a preview again", () => {
+  const { plugin, canvas, node } = linkTopicHarness("https://example.com");
+  plugin.resizeNodesWhenRendered = () => {};
+  plugin.upgradeLinkTopic(canvas, node);
+  plugin.showLinkAsText(canvas, node);
+
+  assert.equal(node.data.tomindmapLink, undefined);
+  assert.equal(plugin.upgradeLinkTopic(canvas, node), false);
+  assert.equal(
+    plugin.upgradeLinkTopic(canvas, node, { link: { url: "https://example.com/", label: "" } }),
+    true
+  );
+  assert.equal(node.data.tomindmapLinkPlain, undefined);
+});
+
+test("editing a link card into ordinary words turns it back into a topic", () => {
+  const { plugin, canvas, node } = linkTopicHarness("https://example.com");
+  plugin.upgradeLinkTopic(canvas, node);
+  node.text = "Just a note now";
+
+  assert.equal(plugin.upgradeLinkTopic(canvas, node), false);
+  assert.equal(node.data.tomindmapLink, undefined);
+});
+
+test("dropping vault notes and mind maps links them like converted topics", async () => {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeTFile } = loadSource();
+  const document = new FakeDocument();
+  const canvas = mindmapCanvas(document);
+  canvas.view.file = new FakeTFile("Maps/Main.canvas");
+  const note = new FakeTFile("Notes/Reading list.md");
+  const map = new FakeTFile("Maps/Chapter.canvas");
+  let mapContent = JSON.stringify({ mindmap: true, nodes: [], edges: [] });
+  const created = [];
+  const app = {
+    vault: {
+      cachedRead: async (file) => (file === map ? mapContent : ""),
+      process: async (file, transform) => {
+        if (file === map) mapContent = transform(mapContent);
+      }
+    },
+    workspace: { getLeavesOfType: () => [] }
+  };
+  const plugin = new CanvasMindMapPlugin(app, { id: "tomindmap" });
+  plugin.saveData = async () => {};
+  plugin.markdownOwnership = createMarkdownSyncOwnership();
+  plugin.canvasApi = {
+    createFileNode(target, file, x, y, width, height) {
+      const card = {
+        id: `card-${created.length}`,
+        file,
+        x,
+        y,
+        width,
+        height,
+        data: {},
+        getData() { return { ...this.data }; },
+        setData(next) { this.data = next; }
+      };
+      created.push(card);
+      target.nodes.set(card.id, card);
+      return card;
+    },
+    invalidateEdgeIndex() {},
+    selectForNavigation() {}
+  };
+  const connected = [];
+  plugin.attachChildEdge = (target, parent, child) => {
+    connected.push([parent.id, child.id]);
+    return {};
+  };
+  let mutations = 0;
+  plugin.applyStructuralMutation = (target, changed) => {
+    mutations += 1;
+    assert.equal(changed.length, 2);
+  };
+  plugin.refreshOutline = () => {};
+  plugin.settings = { ...plugin.settings, autoColor: false };
+  const topic = { id: "parent-topic" };
+
+  const result = await plugin.addDroppedVaultFiles(canvas, [note, map, canvas.view.file], { x: 0, y: 0 }, topic);
+
+  assert.equal(result.ok, true);
+  assert.equal(created.length, 2, "the map itself is never linked into itself");
+  assert.deepEqual(connected, [["parent-topic", "card-0"], ["parent-topic", "card-1"]]);
+  assert.equal(mutations, 1, "a multi-file drop lays the map out once");
+  assert.equal(created[0].data.tomindmapTitleOnly, true);
+  assert.equal(created[0].data.tomindmapCardKind, "note");
+  assert.equal(created[0].data.tomindmapCardTitle, undefined, "title follows the file name");
+  assert.equal(created[1].data.tomindmapCardKind, "nested-map");
+  const adopted = JSON.parse(mapContent).mindmapParent;
+  assert.equal(adopted.canvas, "Maps/Main.canvas");
+  assert.equal(adopted.nodeId, "card-1");
+  assert.ok(Object.values(created[1].data).includes(adopted.syncId), "card carries the parent sync id");
+  assert.equal(plugin.markdownOwnership.recordsForCanvas(map.path).length, 1);
+});
+
+test("a dropped mind map that already has a parent keeps it", async () => {
+  const { default: CanvasMindMapPlugin, FakeDocument, FakeTFile } = loadSource();
+  const canvas = mindmapCanvas(new FakeDocument());
+  const map = new FakeTFile("Chapter.canvas");
+  const parent = { canvas: "Other.canvas", nodeId: "x", syncId: "s" };
+  let writes = 0;
+  const plugin = new CanvasMindMapPlugin({
+    vault: { process: async () => { writes += 1; } },
+    workspace: { getLeavesOfType: () => [] }
+  }, { id: "tomindmap" });
+  plugin.markdownOwnership = createMarkdownSyncOwnership();
+
+  const adopted = await plugin.adoptDroppedNestedMap(canvas, { id: "card" }, map, { mindmapParent: parent });
+
+  assert.equal(adopted, false);
+  assert.equal(writes, 0);
+});

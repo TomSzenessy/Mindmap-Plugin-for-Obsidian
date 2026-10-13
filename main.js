@@ -59812,7 +59812,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					nodeHeight: this.settings.defaultNodeHeight,
 					maxNodeHeight: this.settings.maxNodeHeight,
 					horizontalGap: this.settings.horizontalGap,
-				.verticalGap: this.settings.verticalGap
+					verticalGap: this.settings.verticalGap
 				});
 				if (!decoded.ok) {
 					new import_obsidian5.Notice(`Could not import mindmap: ${decoded.reason}`);

@@ -415,6 +415,39 @@ test("OutlineView renders semantic native controls and a 12,000-level chain iter
   assert.equal(view.contentEl.querySelector("[aria-label*='Topic 11999']") !== null, true);
 });
 
+test("OutlineView reveals a topic inside a collapsed branch before zooming to it", async () => {
+  const document = new Document();
+  const view = await createOutline(document);
+  const map = canvas(document, [
+    { id: "root", text: "Root", unknownData: { collapsed: true } },
+    { id: "child", text: "Child" }
+  ]);
+  map.edges.set("edge", {
+    id: "edge",
+    from: { node: map.nodes.get("root"), side: "right" },
+    to: { node: map.nodes.get("child"), side: "left" }
+  });
+  map.getData().edges = [{ id: "edge", fromNode: "root", toNode: "child" }];
+  const calls = [];
+  map.zoomToBbox = (bbox) => calls.push(["zoom", bbox]);
+  view.refresh(map);
+  view.onRevealNode = (revealCanvas, revealed) => {
+    calls.push(["reveal", revealed.id]);
+    // The relayout moves the revealed topic from its stale hidden position.
+    revealed.x = 500;
+    revealed.y = 300;
+  };
+
+  view.selectOutlineNode("child");
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["reveal", "zoom"]);
+  assert.equal(calls[0][1], "child");
+  const bbox = calls[1][1];
+  assert.equal((bbox.minX + bbox.maxX) / 2, 600);
+  assert.equal((bbox.minY + bbox.maxY) / 2, 330);
+  assert.equal(map.selection.has(map.nodes.get("child")), true);
+});
+
 test("lib/outline-view exports OutlineView, OUTLINE_VIEW_TYPE, and outline helpers", () => {
   const outlineModule = require("../lib/outline-view.js");
   assert.equal(typeof outlineModule.OutlineView, "function");

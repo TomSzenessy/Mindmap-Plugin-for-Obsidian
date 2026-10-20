@@ -8,6 +8,7 @@ const {
 	separateBranch,
 	colorBranch,
 	toggleSubtreeCollapse,
+	expandCollapsedAncestors,
 	topicTitleFromText,
 	topicTitleFromNode,
 	safeTopicFilename,
@@ -482,3 +483,52 @@ test('syncs tomindmap-collapsed-node to both nodeEl and containerEl simultaneous
 });
 
 
+
+test('expands every collapsed ancestor of a hidden topic and nothing else', () => {
+	const make = (id, collapsed = false) => ({
+		id,
+		data: collapsed ? { collapsed: true } : {},
+		getData() { return this.data; },
+		setData(patch) { this.data = { ...this.data, ...patch }; }
+	});
+	const root = make('root', true);
+	const middle = make('middle', true);
+	const leaf = make('leaf');
+	const other = make('other', true);
+	const otherChild = make('other-child');
+	const nodes = [root, middle, leaf, other, otherChild];
+	const link = (from, to) => ({ from: { node: from }, to: { node: to } });
+	const canvas = {
+		nodes: new Map(nodes.map((node) => [node.id, node])),
+		edges: new Map([
+			['a', link(root, middle)],
+			['b', link(middle, leaf)],
+			['c', link(root, other)],
+			['d', link(other, otherChild)]
+		]),
+		data: { nodes: nodes.map((node) => ({ id: node.id })) }
+	};
+	let saves = 0;
+	canvas.requestSave = () => { saves += 1; };
+
+	const forest = buildForest(canvas);
+	assert.equal(expandCollapsedAncestors(canvas, forest, 'leaf'), 2);
+	assert.equal(root.data.collapsed, false);
+	assert.equal(middle.data.collapsed, false);
+	assert.equal(other.data.collapsed, true);
+	assert.equal(saves > 0, true);
+	const visible = buildForest(canvas, { includeHidden: false });
+	const visibleIds = [];
+	const stack = [...visible];
+	while (stack.length) {
+		const tree = stack.pop();
+		visibleIds.push(tree.canvasNode.id);
+		stack.push(...tree.children);
+	}
+	assert.equal(visibleIds.includes('leaf'), true);
+	assert.equal(visibleIds.includes('other-child'), false);
+
+	// A visible topic needs nothing expanded.
+	assert.equal(expandCollapsedAncestors(canvas, buildForest(canvas), 'leaf'), 0);
+	assert.equal(expandCollapsedAncestors(canvas, buildForest(canvas), 'missing'), 0);
+});

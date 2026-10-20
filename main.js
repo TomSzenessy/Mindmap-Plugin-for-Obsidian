@@ -52630,19 +52630,25 @@ var MindmapActions = (() => {
   	return count;
   }
 
-  function toggleSubtreeCollapse(canvas, forest, node) {
-  	if (!canvas || !node) return false;
+  function isNodeCollapsed(node) {
+  	let data = {};
+  	try {
+  		data = typeof node?.getData === 'function'
+  			? node.getData() || {}
+  			: node?.unknownData || {};
+  	} catch (_) {
+  		data = node?.unknownData || {};
+  	}
+  	return data.collapsed === true || node?.unknownData?.collapsed === true || node?.collapsed === true;
+  }
 
-  	const findFn = findTreeForNode;
-  	const descFn = getDescendants;
-  	const treeNode = findFn ? findFn(forest, node.id) : null;
-  	if (!treeNode || treeNode.children.length === 0) return false;
-
+  /**
+   * Persist one topic's collapse state on the live node and the Canvas data.
+   */
+  function writeCollapsedState(canvas, node, nextState) {
   	const data = typeof node.getData === 'function'
   		? node.getData() || {}
   		: node.unknownData || {};
-  	const currentlyCollapsed = data.collapsed === true || node.unknownData?.collapsed === true || node.collapsed === true;
-  	const nextState = !currentlyCollapsed;
 
   	node.collapsed = nextState;
   	node.unknownData = {
@@ -52668,6 +52674,37 @@ var MindmapActions = (() => {
   			canvas.requestSave();
   		} catch (_) {}
   	}
+  }
+
+  /**
+   * Expand every collapsed ancestor of a topic so it becomes visible again.
+   * Returns how many topics were expanded; the caller relayouts when it is
+   * non-zero, because revealed topics still sit at their stale positions.
+   */
+  function expandCollapsedAncestors(canvas, forest, nodeId) {
+  	if (!canvas || !nodeId) return 0;
+  	const treeNode = findTreeForNode(forest, nodeId);
+  	let expanded = 0;
+  	for (let ancestor = treeNode?.parent; ancestor; ancestor = ancestor.parent) {
+  		const node = ancestor.canvasNode;
+  		if (!node || !isNodeCollapsed(node)) continue;
+  		writeCollapsedState(canvas, node, false);
+  		expanded += 1;
+  	}
+  	if (expanded > 0 && canvas.nodes?.values) syncCollapsedVisibility(canvas);
+  	return expanded;
+  }
+
+  function toggleSubtreeCollapse(canvas, forest, node) {
+  	if (!canvas || !node) return false;
+
+  	const findFn = findTreeForNode;
+  	const descFn = getDescendants;
+  	const treeNode = findFn ? findFn(forest, node.id) : null;
+  	if (!treeNode || treeNode.children.length === 0) return false;
+
+  	const nextState = !isNodeCollapsed(node);
+  	writeCollapsedState(canvas, node, nextState);
 
   	if (canvas.nodes?.values) {
   		syncCollapsedVisibility(canvas);
@@ -52690,6 +52727,7 @@ var MindmapActions = (() => {
   	separateBranch,
   	colorBranch,
   	toggleSubtreeCollapse,
+  	expandCollapsedAncestors,
   	topicTitleFromText,
   	topicTitleFromNode,
   	safeTopicFilename,
@@ -53289,6 +53327,7 @@ var {
   		this.searchComponent = null;
   		this.zoomPadding = 0;
   		this.onForestLayout = null;
+  		this.onRevealNode = null;
   		this.model = null;
   		this.viewDisposers = [];
   		this.session = {
@@ -53686,6 +53725,9 @@ var {
   			this.allItemEls.get(id)?.setAttribute("aria-pressed", String(this.selectedRoots.has(tree)));
   			return;
   		}
+  		// A topic inside a collapsed branch is hidden at a stale position;
+  		// expand its ancestors first so the zoom lands on the laid-out topic.
+  		this.onRevealNode?.(canvas, node);
   		this.clearSelection();
   		this.setActiveItem(id);
   		if (this.canvasLeaf) this.app.workspace.setActiveLeaf(this.canvasLeaf, { focus: true });
@@ -56392,6 +56434,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					new import_obsidian5.Notice('Target node not found');
 					return;
 				}
+				this.revealCollapsedNode(canvas, node);
 				this.canvasApi.selectAndZoom(
 					canvas,
 					node,
@@ -56544,6 +56587,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.navSkipTracking = false;
 			return;
 		}
+		this.revealCollapsedNode(canvas, node);
 		this.canvasApi.selectAndZoom(
 			canvas,
 			node,
@@ -56568,6 +56612,7 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.navSkipTracking = false;
 			return;
 		}
+		this.revealCollapsedNode(canvas, node);
 		this.canvasApi.selectAndZoom(
 			canvas,
 			node,
@@ -57537,9 +57582,29 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 					this.layoutEngine.layoutForest(c, groupId);
 					this.updateGroupBounds(c);
 				};
+				view.onRevealNode = (c, node) => this.revealCollapsedNode(c, node);
 				view.refresh(canvas);
 			}
 		}
+	}
+	/**
+	 * Expand every collapsed ancestor of a topic and relayout, so navigation
+	 * to a topic inside a collapsed branch shows it in place instead of at its
+	 * stale hidden position. Returns whether anything was expanded.
+	 */
+	revealCollapsedNode(canvas, node) {
+		if (!canvas || !node) return false;
+		const expanded = MindmapActions.expandCollapsedAncestors(
+			canvas,
+			buildForest(canvas),
+			node.id
+		);
+		if (expanded === 0) return false;
+		if (this.isMindmapCanvas(canvas))
+			this.layoutEngine.layout(canvas, { preserveRootSides: true });
+		canvas.requestSave?.();
+		this.refreshOutline(canvas);
+		return true;
 	}
 	/**
 	 * Collect a node and all its descendants via BFS.

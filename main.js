@@ -50093,6 +50093,7 @@ var {
     Object.freeze({ key: "renameCanvasFromRootTopic", type: "boolean", default: true }),
     Object.freeze({ key: "wrapArrowNavigation", type: "boolean", default: true }),
     Object.freeze({ key: "navigationCrossAxisBuffer", type: "number", default: 40, minimum: 0, maximum: 2000 }),
+    Object.freeze({ key: "dropZonePadding", type: "number", default: 180, minimum: 0, maximum: 2000 }),
     Object.freeze({ key: "navigationZoomPadding", type: "number", default: 200, minimum: 0, maximum: 10000 }),
     Object.freeze({ key: "mouseNavigation", type: "boolean", default: false }),
     Object.freeze({ key: "exportMarkmapFrontmatter", type: "boolean", default: true }),
@@ -51597,9 +51598,7 @@ var {
     ATTACHMENT_DISTANCE,
     collectSubtreeIds,
     createMindMapEdge,
-    findNearestNodeOnBranch,
     getConnectionSides,
-    nodeToNodeDistance,
     reparentSubtree,
     snapshotEdgePayload
   } = typeof TreeDrag !== "undefined" ? TreeDrag : TreeDrag;
@@ -51704,7 +51703,8 @@ var {
     canvas,
     canvasApi,
     getForest,
-    getRootNode
+    getRootNode,
+    options = {}
   ) {
     let activeDraggedNode = null;
     let originalLinks = [];
@@ -51794,11 +51794,22 @@ var {
     }
 
     /**
+     * The drop-zone padding in canvas units, read once per frame so a settings
+     * change applies to the next drag frame.
+     */
+    function dropZonePadding() {
+      const padding = Number(options.getPadding?.());
+      return Number.isFinite(padding) && padding >= 0
+        ? padding
+        : ATTACHMENT_DISTANCE;
+    }
+
+    /**
      * The per-drag index: the dragged topic's subtree, and the attachable cards
      * of every map in one fixed preorder. Each card also records its nearest
-     * attachable ancestor and where its branch ends in that order, so a frame
-     * can measure every branch rectangle in one pass. All of it is built once
-     * when the gesture starts, so an animation frame only measures cards.
+     * attachable ancestor and its depth, so a frame can measure every branch
+     * rectangle in one pass. All of it is built once when the gesture starts,
+     * so an animation frame only measures cards.
      */
     function buildDragIndex(forest, draggedNode, excludedIds = null) {
       const descendantIds = collectSubtreeIds(forest, draggedNode?.id);
@@ -51811,6 +51822,7 @@ var {
       for (const root of forest) {
         const cards = [];
         const parents = [];
+        const depths = [];
         const stack = root ? [{ tree: root, parent: -1 }] : [];
         while (stack.length > 0) {
           const { tree, parent } = stack.pop();
@@ -51825,30 +51837,29 @@ var {
             own = cards.length;
             cards.push(card);
             parents.push(parent);
+            depths.push(parent >= 0 ? depths[parent] + 1 : 0);
           }
           const children = tree.children || [];
           for (let index = children.length - 1; index >= 0; index--)
             stack.push({ tree: children[index], parent: own });
         }
-        const ends = cards.map((_, index) => index);
-        for (let index = cards.length - 1; index >= 0; index--) {
-          const parent = parents[index];
-          if (parent >= 0 && ends[index] > ends[parent])
-            ends[parent] = ends[index];
-        }
-        maps.push({ root: root.canvasNode, cards, parents, ends });
+        maps.push({ root: root.canvasNode, cards, parents, depths });
       }
       return { descendantIds, maps };
     }
 
     /**
-     * Measure one map for the current frame: its whole rectangle, the closest
-     * card, and the branch drop zone - the smallest rectangle spanned by one
-     * topic and its descendants that contains the dragged card's center. A
-     * topic without children is its own card, so dropping onto it works too.
+     * Measure one map for the current frame.
+     *
+     * The map zone is the rectangle spanned by every card of the map - the area
+     * selecting the whole map covers - grown by the padding. Every other topic
+     * owns a branch zone: it starts at the topic's outer edge (left of a
+     * left-side topic, right of a right-side topic), reaches the outer edge of
+     * the map zone, and spans the topic's branch vertically, grown by the
+     * padding. The dragged card's center decides which zones it is in.
      */
-    function measureMap(map, draggedNode) {
-      const { cards, parents } = map;
+    function measureMap(map, draggedNode, padding) {
+      const { cards, parents, depths } = map;
       const count = cards.length;
       if (count === 0)
         return null;
@@ -51858,136 +51869,134 @@ var {
       const draggedBottom = draggedTop + draggedNode.height;
       const centerX = draggedLeft + draggedNode.width / 2;
       const centerY = draggedTop + draggedNode.height / 2;
-      const minX = new Float64Array(count);
-      const minY = new Float64Array(count);
-      const maxX = new Float64Array(count);
-      const maxY = new Float64Array(count);
+      const left = new Float64Array(count);
+      const right = new Float64Array(count);
+      const top = new Float64Array(count);
+      const bottom = new Float64Array(count);
       let nodeDistance = Infinity;
+      let onCard = -1;
       for (let index = 0; index < count; index++) {
         const node = cards[index];
-        const left = node.x;
-        const top = node.y;
-        const right = left + node.width;
-        const bottom = top + node.height;
-        minX[index] = left;
-        minY[index] = top;
-        maxX[index] = right;
-        maxY[index] = bottom;
+        left[index] = node.x;
+        top[index] = node.y;
+        right[index] = node.x + node.width;
+        bottom[index] = node.y + node.height;
         nodeDistance = Math.min(
           nodeDistance,
           Math.hypot(
-            Math.max(left - draggedRight, draggedLeft - right, 0),
-            Math.max(top - draggedBottom, draggedTop - bottom, 0)
+            Math.max(left[index] - draggedRight, draggedLeft - right[index], 0),
+            Math.max(top[index] - draggedBottom, draggedTop - bottom[index], 0)
           )
         );
+        if (
+          centerX >= left[index] && centerX <= right[index] &&
+          centerY >= top[index] && centerY <= bottom[index]
+        )
+          onCard = index;
       }
       // Children follow their parent in preorder, so a reverse pass folds every
-      // branch into its topic's rectangle.
-      let boxLeft = Infinity;
-      let boxTop = Infinity;
-      let boxRight = -Infinity;
-      let boxBottom = -Infinity;
+      // branch's vertical extent into its topic.
+      const branchTop = Float64Array.from(top);
+      const branchBottom = Float64Array.from(bottom);
+      let mapLeft = Infinity;
+      let mapTop = Infinity;
+      let mapRight = -Infinity;
+      let mapBottom = -Infinity;
       for (let index = count - 1; index >= 0; index--) {
+        if (left[index] < mapLeft) mapLeft = left[index];
+        if (right[index] > mapRight) mapRight = right[index];
+        if (branchTop[index] < mapTop) mapTop = branchTop[index];
+        if (branchBottom[index] > mapBottom) mapBottom = branchBottom[index];
         const parent = parents[index];
-        if (parent >= 0) {
-          if (minX[index] < minX[parent]) minX[parent] = minX[index];
-          if (minY[index] < minY[parent]) minY[parent] = minY[index];
-          if (maxX[index] > maxX[parent]) maxX[parent] = maxX[index];
-          if (maxY[index] > maxY[parent]) maxY[parent] = maxY[index];
-        } else {
-          if (minX[index] < boxLeft) boxLeft = minX[index];
-          if (minY[index] < boxTop) boxTop = minY[index];
-          if (maxX[index] > boxRight) boxRight = maxX[index];
-          if (maxY[index] > boxBottom) boxBottom = maxY[index];
-        }
+        if (parent < 0) continue;
+        if (branchTop[index] < branchTop[parent])
+          branchTop[parent] = branchTop[index];
+        if (branchBottom[index] > branchBottom[parent])
+          branchBottom[parent] = branchBottom[index];
       }
+      mapLeft -= padding;
+      mapTop -= padding;
+      mapRight += padding;
+      mapBottom += padding;
+      const inside =
+        centerX >= mapLeft && centerX <= mapRight &&
+        centerY >= mapTop && centerY <= mapBottom;
+
+      const rootIndex = cards.indexOf(map.root);
+      const rootCenterX = rootIndex >= 0
+        ? (left[rootIndex] + right[rootIndex]) / 2
+        : (mapLeft + mapRight) / 2;
       let zone = -1;
-      let zoneArea = Infinity;
-      for (let index = 0; index < count; index++) {
-        if (cards[index] === map.root)
-          continue;
-        if (
-          centerX < minX[index] || centerX > maxX[index] ||
-          centerY < minY[index] || centerY > maxY[index]
-        )
-          continue;
-        const area = (maxX[index] - minX[index]) * (maxY[index] - minY[index]);
-        // Ties go to the later card in preorder: the deeper branch.
-        if (area <= zoneArea) {
-          zone = index;
-          zoneArea = area;
+      let zoneDistance = Infinity;
+      if (inside) {
+        for (let index = 0; index < count; index++) {
+          if (index === rootIndex) continue;
+          const leftSide = (left[index] + right[index]) / 2 < rootCenterX;
+          if (
+            (leftSide
+              ? centerX < mapLeft || centerX > left[index]
+              : centerX < right[index] || centerX > mapRight) ||
+            centerY < branchTop[index] - padding ||
+            centerY > branchBottom[index] + padding
+          )
+            continue;
+          // The deepest zone wins; among zones of the same depth, the topic
+          // closest to the dragged card.
+          const distance = Math.hypot(
+            Math.max(left[index] - draggedRight, draggedLeft - right[index], 0),
+            Math.max(top[index] - draggedBottom, draggedTop - bottom[index], 0)
+          );
+          if (
+            zone < 0 ||
+            depths[index] > depths[zone] ||
+            depths[index] === depths[zone] && distance < zoneDistance
+          ) {
+            zone = index;
+            zoneDistance = distance;
+          }
         }
       }
-      const boxDistance = Math.hypot(
-        Math.max(boxLeft - draggedRight, draggedLeft - boxRight, 0),
-        Math.max(boxTop - draggedBottom, draggedTop - boxBottom, 0)
-      );
       return {
-        map,
         root: map.root,
         nodes: cards,
         nodeDistance,
-        boxDistance,
-        zone,
-        // The dragged card overlaps the rectangle spanned by every card of
-        // the map - the same area as selecting the whole map.
-        inside: boxDistance === 0
+        inside,
+        onCard,
+        zone
       };
     }
 
     function chooseAttachmentMap(draggedNode) {
+      const padding = dropZonePadding();
       const maps = dragIndex.maps
-        .map((map) => measureMap(map, draggedNode))
-        .filter(Boolean);
-
+        .map((map) => measureMap(map, draggedNode, padding))
+        .filter((map) => map?.inside);
+      if (maps.length === 0) return null;
       // Rank by the closest actual card, not by the map's rectangle. A floating
-      // card the cursor is sitting on must win over a large map whose bounding
-      // box merely contains the cursor; otherwise the preview sticks to the
-      // branch it came from until the whole map is left behind.
-      const candidates = maps.filter(
-        (map) => map.nodeDistance <= ATTACHMENT_DISTANCE || map.inside
-      );
-      if (candidates.length === 0) return null;
-      candidates.sort(
+      // card the cursor is sitting on must win over a large map whose zone
+      // merely contains the cursor; otherwise the preview sticks to the branch
+      // it came from until the whole map is left behind.
+      maps.sort(
         (a, b) =>
           a.nodeDistance - b.nodeDistance ||
-          b.nodes.length - a.nodes.length ||
-          a.boxDistance - b.boxDistance
+          b.nodes.length - a.nodes.length
       );
-      return candidates[0];
+      return maps[0];
     }
 
     /**
-     * The prospective parent, from most to least specific: inside a branch's
-     * rectangle, that branch's topic - unless a nearby card within that same
-     * branch is a closer fit; otherwise the nearby card; otherwise, anywhere
-     * inside the map's rectangle, the map's main topic.
+     * The prospective parent, from most to least specific: the topic the
+     * dragged card's center is on; the topic of the deepest branch zone it is
+     * in; otherwise the map's main topic.
      */
-    function chooseTarget(draggedNode, attachmentMap) {
+    function chooseTarget(attachmentMap) {
       if (!attachmentMap)
         return null;
-      const root = attachmentMap.root;
-      const nearest = attachmentMap.nodes.length === 1
-        ? attachmentMap.nodes[0]
-        : findNearestNodeOnBranch(
-          draggedNode,
-          attachmentMap.nodes,
-          root,
-          (rootId, targetId) => dragIndex.descendantIds.has(targetId),
-          ATTACHMENT_DISTANCE
-        );
-      const nearby =
-        nearest && nodeToNodeDistance(draggedNode, nearest) <= ATTACHMENT_DISTANCE
-          ? nearest
-          : null;
-      const zone = attachmentMap.zone;
-      if (zone >= 0) {
-        const nearbyIndex = nearby ? attachmentMap.nodes.indexOf(nearby) : -1;
-        return nearbyIndex >= zone && nearbyIndex <= attachmentMap.map.ends[zone]
-          ? nearby
-          : attachmentMap.nodes[zone];
-      }
-      return nearby || (attachmentMap.inside ? root : null);
+      if (attachmentMap.onCard >= 0)
+        return attachmentMap.nodes[attachmentMap.onCard];
+      if (attachmentMap.zone >= 0)
+        return attachmentMap.nodes[attachmentMap.zone];
+      return attachmentMap.root;
     }
 
     function updatePreview(draggedNode) {
@@ -51998,7 +52007,7 @@ var {
       if (activeDraggedNode?.id !== draggedNode.id)
         begin(draggedNode);
 
-      const targetNode = chooseTarget(draggedNode, chooseAttachmentMap(draggedNode));
+      const targetNode = chooseTarget(chooseAttachmentMap(draggedNode));
       const mainRootNode = targetNode
         ? getRootNode?.(targetNode) || targetNode
         : null;
@@ -52867,6 +52876,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 			defaultNodeHeight: ['Default node height', 'Height of newly created topics (px).'],
 			maxNodeHeight: ['Maximum auto height', 'Safety limit for exceptionally tall content (px).'],
 			navigationCrossAxisBuffer: ['Arrow corridor buffer', 'Extra tolerance around the straight navigation line.'],
+			dropZonePadding: ['Drop zone padding', 'How far a dragged topic can be outside a branch or map and still attach to it (px).'],
 			navigationZoomPadding: ['Navigation zoom padding', 'Extra space around a navigation target (px).'],
 			markmapColorFreezeLevel: ['Markmap color freeze level', 'Default value written to new Markmap exports (0–10).']
 		};
@@ -60930,7 +60940,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				cachedDragForest = buildForest(canvas);
 				return cachedDragForest;
 			},
-			getMainRootNode
+			getMainRootNode,
+			{ getPadding: () => this.settings?.dropZonePadding }
 		);
 
 		const onPointerMove = (event) => {

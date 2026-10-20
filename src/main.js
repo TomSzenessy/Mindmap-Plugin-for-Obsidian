@@ -329,6 +329,7 @@ var MindMapSettingTab = class extends import_obsidian3.PluginSettingTab {
 			defaultNodeHeight: ['Default node height', 'Height of newly created topics (px).'],
 			maxNodeHeight: ['Maximum auto height', 'Safety limit for exceptionally tall content (px).'],
 			navigationCrossAxisBuffer: ['Arrow corridor buffer', 'Extra tolerance around the straight navigation line.'],
+			dropZonePadding: ['Drop zone padding', 'How far a dragged topic can be outside a branch or map and still attach to it (px).'],
 			navigationZoomPadding: ['Navigation zoom padding', 'Extra space around a navigation target (px).'],
 			markmapColorFreezeLevel: ['Markmap color freeze level', 'Default value written to new Markmap exports (0–10).']
 		};
@@ -6931,7 +6932,8 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 				cachedDragForest = buildForest(canvas);
 				return cachedDragForest;
 			},
-			getMainRootNode
+			getMainRootNode,
+			{ getPadding: () => this.settings?.dropZonePadding }
 		);
 
 		const onPointerMove = (event) => {

@@ -6930,7 +6930,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.canvasApi,
 			() => {
 				cachedDragForest = buildForest(canvas);
-				return cachedDragForest;
+				// Topics inside a collapsed branch are invisible but keep their
+				// stored positions; they must never become drop targets or widen a
+				// branch's drop zone.
+				return buildForest(canvas, { includeHidden: false });
 			},
 			getMainRootNode,
 			{ getPadding: () => this.settings?.dropZonePadding }

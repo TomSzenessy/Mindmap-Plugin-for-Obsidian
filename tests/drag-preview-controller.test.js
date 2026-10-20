@@ -7,6 +7,7 @@ const {
   createDragAttachmentController,
   isPrimaryCardGesture
 } = require("../lib/drag-preview-controller.js");
+const { buildForest } = require("../lib/tree-model.js");
 const {
   ATTACHMENT_DISTANCE,
   isDescendant,
@@ -71,8 +72,8 @@ function referenceAttachmentTarget(draggedNode, forest) {
     const branchBottom = Math.max(...branch.map((member) => member.y + member.height)) + padding;
     const leftSide = card.x + card.width / 2 < rootCenterX;
     const inZone = (leftSide
-      ? center.x >= left && center.x <= card.x
-      : center.x >= card.x + card.width && center.x <= right) &&
+      ? center.x >= left && draggedNode.x + draggedNode.width <= card.x
+      : draggedNode.x >= card.x + card.width && center.x <= right) &&
       center.y >= branchTop && center.y <= branchBottom;
     if (!inZone) continue;
     const candidate = {
@@ -1063,7 +1064,7 @@ test("a branch zone starts at its topic's outer edge and reaches the map's edge"
   const { controller, fixture, targetAt } = leftSideMapFixture(180);
 
   // Between a child and its parent: the parent, not the child or main topic.
-  assert.equal(targetAt(1050, 700), "goals");
+  assert.equal(targetAt(1020, 640), "goals");
   // Beyond the child's outer edge: the child's branch.
   assert.equal(targetAt(800, 700), "further");
   // Beyond a leaf's outer edge, out to the map's edge: that leaf.
@@ -1076,10 +1077,65 @@ test("a branch zone starts at its topic's outer edge and reaches the map's edge"
   // Outside the padded map: detached.
   assert.equal(targetAt(1900, 330), null);
 
-  targetAt(1050, 700);
+  targetAt(1020, 640);
   const result = controller.commit(fixture.dragged);
   assert.equal(result.state, "attached");
   assert.equal(result.target.id, "goals");
+});
+
+test("a card still overlapping a topic's column belongs to the topic inward", () => {
+  const { targetAt } = leftSideMapFixture(180);
+  // The card spans 820-920 and overlaps further's column (880-1020): it is
+  // not yet beyond further's outer edge, so further's parent is the target.
+  assert.equal(targetAt(870, 600), "goals");
+  // Once the whole card is beyond further's outer edge, further's branch.
+  assert.equal(targetAt(820, 600), "further");
+});
+
+test("topics inside a collapsed branch are never drop targets", () => {
+  const fixture = dragFixture({ withOriginalParent: false });
+  const card = (id, x, y, extra = {}) => ({ id, x, y, width: 100, height: 60, ...extra });
+  const root = card("root", 0, 0);
+  const collapsed = card("collapsed", 300, 0, { unknownData: { collapsed: true } });
+  // A hidden child keeps a stale position far from its collapsed parent.
+  const hidden = card("hidden", -600, 400);
+  const visible = card("visible", -300, 0);
+  const nodes = [root, collapsed, hidden, visible, fixture.dragged];
+  const canvas = {
+    nodes: new Map(nodes.map((node) => [node.id, node])),
+    edges: new Map([
+      ["e1", { id: "e1", fromNode: "root", toNode: "collapsed" }],
+      ["e2", { id: "e2", fromNode: "collapsed", toNode: "hidden" }],
+      ["e3", { id: "e3", fromNode: "root", toNode: "visible" }]
+    ]),
+    requestFrame() {}
+  };
+  const controller = createDragAttachmentController(
+    canvas,
+    fixture.canvasApi,
+    () => buildForest(canvas, { includeHidden: false }),
+    () => root
+  );
+  controller.begin(fixture.dragged);
+  // Centered on the hidden card's stale position, which lies outside the
+  // visible map: neither a target nor part of the map's zone.
+  fixture.dragged.x = -600;
+  fixture.dragged.y = 400;
+  const preview = controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "detached");
+  assert.equal(preview.target, null);
+});
+
+test("the plugin feeds the drag controller only visible topics", () => {
+  const source = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "..", "src", "main.js"),
+    "utf8"
+  );
+  const wiring = source.slice(source.indexOf("createDragAttachmentController(\n"));
+  assert.match(
+    wiring.slice(0, 600),
+    /return buildForest\(canvas, \{ includeHidden: false \}\);/
+  );
 });
 
 test("overlapping zones of the same depth pick the closest topic", () => {

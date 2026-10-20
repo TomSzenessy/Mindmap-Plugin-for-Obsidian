@@ -51856,7 +51856,8 @@ var {
      * owns a branch zone: it starts at the topic's outer edge (left of a
      * left-side topic, right of a right-side topic), reaches the outer edge of
      * the map zone, and spans the topic's branch vertically, grown by the
-     * padding. The dragged card's center decides which zones it is in.
+     * padding. The dragged card is in a zone once it lies entirely beyond the
+     * topic's outer edge and its center is within the zone.
      */
     function measureMap(map, draggedNode, padding) {
       const { cards, parents, depths } = map;
@@ -51932,10 +51933,12 @@ var {
         for (let index = 0; index < count; index++) {
           if (index === rootIndex) continue;
           const leftSide = (left[index] + right[index]) / 2 < rootCenterX;
+          // The whole dragged card must be past the topic's outer edge: a card
+          // still overlapping the topic's column belongs to the topic inward.
           if (
             (leftSide
-              ? centerX < mapLeft || centerX > left[index]
-              : centerX < right[index] || centerX > mapRight) ||
+              ? centerX < mapLeft || draggedRight > left[index]
+              : draggedLeft < right[index] || centerX > mapRight) ||
             centerY < branchTop[index] - padding ||
             centerY > branchBottom[index] + padding
           )
@@ -60938,7 +60941,10 @@ var CanvasMindMapPlugin = class extends import_obsidian5.Plugin {
 			this.canvasApi,
 			() => {
 				cachedDragForest = buildForest(canvas);
-				return cachedDragForest;
+				// Topics inside a collapsed branch are invisible but keep their
+				// stored positions; they must never become drop targets or widen a
+				// branch's drop zone.
+				return buildForest(canvas, { includeHidden: false });
 			},
 			getMainRootNode,
 			{ getPadding: () => this.settings?.dropZonePadding }

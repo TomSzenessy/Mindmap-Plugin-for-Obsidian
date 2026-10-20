@@ -12,7 +12,7 @@ Updates arrive the same way: BRAT → check for updates.
 
 ## Controls on the phone
 
-Tap a topic to select it and a floating toolbar appears at the bottom: edit, add child, add sibling, more. Long-press a topic for the full menu (add parent, move up/down, delete branch or just the topic, copy link, collapse, color). Double-tap a topic to edit it. Drag a topic onto another to move it there — the whole branch follows. Dropping it anywhere inside a map's outline (the area selecting the whole map would cover) attaches it to that map's main topic when no other topic is nearer. No keybinds, no hidden gestures.
+Tap a topic to select it and a floating toolbar appears at the bottom: edit, add child, add sibling, more. Long-press a topic for the full menu (add parent, move up/down, delete branch or just the topic, copy link, collapse, color). Double-tap a topic to edit it. Drag a topic onto another to move it there — the whole branch follows. Every branch is its own drop zone: drop inside the rectangle a branch's topics span (the area selecting them would cover) and the topic attaches to that branch, the smallest matching branch winning; drop on a topic to make it a child of that topic; anywhere else inside the map's outline attaches to the main topic. No keybinds, no hidden gestures.
 
 On the computer nothing changes: Tab and Enter grow the map, arrows navigate, and every keybind keeps working. The touch toolbar is a setting away if you want it on or off on any device.
 

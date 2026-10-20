@@ -43,26 +43,65 @@ function referenceAttachmentTarget(draggedNode, forest) {
       !isDescendant(forest, draggedNode.id, card.id)
   );
   if (attachable.length === 0) return null;
+  const rectangle = (members) => ({
+    left: Math.min(...members.map((card) => card.x)),
+    top: Math.min(...members.map((card) => card.y)),
+    right: Math.max(...members.map((card) => card.x + card.width)),
+    bottom: Math.max(...members.map((card) => card.y + card.height))
+  });
+  const box = rectangle(attachable);
   const inside =
-    draggedNode.x <= Math.max(...attachable.map((card) => card.x + card.width)) &&
-    draggedNode.x + draggedNode.width >= Math.min(...attachable.map((card) => card.x)) &&
-    draggedNode.y <= Math.max(...attachable.map((card) => card.y + card.height)) &&
-    draggedNode.y + draggedNode.height >= Math.min(...attachable.map((card) => card.y));
-  const fallback = inside ? forest[0].canvasNode : null;
+    draggedNode.x <= box.right &&
+    draggedNode.x + draggedNode.width >= box.left &&
+    draggedNode.y <= box.bottom &&
+    draggedNode.y + draggedNode.height >= box.top;
+  const root = forest[0].canvasNode;
+  const center = {
+    x: draggedNode.x + draggedNode.width / 2,
+    y: draggedNode.y + draggedNode.height / 2
+  };
+  const branchOf = (card) => attachable.filter(
+    (member) => isDescendant(forest, card.id, member.id)
+  );
+  let zone = null;
+  let zoneArea = Infinity;
+  let zoneDepth = -1;
+  for (const card of attachable) {
+    if (card.id === root.id) continue;
+    const rect = rectangle(branchOf(card));
+    if (
+      center.x < rect.left || center.x > rect.right ||
+      center.y < rect.top || center.y > rect.bottom
+    ) continue;
+    const area = (rect.right - rect.left) * (rect.bottom - rect.top);
+    const depth = attachable.filter(
+      (other) => other.id !== card.id && isDescendant(forest, other.id, card.id)
+    ).length;
+    if (area < zoneArea || area === zoneArea && depth > zoneDepth) {
+      zone = card;
+      zoneArea = area;
+      zoneDepth = depth;
+    }
+  }
   const closest = Math.min(
     ...attachable.map((card) => nodeToNodeDistance(draggedNode, card))
   );
-  if (closest > ATTACHMENT_DISTANCE) return fallback;
-  if (attachable.length === 1) return attachable[0];
-  const target = findNearestNodeOnBranch(
-    draggedNode,
-    attachable,
-    forest[0].canvasNode,
-    (rootId, targetId) => isDescendant(forest, rootId, targetId)
-  );
-  return target && nodeToNodeDistance(draggedNode, target) <= ATTACHMENT_DISTANCE
-    ? target
-    : fallback;
+  if (closest > ATTACHMENT_DISTANCE && !inside) return null;
+  const nearest = attachable.length === 1
+    ? attachable[0]
+    : findNearestNodeOnBranch(
+      draggedNode,
+      attachable,
+      root,
+      (rootId, targetId) => isDescendant(forest, rootId, targetId)
+    );
+  const nearby =
+    nearest && nodeToNodeDistance(draggedNode, nearest) <= ATTACHMENT_DISTANCE
+      ? nearest
+      : null;
+  if (zone)
+    return nearby && isDescendant(forest, zone.id, nearby.id) ? nearby : zone;
+  return nearby || (inside ? root : null);
 }
 
 function seededRandom(seed) {
@@ -929,6 +968,60 @@ test("anywhere inside the map's rectangle attaches to the main topic", () => {
   const result = controller.commit(fixture.dragged);
   assert.equal(result.state, "attached");
   assert.equal(result.target.id, "main-root");
+});
+
+test("each branch's rectangle attaches to that branch's topic", () => {
+  const fixture = dragFixture({ withOriginalParent: false });
+  const card = (id, x, y) => ({ id, x, y, width: 100, height: 60 });
+  const root = card("main-root", 0, 0);
+  const upper = card("main-upper", 300, -300);
+  const upperTop = card("main-upper-top", 600, -500);
+  const upperBottom = card("main-upper-bottom", 600, -100);
+  const lower = card("main-lower", 300, 300);
+  const lowerTop = card("main-lower-top", 600, 300);
+  const lowerBottom = card("main-lower-bottom", 600, 700);
+  fixture.canvas.nodes = new Map(
+    [root, upper, upperTop, upperBottom, lower, lowerTop, lowerBottom, fixture.dragged]
+      .map((node) => [node.id, node])
+  );
+  const leaf = (node) => ({ canvasNode: node, children: [] });
+  const forest = [
+    {
+      canvasNode: root,
+      children: [
+        { canvasNode: upper, children: [leaf(upperTop), leaf(upperBottom)] },
+        { canvasNode: lower, children: [leaf(lowerTop), leaf(lowerBottom)] }
+      ]
+    },
+    leaf(fixture.dragged)
+  ];
+  const controller = createDragAttachmentController(
+    fixture.canvas,
+    fixture.canvasApi,
+    () => forest,
+    () => root
+  );
+  controller.begin(fixture.dragged);
+  const targetAt = (x, y) => {
+    fixture.dragged.x = x;
+    fixture.dragged.y = y;
+    return controller.updatePreview(fixture.dragged).target?.id ?? null;
+  };
+
+  // Between a branch's children, far from every card: that branch's topic.
+  assert.equal(targetAt(600, -300), "main-upper");
+  assert.equal(targetAt(600, 500), "main-lower");
+  // Centered over a topic: that topic.
+  assert.equal(targetAt(610, -490), "main-upper-top");
+  // Between branches, inside the whole map: the main topic.
+  assert.equal(targetAt(300, 0), "main-root");
+  // Outside the map and far from every card: detached.
+  assert.equal(targetAt(1400, 0), null);
+
+  targetAt(600, 500);
+  const result = controller.commit(fixture.dragged);
+  assert.equal(result.state, "attached");
+  assert.equal(result.target.id, "main-lower");
 });
 
 test("cancelling leaves the authored branch link exactly as it was", () => {

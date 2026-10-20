@@ -43,17 +43,26 @@ function referenceAttachmentTarget(draggedNode, forest) {
       !isDescendant(forest, draggedNode.id, card.id)
   );
   if (attachable.length === 0) return null;
+  const inside =
+    draggedNode.x <= Math.max(...attachable.map((card) => card.x + card.width)) &&
+    draggedNode.x + draggedNode.width >= Math.min(...attachable.map((card) => card.x)) &&
+    draggedNode.y <= Math.max(...attachable.map((card) => card.y + card.height)) &&
+    draggedNode.y + draggedNode.height >= Math.min(...attachable.map((card) => card.y));
+  const fallback = inside ? forest[0].canvasNode : null;
   const closest = Math.min(
     ...attachable.map((card) => nodeToNodeDistance(draggedNode, card))
   );
-  if (closest > ATTACHMENT_DISTANCE) return null;
+  if (closest > ATTACHMENT_DISTANCE) return fallback;
   if (attachable.length === 1) return attachable[0];
-  return findNearestNodeOnBranch(
+  const target = findNearestNodeOnBranch(
     draggedNode,
     attachable,
     forest[0].canvasNode,
     (rootId, targetId) => isDescendant(forest, rootId, targetId)
   );
+  return target && nodeToNodeDistance(draggedNode, target) <= ATTACHMENT_DISTANCE
+    ? target
+    : fallback;
 }
 
 function seededRandom(seed) {
@@ -875,6 +884,51 @@ test("a floating card the drag sits on wins over a large map's buffer", () => {
   const preview = controller.updatePreview(fixture.dragged);
   assert.equal(preview.state, "preview");
   assert.equal(preview.target.id, "floating");
+});
+
+test("anywhere inside the map's rectangle attaches to the main topic", () => {
+  const fixture = dragFixture({ withOriginalParent: false });
+  const mainRoot = { id: "main-root", x: 0, y: 0, width: 100, height: 60 };
+  const farTop = { id: "main-far-top", x: 1000, y: -1000, width: 100, height: 60 };
+  const farBottom = { id: "main-far-bottom", x: 1000, y: 1000, width: 100, height: 60 };
+  fixture.canvas.nodes = new Map(
+    [mainRoot, farTop, farBottom, fixture.dragged].map((node) => [node.id, node])
+  );
+  const forest = [
+    {
+      canvasNode: mainRoot,
+      children: [
+        { canvasNode: farTop, children: [] },
+        { canvasNode: farBottom, children: [] }
+      ]
+    },
+    { canvasNode: fixture.dragged, children: [] }
+  ];
+  const controller = createDragAttachmentController(
+    fixture.canvas,
+    fixture.canvasApi,
+    () => forest,
+    (node) => node.id.startsWith("main-") ? mainRoot : node
+  );
+  controller.begin(fixture.dragged);
+
+  // Far from every card, but inside the rectangle spanned by the whole map.
+  fixture.dragged.x = 600;
+  fixture.dragged.y = 400;
+  let preview = controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "preview");
+  assert.equal(preview.target.id, "main-root");
+
+  // Outside the rectangle and beyond the fixed distance it detaches.
+  fixture.dragged.x = 1400;
+  preview = controller.updatePreview(fixture.dragged);
+  assert.equal(preview.state, "detached");
+
+  fixture.dragged.x = 600;
+  controller.updatePreview(fixture.dragged);
+  const result = controller.commit(fixture.dragged);
+  assert.equal(result.state, "attached");
+  assert.equal(result.target.id, "main-root");
 });
 
 test("cancelling leaves the authored branch link exactly as it was", () => {

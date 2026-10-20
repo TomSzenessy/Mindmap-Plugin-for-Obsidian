@@ -51869,17 +51869,19 @@ var {
             nodes: cards,
             nodeDistance,
             boxDistance,
-            contains: boxDistance <= ATTACHMENT_DISTANCE
+            // The dragged card overlaps the rectangle spanned by every card of
+            // the map - the same area as selecting the whole map.
+            inside: boxDistance === 0
           };
         })
         .filter(Boolean);
 
-      // Rank by the closest actual card, not by the map's buffered rectangle.
-      // A floating card the cursor is sitting on must win over a large map whose
-      // bounding box merely reaches the cursor; otherwise the preview sticks to
-      // the branch it came from until the whole map is left behind.
+      // Rank by the closest actual card, not by the map's rectangle. A floating
+      // card the cursor is sitting on must win over a large map whose bounding
+      // box merely contains the cursor; otherwise the preview sticks to the
+      // branch it came from until the whole map is left behind.
       const candidates = maps.filter(
-        (map) => map.nodeDistance <= ATTACHMENT_DISTANCE
+        (map) => map.nodeDistance <= ATTACHMENT_DISTANCE || map.inside
       );
       if (candidates.length === 0) return null;
       candidates.sort(
@@ -51912,10 +51914,14 @@ var {
             ATTACHMENT_DISTANCE
           )
         : null;
+      // Anywhere inside the map's rectangle without a nearer card attaches to
+      // the map's main topic, so the root's drop area is the whole map.
       const targetNode =
         rayTarget && nodeToNodeDistance(draggedNode, rayTarget) <= ATTACHMENT_DISTANCE
           ? rayTarget
-          : null;
+          : attachmentMap?.inside
+            ? candidate
+            : null;
       const mainRootNode = targetNode
         ? getRootNode?.(targetNode) || targetNode
         : null;

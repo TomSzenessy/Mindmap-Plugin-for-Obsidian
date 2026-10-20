@@ -51943,16 +51943,19 @@ var {
             centerY > branchBottom[index] + padding
           )
             continue;
-          // The deepest zone wins; among zones of the same depth, the topic
-          // closest to the dragged card.
+          // Among the zones the card is in, the topic closest to the dragged
+          // card wins; depth only breaks exact ties. Padding lets a deeper
+          // branch's zone reach a neighbouring topic's row, so depth first
+          // would let that deeper branch steal the drop.
           const distance = Math.hypot(
             Math.max(left[index] - draggedRight, draggedLeft - right[index], 0),
             Math.max(top[index] - draggedBottom, draggedTop - bottom[index], 0)
           );
           if (
             zone < 0 ||
-            depths[index] > depths[zone] ||
-            depths[index] === depths[zone] && distance < zoneDistance
+            distance < zoneDistance - 0.0001 ||
+            Math.abs(distance - zoneDistance) <= 0.0001 &&
+              depths[index] > depths[zone]
           ) {
             zone = index;
             zoneDistance = distance;
@@ -51989,8 +51992,8 @@ var {
 
     /**
      * The prospective parent, from most to least specific: the topic the
-     * dragged card's center is on; the topic of the deepest branch zone it is
-     * in; otherwise the map's main topic.
+     * dragged card's center is on; the closest topic among the branch zones it
+     * is in; otherwise the map's main topic.
      */
     function chooseTarget(attachmentMap) {
       if (!attachmentMap)

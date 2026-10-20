@@ -83,8 +83,9 @@ function referenceAttachmentTarget(draggedNode, forest) {
     };
     if (
       !best ||
-      candidate.depth > best.depth ||
-      candidate.depth === best.depth && candidate.distance < best.distance
+      candidate.distance < best.distance - 0.0001 ||
+      Math.abs(candidate.distance - best.distance) <= 0.0001 &&
+        candidate.depth > best.depth
     )
       best = candidate;
   }
@@ -1145,6 +1146,47 @@ test("overlapping zones of the same depth pick the closest topic", () => {
   assert.equal(targetAt(1000, 960), "crypto");
   // Above crypto's padded branch only the goals zone remains.
   assert.equal(targetAt(1000, 790), "goals");
+});
+
+test("a deeper branch whose padded zone reaches a closer topic's row does not win", () => {
+  const fixture = dragFixture({ withOriginalParent: false });
+  const card = (id, x, y, width = 100, height = 60) => ({ id, x, y, width, height });
+  const root = card("root", 1000, 0);
+  const parent = card("parent", 700, 100);
+  const wideLeaf = card("wide-leaf", 200, 0, 480, 95);
+  const branch = card("branch", 500, 200);
+  const deeper = card("deeper", 290, 110, 180, 65);
+  fixture.canvas.nodes = new Map(
+    [root, parent, wideLeaf, branch, deeper, fixture.dragged].map((node) => [node.id, node])
+  );
+  const leaf = (node) => ({ canvasNode: node, children: [] });
+  const forest = [
+    {
+      canvasNode: root,
+      children: [
+        {
+          canvasNode: parent,
+          children: [leaf(wideLeaf), { canvasNode: branch, children: [leaf(deeper)] }]
+        }
+      ]
+    },
+    leaf(fixture.dragged)
+  ];
+  const controller = createDragAttachmentController(
+    fixture.canvas,
+    fixture.canvasApi,
+    () => forest,
+    () => root
+  );
+  controller.begin(fixture.dragged);
+  // Left of the wide leaf, on its row: inside both zones, the leaf is closer.
+  fixture.dragged.x = 80;
+  fixture.dragged.y = 10;
+  assert.equal(controller.updatePreview(fixture.dragged).target.id, "wide-leaf");
+  // Left of the deeper topic, on its row: the deeper topic is closer.
+  fixture.dragged.y = 160;
+  fixture.dragged.x = 150;
+  assert.equal(controller.updatePreview(fixture.dragged).target.id, "deeper");
 });
 
 test("the drop zone padding setting grows and shrinks every zone", () => {
